@@ -1,0 +1,9 @@
+runpod
+torch
+diffusers
+transformers
+accelerate
+opencv-python-headless
+numpy
+Pillow
+
