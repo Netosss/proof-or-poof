@@ -38,6 +38,12 @@ RUN apt-get update && apt-get install -y \
 # Copy only the installed packages from the builder stage
 COPY --from=builder /root/.local /root/.local
 
+# Install runtime-only system dependencies + git
+RUN apt-get update && apt-get install -y \
+    git \
+    libsm6 libxext6 libgl1 libglib2.0-0 libssl3 curl \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN git submodule update --init --recursive
 
 # Copy the application code
