@@ -1,0 +1,3 @@
+[submodule "third_party/c2pa-python"]
+	path = third_party/c2pa-python
+	url = https://github.com/contentauth/c2pa-python.git
