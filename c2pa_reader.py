@@ -1,12 +1,6 @@
 import json
+import c2pa
 from typing import Optional, Dict, Any
-
-# Simple import: the Dockerfile handles the installation from the vendored folder
-try:
-    import c2pa
-except ImportError as e:
-    print(f"C2PA Import Error: {e}")
-    raise
 
 def get_c2pa_manifest(file_path: str) -> Optional[Dict[str, Any]]:
     """
