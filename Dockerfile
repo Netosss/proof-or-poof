@@ -27,5 +27,5 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY . .
 
 # Bind to the dynamic $PORT provided by Railway
-# Using the exec form with sh -c to ensure environment variable expansion
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# We run the script directly, which now handles the PORT environment variable
+CMD ["python", "app/main.py"]
