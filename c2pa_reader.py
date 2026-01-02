@@ -19,3 +19,4 @@ def get_c2pa_manifest(file_path: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+

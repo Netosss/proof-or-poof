@@ -72,3 +72,4 @@ async def run_video_removal(video_path: str) -> Dict[str, Any]:
     except Exception as e:
         return {"error": str(e)}
 
+
