@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y \
     libsm6 \
     libxext6 \
     libgl1 \
+    libglib2.0-0 \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
@@ -21,4 +22,5 @@ COPY . .
 ENV PYTHONPATH=/app
 
 # Bind to the dynamic $PORT provided by Railway
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# We use 'app.main:app' and run from the root directory
+CMD ["sh", "-c", "python3 -m uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
