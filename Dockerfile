@@ -27,5 +27,5 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY . .
 
 # Bind to the dynamic $PORT provided by Railway
-# We use the shell format to ensure $PORT is correctly evaluated
-CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}
+# Using the exec form with sh -c to ensure environment variable expansion
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
