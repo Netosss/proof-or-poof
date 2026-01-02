@@ -9,6 +9,10 @@ from app.runpod_client import run_image_removal, run_video_removal
 
 app = FastAPI(title="AI Provenance & Cleansing API")
 
+# Print to logs to confirm startup
+print("Starting AI Provenance & Cleansing API...")
+print(f"PYTHONPATH: {os.getenv('PYTHONPATH')}")
+
 # Add CORS Middleware for production
 app.add_middleware(
     CORSMiddleware,
