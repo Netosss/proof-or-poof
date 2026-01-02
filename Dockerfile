@@ -38,6 +38,8 @@ RUN apt-get update && apt-get install -y \
 # Copy only the installed packages from the builder stage
 COPY --from=builder /root/.local /root/.local
 
+RUN git submodule update --init --recursive
+
 # Copy the application code
 COPY . .
 
