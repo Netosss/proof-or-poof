@@ -1,1 +1,8 @@
+fastapi
+uvicorn
+python-multipart
+aiofiles
+pydantic
 runpod
+python-dotenv
+opencv-python-headless
