@@ -1,5 +1,5 @@
-import c2pa
 import json
+import c2pa
 from typing import Optional, Dict, Any
 
 def get_c2pa_manifest(file_path: str) -> Optional[Dict[str, Any]]:
@@ -17,5 +17,3 @@ def get_c2pa_manifest(file_path: str) -> Optional[Dict[str, Any]]:
         # If no manifest is found or error occurs, return None
         pass
     return None
-
-
