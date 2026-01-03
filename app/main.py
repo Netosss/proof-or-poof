@@ -1,8 +1,13 @@
 import os
 import shutil
 import tempfile
+import logging
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 from app.detector import detect_ai_media
 from app.schemas import DetectionResponse
@@ -11,8 +16,8 @@ from app.runpod_client import run_image_removal, run_video_removal
 app = FastAPI(title="AI Provenance & Cleansing API")
 
 # ---- Startup logs (good for Railway) ----
-print("Starting AI Provenance & Cleansing API...")
-print(f"PYTHONPATH: {os.getenv('PYTHONPATH')}")
+logger.info("Starting AI Provenance & Cleansing API...")
+logger.info(f"PYTHONPATH: {os.getenv('PYTHONPATH')}")
 
 # ---- CORS (lock this down later) ----
 app.add_middleware(
@@ -35,6 +40,7 @@ async def detect(file: UploadFile = File(...)):
     Cheap detection only (C2PA metadata).
     No GPU, no RunPod.
     """
+    logger.info(f"--- Incoming detection request: {file.filename} ---")
     suffix = os.path.splitext(file.filename)[1].lower()
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
@@ -42,7 +48,9 @@ async def detect(file: UploadFile = File(...)):
         temp_path = tmp_file.name
 
     try:
-        return await detect_ai_media(temp_path)
+        result = await detect_ai_media(temp_path)
+        logger.info(f"Result for {file.filename}: {result}")
+        return result
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
