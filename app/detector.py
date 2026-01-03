@@ -2,14 +2,9 @@ import logging
 import cv2
 import numpy as np
 from app.c2pa_reader import get_c2pa_manifest
-from transformers import pipeline
-from PIL import Image
+from app.runpod_client import run_deep_forensics
 
 logger = logging.getLogger(__name__)
-
-# --- Layer 2: Deep Learning & Math Initialization ---
-# Lazy loading deep_detector to save RAM on startup (especially for Railway)
-deep_detector = None
 
 def get_fft_score(image_path: str) -> float:
     """
@@ -30,40 +25,12 @@ def get_fft_score(image_path: str) -> float:
         logger.error(f"Error in FFT analysis: {e}")
         return 0.0
 
-def get_deep_forensic_score(image_path: str) -> float:
-    """
-    Uses a Deep Learning model to find textures AI models leave behind.
-    Specifically trained to catch hyper-realistic images that math alone misses.
-    """
-    global deep_detector
-    if deep_detector is None:
-        try:
-            logger.info("Lazy loading Deep Learning Forensic Model (SigLIP)...")
-            deep_detector = pipeline("image-classification", model="Ateeqq/ai-vs-human-image-detector")
-        except Exception as e:
-            logger.error(f"Failed to load Deep Learning model: {e}")
-            return 0.0
-
-    try:
-        img = Image.open(image_path).convert("RGB")
-        results = deep_detector(img)
-        logger.info(f"Deep detector results: {results}")
-        
-        # The model returns labels like 'ai' and 'hum'
-        for res in results:
-            label = res['label'].lower()
-            if label == 'ai':
-                return float(res['score'])
-        return 0.0
-    except Exception as e:
-        logger.error(f"Deep Scan Error: {e}")
-        return 0.0
-
 async def detect_ai_media(file_path: str) -> dict:
     """
     Consensus Engine for AI detection.
-    Layer 1: C2PA Metadata (Source of Truth)
-    Layer 2: Forensic Analysis (Deep Learning + FFT Math)
+    Layer 1: C2PA Metadata (Source of Truth) - Local
+    Layer 2: FFT Math (Local)
+    Layer 3: Deep Forensic Analysis (Offloaded to RunPod GPU)
     """
     
     # --- Layer 1: Metadata Check (C2PA) ---
@@ -127,7 +94,7 @@ async def detect_ai_media(file_path: str) -> dict:
                 "description": "Cryptographic signature found. Verified as non-generative content (e.g., camera capture)."
             }
 
-    # --- EARLY EXIT: If Layer 1 is 100% Verified AI, skip expensive forensics ---
+    # --- EARLY EXIT: If Layer 1 is 100% Verified AI, skip RunPod ---
     if is_verified_ai:
         return {
             "summary": "Verified AI",
@@ -142,30 +109,27 @@ async def detect_ai_media(file_path: str) -> dict:
             }
         }
 
-    # --- Layer 2: Deep Forensic Analysis ---
-    # We combine Deep Learning (SigLIP) with FFT Math patterns
-    deep_score = get_deep_forensic_score(file_path)
+    # --- Layer 2 & 3: Local FFT + Offloaded Deep Forensic ---
+    # FFT is instant on Railway
+    fft_score = get_fft_score(file_path)
     
-    # --- OPTIMIZATION: If Deep Learning is extremely certain, we can stop here ---
-    if deep_score > 0.99:
-        forensic_probability = deep_score
-        fft_score = 0.0 # Not needed for the score
-        signals = ["Deep Learning identifies generative AI textures with extreme confidence"]
-    else:
-        fft_score = get_fft_score(file_path)
-        # Final forensic probability is a weighted average favoring Deep Learning
-        forensic_probability = (deep_score * 0.85) + (fft_score * 0.15)
-        signals = []
-        if deep_score > 0.8:
-            signals.append("Deep Learning identifies generative AI textures")
-        if fft_score > 0.5:
-            signals.append("Artificial frequency patterns detected (FFT)")
-
+    # SigLIP is offloaded to RunPod GPU (approx 1-2 seconds)
+    logger.info("Offloading Deep Forensic scan to RunPod GPU...")
+    deep_score = await run_deep_forensics(file_path)
+    
+    # Final forensic probability
+    forensic_probability = (deep_score * 0.85) + (fft_score * 0.15)
+    
     l2_data = {
         "status": "not_detected",
         "probability": round(forensic_probability, 4),
-        "signals": signals
+        "signals": []
     }
+    
+    if deep_score > 0.8:
+        l2_data["signals"].append("Deep Learning identifies generative AI textures")
+    if fft_score > 0.5:
+        l2_data["signals"].append("Artificial frequency patterns detected (FFT)")
     
     if forensic_probability > 0.7:
         l2_data["status"] = "detected"
@@ -185,7 +149,7 @@ async def detect_ai_media(file_path: str) -> dict:
         summary = "Verified Human"
         confidence_score = 1.0
     else:
-        # FALLBACK: Use Forensic Layer (SigLIP + FFT)
+        # FALLBACK: Use Forensic Layer
         if forensic_probability > 0.8:
             summary = "Likely AI (Forensic Match)"
         elif forensic_probability > 0.5:

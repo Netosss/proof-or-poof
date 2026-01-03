@@ -36,6 +36,36 @@ async def run_image_removal(image_path: str) -> Dict[str, Any]:
     except Exception as e:
         return {"error": str(e)}
 
+async def run_deep_forensics(image_path: str) -> float:
+    """
+    Offloads the expensive SigLIP forensic scan to a RunPod GPU worker.
+    Returns the AI score (0.0 to 1.0).
+    """
+    if not ENDPOINT_ID:
+        print("Error: RUNPOD_ENDPOINT_ID not configured")
+        return 0.0
+
+    try:
+        endpoint = runpod.Endpoint(ENDPOINT_ID)
+        
+        with open(image_path, "rb") as image_file:
+            image_base64 = base64.b64encode(image_file.read()).decode("utf-8")
+
+        # Use run_sync for a fast 1-2 second GPU scan
+        job_result = endpoint.run_sync({
+            "image": image_base64,
+            "task": "deep_forensic"
+        }, timeout=30)
+
+        if "ai_score" in job_result:
+            return float(job_result["ai_score"])
+        
+        print(f"RunPod Error: {job_result.get('error', 'Unknown error')}")
+        return 0.0
+    except Exception as e:
+        print(f"Failed to call RunPod: {e}")
+        return 0.0
+
 async def run_video_removal(video_path: str) -> Dict[str, Any]:
     """
     Calls RunPod Serverless asynchronously and polls for video cleansing.
@@ -71,4 +101,5 @@ async def run_video_removal(video_path: str) -> Dict[str, Any]:
             
     except Exception as e:
         return {"error": str(e)}
+
 
