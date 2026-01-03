@@ -27,4 +27,5 @@ COPY . .
 RUN touch app/__init__.py
 
 # Run your app
-CMD ["python", "app/main.py"]
+# Shell form (no brackets) allows the $PORT variable to be expanded automatically on Railway
+CMD uvicorn app.main:app --host 0.0.0.0 --port $PORT
