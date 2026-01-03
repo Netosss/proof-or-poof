@@ -8,7 +8,5 @@ runpod
 python-dotenv
 opencv-python-headless
 transformers
-torch
-torchvision
 Pillow
 numpy
