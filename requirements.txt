@@ -8,8 +8,7 @@ runpod
 python-dotenv
 opencv-python-headless
 transformers
---find-links https://download.pytorch.org/whl/cpu
-torch==2.1.0+cpu
-torchvision==0.16.0+cpu
+torch
+torchvision
 Pillow
 numpy
