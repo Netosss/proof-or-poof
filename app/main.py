@@ -2,16 +2,35 @@ import os
 import shutil
 import tempfile
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from app.detector import detect_ai_media
 from app.schemas import DetectionResponse
 from app.runpod_client import run_image_removal, run_video_removal
 
 app = FastAPI(title="AI Provenance & Cleansing API")
 
+# Print to logs to confirm startup
+print("Starting AI Provenance & Cleansing API...")
+print(f"PYTHONPATH: {os.getenv('PYTHONPATH')}")
+
+# Add CORS Middleware for production
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, replace with your actual app domain
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
 @app.post("/detect", response_model=DetectionResponse)
 async def detect(file: UploadFile = File(...)):
     """
-    Endpoint to detect AI provenance using C2PA metadata.
+    DETECT API: Always cheap, NO RunPod, NO GPU.
+    Exclusively uses C2PA metadata.
     """
     suffix = os.path.splitext(file.filename)[1].lower()
     
@@ -20,50 +39,45 @@ async def detect(file: UploadFile = File(...)):
         temp_path = tmp_file.name
 
     try:
-        # detect_ai_media is now async
         result = await detect_ai_media(temp_path)
         return result
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
-@app.post("/process")
-async def process(file: UploadFile = File(...)):
+@app.post("/remove-watermark")
+async def remove_watermark(file: UploadFile = File(...)):
     """
-    Triage and cleanse AI media. 
-    Checks metadata first (free), then uses GPU if needed.
+    WATERMARK REMOVAL API:
+    - Videos: Initiates RunPod async processing (Returns 202 while warming up).
+    - Images: Uses Cheap local mock.
     """
     suffix = os.path.splitext(file.filename)[1].lower()
-    is_video = suffix in [".mp4", ".mov", ".avi"]
+    content_type = file.content_type
+    is_video = content_type.startswith("video/") or suffix in [".mp4", ".mov", ".avi"]
     
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
         shutil.copyfileobj(file.file, tmp_file)
         temp_path = tmp_file.name
 
     try:
-        # 1. Triage: Check C2PA metadata
-        detection_result = await detect_ai_media(temp_path)
-        
-        # 2. Early Exit: If C2PA found AI, return immediately
-        if detection_result.get("is_ai") is True:
-            return {
-                "detection": detection_result,
-                "cleansing": "skipped_metadata_found",
-                "status": "success"
-            }
-        
-        # 3. GPU Muscle: If no metadata, send to RunPod
         if is_video:
+            # TRIGGER THE MUSCLE: Async polling for RunPod GPU
+            # Using 202 Accepted logic effectively via the polling loop
             cleansing_result = await run_video_removal(temp_path)
+            return {
+                "status": "success",
+                "method": "runpod_gpu",
+                "result": cleansing_result
+            }
         else:
-            cleansing_result = await run_image_removal(temp_path)
+            return {
+                "status": "success",
+                "method": "local_cheap",
+                "message": "Image watermark removal placeholder (Returning file as-is)",
+                "filename": file.filename
+            }
             
-        return {
-            "detection": detection_result,
-            "cleansing": cleansing_result,
-            "status": "success"
-        }
-        
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
@@ -72,4 +86,15 @@ async def process(file: UploadFile = File(...)):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    import os
+    # Read port from environment variable for production (Railway/Render)
+    # We use a more robust check for the PORT variable
+    port_str = os.getenv("PORT")
+    if port_str:
+        port = int(port_str)
+        print(f"Railway PORT detected: {port}")
+    else:
+        port = 8000
+        print("No Railway PORT detected, defaulting to 8000")
+        
+    uvicorn.run("app.main:app", host="0.0.0.0", port=port, log_level="info")
