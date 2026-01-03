@@ -6,22 +6,16 @@ ENV PYTHONPATH=/app
 
 WORKDIR /app
 
-# Install system dependencies (including OpenCV requirements)
+# Install system dependencies (OpenCV)
 RUN apt-get update && apt-get install -y \
     libgl1 \
     libglib2.0-0 \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install them
+# Copy requirements and install
 COPY requirements.txt .
-
-# 1. Upgrade pip
-# 2. Install CPU-only Torch & Torchvision specifically
-# 3. Install the rest of the requirements
-# 4. Clean up cache to keep image small
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
     pip install --no-cache-dir -r requirements.txt && \
     rm -rf /root/.cache/pip
 

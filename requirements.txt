@@ -7,6 +7,5 @@ pydantic
 runpod
 python-dotenv
 opencv-python-headless
-transformers
 Pillow
 numpy
