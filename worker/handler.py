@@ -41,6 +41,8 @@ try:
         "image-classification", 
         model="Ateeqq/ai-vs-human-image-detector-2",
         device=device,
+        torch_dtype=torch.float16,        # Optimization from SigLIP2 docs
+        model_kwargs={"attn_implementation": "sdpa"}, # Faster attention
         trust_remote_code=True
     )
     logger.info("SigLIP2 model loaded successfully!")
