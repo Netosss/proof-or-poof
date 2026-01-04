@@ -36,15 +36,16 @@ worker_cache = WorkerLRUCache(capacity=500)
 # ---------------- Load SigLIP2 ----------------
 detector = None
 try:
-    logger.info("Loading SigLIP2 NaFlex model (google/siglip2-base-patch16-naflex)...")
+    logger.info("Loading Fine-tuned SigLIP2 model (Ateeqq/ai-vs-human-image-detector-2)...")
+    # This is the expert model trained specifically to catch AI textures
     detector = pipeline(
-        task="zero-shot-image-classification",
-        model="google/siglip2-base-patch16-naflex",
+        "image-classification",
+        model="Ateeqq/ai-vs-human-image-detector-2",
         device=device,
         torch_dtype=torch.float16,
         trust_remote_code=True
     )
-    logger.info("SigLIP2 NaFlex loaded successfully!")
+    logger.info("SigLIP2 model loaded successfully!")
 except Exception as e:
     logger.error(f"CRITICAL: Failed to load SigLIP2: {e}", exc_info=True)
     detector = None
@@ -123,24 +124,15 @@ def handler(job):
             logger.warning(f"Metadata extraction failed: {e}")
 
         # ---------------- SigLIP2 ----------------
-        # Using descriptive labels from the documentation for better zero-shot accuracy
-        candidate_labels = [
-            "a natural real-world photograph with camera noise",
-            "a synthetic AI-generated image with smooth generative textures"
-        ]
-        results = detector(img, candidate_labels=candidate_labels)
+        # Use the fine-tuned binary classifier (AI vs Human)
+        results = detector(img)
         
-        # Parse results correctly
+        # Parse results (Expected labels: 'AI' and 'Human')
         ai_score = 0.0
-        if isinstance(results, dict) and "labels" in results and "scores" in results:
-            for label, score in zip(results["labels"], results["scores"]):
-                if "synthetic" in label.lower():
-                    ai_score = float(score)
-        elif isinstance(results, list):
-            for res in results:
-                if "synthetic" in res.get("label", "").lower():
-                    ai_score = float(res.get("score", 0.0))
-
+        for res in results:
+            if res['label'].lower() == 'ai':
+                ai_score = float(res['score'])
+        
         # ---------------- Weighted Combination ----------------
         # Consensus: SigLIP2 (80%) + Normalized FFT (20%)
         final_score = (ai_score * 0.8) + (normalized_fft_score * 0.2)
