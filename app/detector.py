@@ -55,35 +55,12 @@ def get_exif_data(file_path: str) -> dict:
         return {}
 
 def _run_fft_sync(image_path: str) -> float:
-    """Synchronous FFT math calculation with tuned sensitivity."""
-    try:
-        img = cv2.imread(image_path, 0)
-        if img is None:
-            return 0.0
-        
-        # Resize large images for consistency
-        h, w = img.shape
-        if h > 1024 or w > 1024:
-            img = cv2.resize(img, (1024, 1024))
-
-        dft = np.fft.fft2(img)
-        dft_shift = np.fft.fftshift(dft)
-        magnitude_spectrum = 20 * np.log(np.abs(dft_shift) + 1e-9)
-        mean_val = np.mean(magnitude_spectrum)
-        
-        # Strictness: 2.0x mean
-        peaks = np.sum(magnitude_spectrum > (mean_val * 2.0))
-        
-        # Normalized score
-        score = min(peaks / 10000, 1.0)
-        return float(score)
-    except Exception as e:
-        logger.error(f"Error in FFT analysis: {e}")
-        return 0.0
+    # Deprecated: FFT now handled by RunPod worker for consensus
+    return 0.0
 
 async def get_fft_score(image_path: str) -> float:
-    """Offloads CPU-heavy FFT math to a background thread."""
-    return await asyncio.to_thread(_run_fft_sync, image_path)
+    # Deprecated: FFT now handled by RunPod worker for consensus
+    return 0.0
 
 async def detect_ai_media(file_path: str) -> dict:
     """
@@ -185,29 +162,20 @@ async def detect_ai_media(file_path: str) -> dict:
             }
         }
 
-    # --- 3️⃣ LAYER 3: Forensic Fallback (FFT + SigLIP2 GPU) ---
-    # Apply -20% Human Bias because C2PA is missing
-    human_benefit_of_doubt = -0.20
-    
-    # FFT Check
-    fft_score = await get_fft_score(file_path)
+    # --- 3️⃣ LAYER 3: Forensic Fallback (SigLIP2 + Worker-side Consensus) ---
+    # We no longer apply a local bias here because the RunPod worker 
+    # now performs its own consensus (SigLIP2 + FFT + High-Res Bias).
     
     # Deep Forensic (SigLIP2 on RunPod)
     img_hash = get_image_hash(file_path)
     cached_score = forensic_cache.get(img_hash)
     if cached_score is not None:
-        deep_score = cached_score
+        forensic_probability = cached_score
     else:
         logger.info(f"Ambiguous Pre-filter ({pre_filter_human_score}). Running GPU Scan...")
-        deep_score = await run_deep_forensics(file_path, width, height)
-        forensic_cache.put(img_hash, deep_score)
-    
-    # Calculate Forensic Probability
-    # Weights: Deep Score (97%), FFT (3%)
-    forensic_probability = (deep_score * 0.97) + (fft_score * 0.03)
-    
-    # Apply the Human Bias penalty for missing metadata
-    forensic_probability = max(0.0, min(1.0, forensic_probability + human_benefit_of_doubt))
+        # Get the final consensus score from the worker
+        forensic_probability = await run_deep_forensics(file_path, width, height)
+        forensic_cache.put(img_hash, forensic_probability)
     
     l2_data = {
         "status": "detected" if forensic_probability > 0.85 else "suspicious" if forensic_probability > 0.5 else "not_detected",
@@ -215,9 +183,9 @@ async def detect_ai_media(file_path: str) -> dict:
         "signals": []
     }
     
-    if deep_score > 0.85: l2_data["signals"].append("Deep Learning identifies generative AI textures")
-    if fft_score > 0.7: l2_data["signals"].append("Artificial frequency patterns detected (FFT)")
-    l2_data["signals"].append("Missing metadata (Benefit of the doubt applied)")
+    if forensic_probability > 0.85: l2_data["signals"].append("Deep Learning identifies generative AI textures")
+    if forensic_probability > 0.5: l2_data["signals"].append("Pixel forensics suggest artificial origin")
+    l2_data["signals"].append("Multi-layered consensus applied (SigLIP2 + FFT)")
 
     # --- Verdict Logic ---
     if forensic_probability > 0.92: 
