@@ -27,6 +27,10 @@ app = FastAPI(title="AI Provenance & Cleansing API")
 
 USAGE_LOG = "usage_log.csv"
 
+# ---- Pricing Constants (USD per second) ----
+GPU_RATE_PER_SEC = 0.0019  # RunPod A5000/L4 rate
+CPU_RATE_PER_SEC = 0.0001  # Estimated Railway CPU rate
+
 def log_usage(filename: str, filesize: int, method: str, cost_usd: float, gpu_seconds: float = 0, cpu_seconds: float = 0):
     """Append a row to the usage log."""
     file_exists = os.path.exists(USAGE_LOG)
@@ -125,8 +129,8 @@ async def ws_usage(websocket: WebSocket):
 @app.post("/detect", response_model=DetectionResponse)
 async def detect(file: UploadFile = File(...)):
     """
-    Cheap detection only (C2PA metadata).
-    No GPU, no RunPod.
+    Layer 1: Metadata (Railway CPU)
+    Layer 2: Forensics (RunPod GPU)
     """
     logger.info(f"--- Incoming detection request: {file.filename} ---")
     suffix = os.path.splitext(file.filename)[1].lower()
@@ -144,13 +148,24 @@ async def detect(file: UploadFile = File(...)):
         result = await detect_ai_media(temp_path)
         end_time = time.time()
         
-        cpu_seconds = end_time - start_time
-        cpu_cost = cpu_seconds * 0.0001 # Rough estimate for Railway CPU
+        duration = end_time - start_time
         
+        # Check if RunPod GPU was triggered for Layer 2
+        gpu_used = result.get("layers", {}).get("layer2_forensics", {}).get("status") != "skipped"
+        
+        if gpu_used:
+            cost = duration * GPU_RATE_PER_SEC
+            method = "detect_with_gpu"
+            gpu_sec = duration
+            cpu_sec = 0
+        else:
+            cost = duration * CPU_RATE_PER_SEC
+            method = "detect_metadata_only"
+            gpu_sec = 0
+            cpu_sec = duration
+            
         logger.info(f"Result for {file.filename}: {result}")
-        
-        # Log usage
-        log_usage(file.filename, filesize, "detect", cpu_cost, cpu_seconds=cpu_seconds)
+        log_usage(file.filename, filesize, method, cost, gpu_seconds=gpu_sec, cpu_seconds=cpu_sec)
         
         return result
     finally:
@@ -182,26 +197,31 @@ async def remove_watermark(file: UploadFile = File(...)):
             result = await run_video_removal(temp_path)
             end_time = time.time()
             
-            gpu_seconds = end_time - start_time
-            gpu_cost = gpu_seconds * 0.0019 # USD based on $0.0019/sec
+            duration = end_time - start_time
+            cost = duration * GPU_RATE_PER_SEC
             
-            log_usage(file.filename, filesize, "remove-watermark-video", gpu_cost, gpu_seconds=gpu_seconds)
+            log_usage(file.filename, filesize, "remove-watermark-video", cost, gpu_seconds=duration)
             
             return {
                 "status": "success",
                 "method": "runpod_gpu",
-                "cost_usd": round(gpu_cost, 5),
-                "gpu_seconds": round(gpu_seconds, 2),
+                "cost_usd": round(cost, 5),
+                "gpu_seconds": round(duration, 2),
                 "result": result,
             }
 
         # Local cheap for images
-        cost = 0.0
-        log_usage(file.filename, filesize, "remove-watermark-image", cost)
+        start_time = time.time()
+        # (Placeholder for image removal logic)
+        end_time = time.time()
+        duration = end_time - start_time
+        cost = duration * CPU_RATE_PER_SEC
+        
+        log_usage(file.filename, filesize, "remove-watermark-image", cost, cpu_seconds=duration)
         return {
             "status": "success",
             "method": "local_cheap",
-            "cost_usd": cost,
+            "cost_usd": round(cost, 5),
             "filename": file.filename,
         }
 

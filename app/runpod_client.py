@@ -3,6 +3,8 @@ import os
 import asyncio
 import base64
 import logging
+import io
+from PIL import Image
 from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -12,6 +14,34 @@ def get_config():
         "api_key": os.getenv("RUNPOD_API_KEY"),
         "endpoint_id": os.getenv("RUNPOD_ENDPOINT_ID")
     }
+
+def optimize_image(image_path: str, max_size: int = 512) -> str:
+    """
+    Resizes image to max_size while keeping aspect ratio and converts to JPEG.
+    Reduces 2MB files to ~50KB for fast RunPod transfer.
+    """
+    try:
+        with Image.open(image_path) as img:
+            # Resize
+            img.thumbnail((max_size, max_size))
+            
+            # Convert to RGB (drops alpha channel if any)
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            
+            # Save to buffer
+            buffer = io.BytesIO()
+            img.save(buffer, format="JPEG", quality=85)
+            
+            # Encode
+            encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
+            logger.info(f"Image optimized: {len(encoded)//1024}KB (Max Dim: {max_size}px)")
+            return encoded
+    except Exception as e:
+        logger.error(f"Failed to optimize image: {e}")
+        # Fallback to original bytes if optimization fails
+        with open(image_path, "rb") as f:
+            return base64.b64encode(f.read()).decode("utf-8")
 
 async def run_image_removal(image_path: str) -> Dict[str, Any]:
     """
@@ -25,16 +55,14 @@ async def run_image_removal(image_path: str) -> Dict[str, Any]:
         runpod.api_key = config["api_key"]
         endpoint = runpod.Endpoint(config["endpoint_id"])
         
-        # Read image and convert to base64
-        with open(image_path, "rb") as image_file:
-            image_base64 = base64.b64encode(image_file.read()).decode("utf-8")
+        # Optimize image for transfer
+        image_base64 = optimize_image(image_path)
 
-        # Run synchronously (blocks until job is done or timeout)
-        # run_sync handles the wait internally
+        # Run synchronously
         job_result = endpoint.run_sync({
             "image": image_base64,
             "task": "image_removal"
-        }, timeout=60) # 60s timeout to allow for warm-up
+        }, timeout=60)
 
         return job_result
     except Exception as e:
@@ -54,22 +82,20 @@ async def run_deep_forensics(image_path: str) -> float:
         runpod.api_key = config["api_key"]
         endpoint = runpod.Endpoint(config["endpoint_id"])
         
-        with open(image_path, "rb") as image_file:
-            image_base64 = base64.b64encode(image_file.read()).decode("utf-8")
+        # Optimize image for transfer (SigLIP only needs 224px, 512px is plenty)
+        image_base64 = optimize_image(image_path, max_size=512)
 
-        # Use run_sync for a fast 1-2 second GPU scan
-        logger.info(f"Calling RunPod endpoint {config['endpoint_id']} for deep_forensic task...")
-        
         # Ensure API key is set just before the call
         runpod.api_key = config["api_key"]
         
+        logger.info(f"Calling RunPod {config['endpoint_id']} for deep_forensic...")
         job_result = endpoint.run_sync({
             "image": image_base64,
             "task": "deep_forensic"
         }, timeout=90)
 
         if job_result is None:
-            logger.error("RunPod returned None. Check if RUNPOD_API_KEY is valid and has credits.")
+            logger.error("RunPod returned None. Check credits/API key.")
             return 0.0
 
         if "ai_score" in job_result:
