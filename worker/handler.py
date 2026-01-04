@@ -126,6 +126,7 @@ def handler(job):
         # ---------------- SigLIP2 ----------------
         # Use the fine-tuned binary classifier (AI vs Human)
         results = detector(img)
+        logger.info(f"Expert Model Raw Results: {results}")
         
         # Parse results (Expected labels: 'AI' and 'Human')
         ai_score = 0.0
@@ -150,7 +151,8 @@ def handler(job):
             "fft_score": normalized_fft_score,
             "high_res_bias": high_res_bias,
             "metadata_bias": metadata_bias,
-            "image_size": [orig_w, orig_h]
+            "image_size": [orig_w, orig_h],
+            "raw_results": results # Debugging
         }
         worker_cache.put(img_hash, result)
         return result
