@@ -18,8 +18,9 @@ node_modules
 .sqlite3
 tests/
 third_party/
-test_detection.py
-test_detection.py
+worker/
+test_*.py
 dump_c2pa.py
-test_detection.py
+usage_log.csv
+.env
 
