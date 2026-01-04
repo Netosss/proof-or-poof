@@ -3,11 +3,16 @@ import cv2
 import numpy as np
 import asyncio
 import hashlib
+import os
+import io
+import tempfile
 from collections import OrderedDict
 from PIL import Image
 from PIL.ExifTags import TAGS
+from typing import Optional, List, Union
 from app.c2pa_reader import get_c2pa_manifest
 from app.runpod_client import run_deep_forensics
+from app.security import security_manager
 
 logger = logging.getLogger(__name__)
 
@@ -32,53 +37,69 @@ class LRUCache:
 
 forensic_cache = LRUCache(capacity=1000)
 
-def get_image_hash(file_path: str) -> str:
-    """Generate a quick MD5 hash of the image to use for caching."""
-    hasher = hashlib.md5()
-    with open(file_path, 'rb') as f:
-        # Read only the first 1MB for speed
-        hasher.update(f.read(1024 * 1024))
-    return hasher.hexdigest()
+def get_image_hash(source: Union[str, Image.Image]) -> str:
+    """Generate a secure SHA-256 hash of the image source."""
+    if isinstance(source, str):
+        with open(source, 'rb') as f:
+            # Hash first 2MB for speed, but use secure method
+            return security_manager.get_safe_hash(f.read(2048 * 1024))
+    else:
+        # For PIL Images, hash a small thumbnail
+        thumb = source.copy()
+        thumb.thumbnail((128, 128))
+        buf = io.BytesIO()
+        thumb.save(buf, format="JPEG")
+        return security_manager.get_safe_hash(buf.getvalue())
 
 def get_exif_data(file_path: str) -> dict:
-    """Extract EXIF metadata from the image."""
+    """Extract EXIF metadata from the image. Explicitly closed via 'with'."""
     try:
-        img = Image.open(file_path)
-        exif = img._getexif() or {}
-        exif_data = {}
-        for tag, value in exif.items():
-            decoded = TAGS.get(tag, tag)
-            exif_data[decoded] = value
-        return exif_data
-    except Exception as e:
-        logger.error(f"Error extracting EXIF: {e}")
+        with Image.open(file_path) as img:
+            exif = img._getexif() or {}
+            exif_data = {}
+            for tag, value in exif.items():
+                decoded = TAGS.get(tag, tag)
+                exif_data[decoded] = value
+            return exif_data
+    except Exception:
         return {}
 
-def _run_fft_sync(image_path: str) -> float:
-    # Deprecated: FFT now handled by RunPod worker for consensus
-    return 0.0
-
-async def get_fft_score(image_path: str) -> float:
-    # Deprecated: FFT now handled by RunPod worker for consensus
-    return 0.0
+def extract_video_frames(video_path: str, num_frames: int = 2) -> list:
+    """Extract N frames from a video file."""
+    frames = []
+    try:
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return []
+            
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames <= 0:
+            return []
+            
+        # Sampling points
+        sample_points = [int(total_frames * 0.1), int(total_frames * 0.9)]
+        
+        for pos in sample_points:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, pos)
+            ret, frame = cap.read()
+            if ret:
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frames.append(Image.fromarray(frame_rgb))
+        
+        cap.release()
+    except Exception as e:
+        logger.error(f"Error extracting video frames: {e}")
+    return frames
 
 async def detect_ai_media(file_path: str) -> dict:
-    """
-    Final Optimized Consensus Engine.
-    
-    Layer 1: C2PA (Source of Truth) - 100% Weight, early exit.
-    Layer 2: Pre-filter (Exif/Res/Software) - High confidence human check.
-    Layer 3: Forensic Fallback (FFT + SigLIP2 GPU) - Weighted deep scan.
-    """
-    
-    # Initialize default metadata object
+    """Final Optimized Consensus Engine."""
     l1_data = {
         "status": "not_found",
         "provider": None,
-        "description": "No cryptographic signature found. Digital 'passport' may have been stripped."
+        "description": "No cryptographic signature found."
     }
 
-    # --- 1️⃣ LAYER 1: C2PA (Source of Truth) ---
+    # --- 1️⃣ LAYER 1: C2PA ---
     manifest = get_c2pa_manifest(file_path)
     if manifest:
         gen_info = manifest.get("claim_generator_info", [])
@@ -104,7 +125,6 @@ async def detect_ai_media(file_path: str) -> dict:
             "description": f"Verified AI signature found ({generator})." if is_generative_ai else "Verified human-captured content."
         }
 
-        # Trust cryptographic proof and EXIT.
         return {
             "summary": "Verified AI" if is_generative_ai else "Verified Human",
             "confidence_score": 1.0,
@@ -118,86 +138,167 @@ async def detect_ai_media(file_path: str) -> dict:
             }
         }
 
-    # --- 2️⃣ LAYER 2: Pre-filter (Exif / Resolution / Software) ---
-    exif = get_exif_data(file_path)
+    is_video = file_path.lower().endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm'))
+    
+    if is_video:
+        safe_path = security_manager.sanitize_log_message(file_path)
+        logger.info(f"Detecting AI in video (Parallel Frames): {safe_path}")
+        frames = extract_video_frames(file_path)
+        if not frames:
+            return {"error": "Could not extract frames from video."}
+            
+        # Process frames in parallel for 2x speedup
+        tasks = [detect_ai_media_image_logic(None, frame=f) for f in frames]
+        frame_results = await asyncio.gather(*tasks)
+        
+        # Smart Early Exit: If any frame is confidently human, the video is likely real
+        for res in frame_results:
+            if res.get("summary") == "Verified Human (Exif Confidence)":
+                logger.info(f"Video Early Exit: Frame scan found trusted human metadata.")
+                return res
+        
+        avg_prob = sum(r['layers']['layer2_forensics']['probability'] for r in frame_results) / len(frame_results)
+        
+        if avg_prob > 0.85: summary = "Likely AI Video"
+        elif avg_prob > 0.5: summary = "Suspicious Video"
+        else: summary = "Likely Human Video"
+        
+        return {
+            "summary": summary,
+            "confidence_score": round(avg_prob if avg_prob > 0.5 else 1.0 - avg_prob, 2),
+            "layers": {
+                "layer1_metadata": l1_data,
+                "layer2_forensics": {
+                    "status": "detected" if avg_prob > 0.5 else "not_detected",
+                    "probability": round(avg_prob, 4),
+                    "signals": [f"Analyzed {len(frame_results)} frames via Parallel Temporal Sampling"]
+                }
+            }
+        }
+    else:
+        return await detect_ai_media_image_logic(file_path, l1_data)
+
+async def detect_ai_media_image_logic(file_path: Optional[str], l1_data: dict = None, frame: Image.Image = None) -> dict:
+    """Refactored image logic. No more long-lived file handles."""
+    if l1_data is None:
+        l1_data = {"status": "not_found", "provider": None, "description": "N/A"}
+
+    # --- 2️⃣ LAYER 2: Pre-filter ---
+    if frame:
+        img_for_res = frame
+        exif = {} 
+        source_for_hash = frame
+        source_path = None
+        width, height = img_for_res.size
+    else:
+        exif = get_exif_data(file_path)
+        try:
+            # Use 'with' to get size and close handle immediately
+            with Image.open(file_path) as img:
+                width, height = img.size
+            source_for_hash = file_path
+            source_path = file_path
+        except:
+            return {"error": "Invalid image file"}
+    
     make = str(exif.get("Make", "")).lower()
     software = str(exif.get("Software", "")).lower()
-    
-    try:
-        with Image.open(file_path) as img:
-            width, height = img.size
-    except:
-        width, height = 0, 0
 
-    # Calculate Pre-filter Human Score
     pre_filter_human_score = 0.0
+    ai_suspicion_score = 0.0
     
-    # Real camera manufacturer (+0.3)
+    # Trusted Signals
     trusted_makes = ["canon", "nikon", "sony", "fujifilm", "panasonic", "olympus", "leica", "apple", "samsung", "google"]
-    if any(m in make for m in trusted_makes):
+    has_trusted_make = any(m in make for m in trusted_makes)
+    if has_trusted_make:
         pre_filter_human_score += 0.3
         
-    # Known professional software (+0.3)
-    trusted_software = ["lightroom", "photoshop", "capture one", "gimp", "apple", "android"]
+    trusted_software = ["lightroom", "photoshop", "capture one", "gimp", "apple", "android", "darktable"]
     if any(s in software for s in trusted_software):
         pre_filter_human_score += 0.3
         
-    # High-resolution image (+0.2)
-    if width > 2000 and height > 2000:
+    if width > 2500 and height > 2000:
         pre_filter_human_score += 0.2
+        if has_trusted_make:
+            pre_filter_human_score += 0.2 
 
-    # Decision: If score >= 0.7, confidently human.
-    if pre_filter_human_score >= 0.7:
-        logger.info(f"Pre-filter Confidence ({pre_filter_human_score}) passed. Skipping GPU.")
+    # AI Suspicion
+    is_pow2_w = (width > 0) and (width & (width - 1) == 0)
+    is_pow2_h = (height > 0) and (height & (height - 1) == 0)
+    if (is_pow2_w and is_pow2_h) and width <= 1024:
+        ai_suspicion_score += 0.25 
+
+    if has_trusted_make and (width * height) < 500000:
+        pre_filter_human_score -= 0.1 
+        ai_suspicion_score += 0.1
+
+    net_human_confidence = pre_filter_human_score - ai_suspicion_score
+
+    if net_human_confidence >= 0.7:
+        logger.info(f"Pre-filter Confidence ({net_human_confidence}) passed. Skipping GPU.")
         return {
             "summary": "Verified Human (Exif Confidence)",
             "confidence_score": 1.0,
             "layers": {
                 "layer0_prefilter": {
                     "status": "trusted_human",
-                    "details": f"Make: {make}, Software: {software}, Res: {width}x{height}, Score: {pre_filter_human_score}"
+                    "details": f"Make: {make}, Software: {software}, Res: {width}x{height}, NetScore: {round(net_human_confidence, 2)}"
                 },
                 "layer1_metadata": {"status": "skipped", "provider": make, "description": "EXIF indicates professional photography workflow."},
                 "layer2_forensics": {"status": "skipped", "probability": 0.0, "signals": ["Skipped: High Exif confidence."]}
             }
         }
 
-    # --- 3️⃣ LAYER 3: Forensic Fallback (SigLIP2 + Worker-side Consensus) ---
-    # We no longer apply a local bias here because the RunPod worker 
-    # now performs its own consensus (SigLIP2 + FFT + High-Res Bias).
-    
-    # Deep Forensic (SigLIP2 on RunPod)
-    img_hash = get_image_hash(file_path)
+    # --- 3️⃣ LAYER 3: Forensic Fallback ---
+    # GPU COST GUARD: Re-check file size before GPU scan
+    if not frame and os.path.exists(file_path):
+        f_size = os.path.getsize(file_path)
+        if f_size > 50 * 1024 * 1024: # 50MB Wallet Guard
+            logger.warning(f"GPU Cost Guard: Skipping {f_size//1024//1024}MB file to avoid RunPod over-burn.")
+            return {
+                "summary": "Ambiguous (File too large for Deep Scan)",
+                "confidence_score": 0.5,
+                "layers": {
+                    "layer1_metadata": l1_data,
+                    "layer2_forensics": {"status": "skipped", "probability": 0.5, "signals": ["GPU scan skipped for cost safety (>50MB)."]}
+                }
+            }
+
+    img_hash = get_image_hash(source_for_hash)
     cached_score = forensic_cache.get(img_hash)
     if cached_score is not None:
         forensic_probability = cached_score
     else:
         logger.info(f"Ambiguous Pre-filter ({pre_filter_human_score}). Running GPU Scan...")
-        # Get the final consensus score from the worker
-        forensic_probability = await run_deep_forensics(file_path, width, height)
-        forensic_cache.put(img_hash, forensic_probability)
+        
+        # If we have a PIL image but no file path (video frame), 
+        # we must create one temporary file JUST for the RunPod upload.
+        if frame and not source_path:
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+                frame.save(tmp.name, "JPEG")
+                upload_path = tmp.name
+        else:
+            upload_path = source_path
+
+        try:
+            forensic_probability = await run_deep_forensics(upload_path, width, height)
+            forensic_cache.put(img_hash, forensic_probability)
+        finally:
+            # Only delete if it was a temporary frame file
+            if frame and not source_path and os.path.exists(upload_path):
+                os.remove(upload_path)
     
     l2_data = {
         "status": "detected" if forensic_probability > 0.85 else "suspicious" if forensic_probability > 0.5 else "not_detected",
         "probability": round(forensic_probability, 4),
-        "signals": []
+        "signals": ["Multi-layered consensus applied (Deep Learning + FFT)"]
     }
     
-    if forensic_probability > 0.85: l2_data["signals"].append("Deep Learning identifies generative AI textures")
-    if forensic_probability > 0.5: l2_data["signals"].append("Pixel forensics suggest artificial origin")
-    l2_data["signals"].append("Multi-layered consensus applied (Deep Learning + FFT)")
-
-    # --- Verdict Logic ---
-    if forensic_probability > 0.92: 
-        summary = "Likely AI (High Confidence)"
-    elif forensic_probability > 0.75: 
-        summary = "Possible AI (Forensic Match)"
-    elif forensic_probability > 0.5: 
-        summary = "Suspicious (Inconsistent Pixels)"
-    elif forensic_probability > 0.2: 
-        summary = "Likely Human (Minor Noise)"
-    else: 
-        summary = "Likely Human"
+    if forensic_probability > 0.92: summary = "Likely AI (High Confidence)"
+    elif forensic_probability > 0.75: summary = "Possible AI (Forensic Match)"
+    elif forensic_probability > 0.5: summary = "Suspicious (Inconsistent Pixels)"
+    elif forensic_probability > 0.2: summary = "Likely Human (Minor Noise)"
+    else: summary = "Likely Human"
     
     confidence_score = forensic_probability if forensic_probability > 0.5 else (1.0 - forensic_probability)
         

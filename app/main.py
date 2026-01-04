@@ -5,9 +5,10 @@ import logging
 import csv
 import time
 import uuid
+import hashlib
 from datetime import datetime
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket
+from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 import pandas as pd
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 from app.detector import detect_ai_media
 from app.schemas import DetectionResponse
 from app.runpod_client import run_image_removal, run_video_removal
+from app.security import security_manager
 
 app = FastAPI(title="AI Provenance & Cleansing API")
 
@@ -34,9 +36,12 @@ GPU_RATE_PER_SEC = 0.0019  # RunPod A5000/L4 rate
 CPU_RATE_PER_SEC = 0.0001  # Estimated Railway CPU rate
 
 def log_usage(filename: str, filesize: int, method: str, cost_usd: float, gpu_seconds: float = 0, cpu_seconds: float = 0):
-    """Append a row to the usage log with a unique ID."""
+    """Append a row to the usage log with a unique ID and hashed filename."""
     file_exists = os.path.exists(USAGE_LOG)
     fieldnames = ["timestamp", "request_id", "filename", "filesize", "method", "cost_usd", "gpu_seconds", "cpu_seconds"]
+    
+    # Hash filename for privacy
+    hashed_filename = hashlib.sha256(filename.encode()).hexdigest()[:8]
     
     with open(USAGE_LOG, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -45,7 +50,7 @@ def log_usage(filename: str, filesize: int, method: str, cost_usd: float, gpu_se
         writer.writerow({
             "timestamp": time.time(),
             "request_id": str(uuid.uuid4())[:8], # Short unique ID
-            "filename": filename,
+            "filename": f"file_{hashed_filename}",
             "filesize": filesize,
             "method": method,
             "cost_usd": cost_usd,
@@ -217,12 +222,12 @@ async def ws_usage(websocket: WebSocket):
 
 # ---- Detect endpoint ----
 @app.post("/detect", response_model=DetectionResponse)
-async def detect(file: UploadFile = File(...)):
-    logger.info(f"--- Incoming detection request: {file.filename} ---")
-    suffix = os.path.splitext(file.filename)[1].lower()
-    
+async def detect(request: Request, file: UploadFile = File(...)):
+    # Use Secure Wrapper for primary security checks
+    # (Rate limiting + Type/Size validation + Content Deep Check)
     file_content = await file.read()
     filesize = len(file_content)
+    suffix = os.path.splitext(file.filename)[1].lower()
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
         tmp_file.write(file_content)
@@ -230,10 +235,13 @@ async def detect(file: UploadFile = File(...)):
 
     try:
         start_time = time.time()
-        result = await detect_ai_media(temp_path)
-        end_time = time.time()
         
-        duration = end_time - start_time
+        # The wrapper handles security logic; we pass detect_ai_media as the worker function
+        result = await security_manager.secure_execute(
+            request, file.filename, filesize, temp_path, detect_ai_media
+        )
+        
+        duration = time.time() - start_time
         gpu_used = result.get("layers", {}).get("layer2_forensics", {}).get("status") != "skipped"
         
         if gpu_used:
@@ -253,13 +261,12 @@ async def detect(file: UploadFile = File(...)):
 
 # ---- Watermark removal ----
 @app.post("/remove-watermark")
-async def remove_watermark(file: UploadFile = File(...)):
+async def remove_watermark(request: Request, file: UploadFile = File(...)):
+    file_content = await file.read()
+    filesize = len(file_content)
     suffix = os.path.splitext(file.filename)[1].lower()
     content_type = file.content_type or ""
     is_video = content_type.startswith("video/") or suffix in {".mp4", ".mov", ".avi"}
-
-    file_content = await file.read()
-    filesize = len(file_content)
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
         tmp_file.write(file_content)
@@ -267,27 +274,37 @@ async def remove_watermark(file: UploadFile = File(...)):
 
     try:
         start_time = time.time()
+        
+        async def removal_worker(path):
+            if is_video:
+                return await run_video_removal(path)
+            else:
+                return {"status": "success", "method": "local_cheap", "filename": file.filename}
+
+        result = await security_manager.secure_execute(
+            request, file.filename, filesize, temp_path, removal_worker
+        )
+        
+        duration = time.time() - start_time
+        
         if is_video:
-            result = await run_video_removal(temp_path)
-            end_time = time.time()
-            duration = end_time - start_time
             cost = duration * GPU_RATE_PER_SEC
             log_usage(file.filename, filesize, "remove-watermark-video", cost, gpu_seconds=duration)
             return {
                 "status": "success", "method": "runpod_gpu",
                 "cost_usd": round(cost, 5), "gpu_seconds": round(duration, 2), "result": result,
             }
-
-        # Image logic placeholder
-        end_time = time.time()
-        duration = end_time - start_time
-        cost = duration * CPU_RATE_PER_SEC
-        log_usage(file.filename, filesize, "remove-watermark-image", cost, cpu_seconds=duration)
-        return {
-            "status": "success", "method": "local_cheap",
-            "cost_usd": round(cost, 5), "filename": file.filename,
-        }
+        else:
+            cost = duration * CPU_RATE_PER_SEC
+            log_usage(file.filename, filesize, "remove-watermark-image", cost, cpu_seconds=duration)
+            return {
+                "status": "success", "method": "local_cheap",
+                "cost_usd": round(cost, 5), "filename": file.filename,
+            }
     except Exception as e:
+        # The wrapper might have already raised an HTTPException, but if not:
+        if isinstance(e, HTTPException):
+            raise e
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if os.path.exists(temp_path):
