@@ -15,13 +15,15 @@ def get_config():
         "endpoint_id": os.getenv("RUNPOD_ENDPOINT_ID")
     }
 
-def optimize_image(image_path: str, max_size: int = 512) -> str:
+def optimize_image(image_path: str, max_size: int = 512) -> tuple:
     """
     Resizes image to max_size while keeping aspect ratio and converts to JPEG.
     Reduces 2MB files to ~50KB for fast RunPod transfer.
+    Returns: (base64_string, original_width, original_height)
     """
     try:
         with Image.open(image_path) as img:
+            orig_w, orig_h = img.size
             # Resize
             img.thumbnail((max_size, max_size))
             
@@ -36,12 +38,18 @@ def optimize_image(image_path: str, max_size: int = 512) -> str:
             # Encode
             encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
             logger.info(f"Image optimized: {len(encoded)//1024}KB (Max Dim: {max_size}px)")
-            return encoded
+            return encoded, orig_w, orig_h
     except Exception as e:
         logger.error(f"Failed to optimize image: {e}")
         # Fallback to original bytes if optimization fails
         with open(image_path, "rb") as f:
-            return base64.b64encode(f.read()).decode("utf-8")
+            data = f.read()
+            # Still try to get size for fallback
+            try:
+                with Image.open(io.BytesIO(data)) as fimg:
+                    return base64.b64encode(data).decode("utf-8"), fimg.width, fimg.height
+            except:
+                return base64.b64encode(data).decode("utf-8"), 0, 0
 
 async def run_image_removal(image_path: str) -> Dict[str, Any]:
     """
@@ -56,11 +64,13 @@ async def run_image_removal(image_path: str) -> Dict[str, Any]:
         endpoint = runpod.Endpoint(config["endpoint_id"])
         
         # Optimize image for transfer
-        image_base64 = optimize_image(image_path)
+        image_base64, w, h = optimize_image(image_path)
 
         # Run synchronously
         job_result = endpoint.run_sync({
             "image": image_base64,
+            "orig_w": w,
+            "orig_h": h,
             "task": "image_removal"
         }, timeout=60)
 
@@ -83,7 +93,7 @@ async def run_deep_forensics(image_path: str) -> float:
         endpoint = runpod.Endpoint(config["endpoint_id"])
         
         # Optimize image for transfer (SigLIP only needs 224px, 512px is plenty)
-        image_base64 = optimize_image(image_path, max_size=512)
+        image_base64, w, h = optimize_image(image_path, max_size=512)
 
         # Ensure API key is set just before the call
         runpod.api_key = config["api_key"]
@@ -91,6 +101,8 @@ async def run_deep_forensics(image_path: str) -> float:
         logger.info(f"Calling RunPod {config['endpoint_id']} for deep_forensic...")
         job_result = endpoint.run_sync({
             "image": image_base64,
+            "orig_w": w,
+            "orig_h": h,
             "task": "deep_forensic"
         }, timeout=90)
 
