@@ -93,40 +93,71 @@ def handler(job):
         orig_w, orig_h = img.size
 
         # ---------------- Heuristics ----------------
+        # 1. FFT Score with Resolution Normalization
         fft_score = get_cpu_fft_score(img)
+        # Normalize peaks by megapixels to avoid high-res bias
+        megapixels = (orig_w * orig_h) / 1_000_000
+        # If image is very small, megapixels might be < 1, so we floor it at 1.0 for the divisor
+        normalized_fft_score = fft_score / max(1.0, megapixels)
 
-        # High-resolution bias
+        # 2. Dynamic High-resolution Bias (scaling from 0.5 to 1.0)
         high_res_bias = 1.0
-        if orig_w * orig_h > 2_000_000:  # >2MP
-            high_res_bias = 0.7  # Reduce AI confidence by 30%
+        if megapixels > 2.0:
+            # Gradually reduce AI confidence for high-res images (max reduction 50%)
+            high_res_bias = max(0.5, 1.0 - (megapixels / 20.0))
+
+        # 3. EXIF/Software Metadata Bias (Fast CPU check)
+        metadata_bias = 1.0
+        try:
+            exif_data = img._getexif() or {}
+            # Tag 305 is Software, Tag 271 is Make (Camera Manufacturer)
+            software = str(exif_data.get(305, "")).lower()
+            make = str(exif_data.get(271, "")).lower()
+            
+            # If it has professional software or a known camera make, give it a human bonus
+            if any(s in software for s in ["photoshop", "lightroom", "capture one", "gimp"]):
+                metadata_bias *= 0.9
+            if any(m in make for m in ["canon", "nikon", "sony", "fujifilm", "leica", "apple", "google"]):
+                metadata_bias *= 0.85 # Stronger human signal from a real camera
+        except Exception as e:
+            logger.warning(f"Metadata extraction failed: {e}")
 
         # ---------------- SigLIP2 ----------------
-        candidate_labels = ["real photo", "AI generated image"]
+        # Using descriptive labels from the documentation for better zero-shot accuracy
+        candidate_labels = [
+            "a natural real-world photograph with camera noise",
+            "a synthetic AI-generated image with smooth generative textures"
+        ]
         results = detector(img, candidate_labels=candidate_labels)
         
         # Parse results correctly
         ai_score = 0.0
         if isinstance(results, dict) and "labels" in results and "scores" in results:
             for label, score in zip(results["labels"], results["scores"]):
-                if "ai" in label.lower() or "synthetic" in label.lower():
+                if "synthetic" in label.lower():
                     ai_score = float(score)
-        elif isinstance(results, list):  # fallback for list output
+        elif isinstance(results, list):
             for res in results:
-                if "ai" in res.get("label", "").lower() or "synthetic" in res.get("label", "").lower():
+                if "synthetic" in res.get("label", "").lower():
                     ai_score = float(res.get("score", 0.0))
 
         # ---------------- Weighted Combination ----------------
-        # Simple weighted average: SigLIP2 70%, FFT 20%, high-res bias 10%
-        final_score = ai_score * 0.7 + (1 - fft_score) * 0.2
+        # Consensus: SigLIP2 (80%) + Normalized FFT (20%)
+        final_score = (ai_score * 0.8) + (normalized_fft_score * 0.2)
+        
+        # Apply the cumulative human biases
         final_score *= high_res_bias
+        final_score *= metadata_bias
+        
         final_score = max(0.0, min(1.0, final_score))
 
         # ---------------- Cache & Return ----------------
         result = {
             "ai_score": final_score,
             "siglip2_score": ai_score,
-            "fft_score": fft_score,
+            "fft_score": normalized_fft_score,
             "high_res_bias": high_res_bias,
+            "metadata_bias": metadata_bias,
             "image_size": [orig_w, orig_h]
         }
         worker_cache.put(img_hash, result)
