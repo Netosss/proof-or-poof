@@ -33,8 +33,6 @@ class WorkerLRUCache:
 
 worker_cache = WorkerLRUCache(capacity=500)
 
-# ---------------- Load SigLIP2 ----------------
-detector = None
 try:
     logger.info("Loading Fine-tuned SigLIP2 model (Ateeqq/ai-vs-human-image-detector-2)...")
     # This is the expert model trained specifically to catch AI textures
@@ -42,7 +40,7 @@ try:
         "image-classification",
         model="Ateeqq/ai-vs-human-image-detector-2",
         device=device,
-        torch_dtype=torch.float16,
+        dtype=torch.float16, # Fixed: Use 'dtype' instead of deprecated 'torch_dtype'
         trust_remote_code=True
     )
     logger.info("SigLIP2 model loaded successfully!")
@@ -110,16 +108,18 @@ def handler(job):
         # 3. EXIF/Software Metadata Bias (Fast CPU check)
         metadata_bias = 1.0
         try:
-            exif_data = img._getexif() or {}
-            # Tag 305 is Software, Tag 271 is Make (Camera Manufacturer)
-            software = str(exif_data.get(305, "")).lower()
-            make = str(exif_data.get(271, "")).lower()
-            
-            # If it has professional software or a known camera make, give it a human bonus
-            if any(s in software for s in ["photoshop", "lightroom", "capture one", "gimp"]):
-                metadata_bias *= 0.9
-            if any(m in make for m in ["canon", "nikon", "sony", "fujifilm", "leica", "apple", "google"]):
-                metadata_bias *= 0.85 # Stronger human signal from a real camera
+            # Use public getexif() method instead of internal _getexif()
+            exif = img.getexif()
+            if exif:
+                # Tag 305 is Software, Tag 271 is Make (Camera Manufacturer)
+                software = str(exif.get(305, "")).lower()
+                make = str(exif.get(271, "")).lower()
+                
+                # If it has professional software or a known camera make, give it a human bonus
+                if any(s in software for s in ["photoshop", "lightroom", "capture one", "gimp"]):
+                    metadata_bias *= 0.9
+                if any(m in make for m in ["canon", "nikon", "sony", "fujifilm", "leica", "apple", "google"]):
+                    metadata_bias *= 0.85 # Stronger human signal from a real camera
         except Exception as e:
             logger.warning(f"Metadata extraction failed: {e}")
 
