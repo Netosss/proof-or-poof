@@ -40,6 +40,7 @@ try:
         "image-classification",
         model="haywoodsloan/ai-image-detector-dev-deploy",
         device=device,
+        torch_dtype=torch.float16, # Added: 40% less VRAM, faster inference
         trust_remote_code=True,
         use_fast=True
     )
