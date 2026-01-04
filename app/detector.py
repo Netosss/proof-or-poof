@@ -199,7 +199,7 @@ async def detect_ai_media(file_path: str) -> dict:
         deep_score = cached_score
     else:
         logger.info(f"Ambiguous Pre-filter ({pre_filter_human_score}). Running GPU Scan...")
-        deep_score = await run_deep_forensics(file_path)
+        deep_score = await run_deep_forensics(file_path, width, height)
         forensic_cache.put(img_hash, deep_score)
     
     # Calculate Forensic Probability

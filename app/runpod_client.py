@@ -69,8 +69,8 @@ async def run_image_removal(image_path: str) -> Dict[str, Any]:
         # Run synchronously
         job_result = endpoint.run_sync({
             "image": image_base64,
-            "orig_w": w,
-            "orig_h": h,
+            "original_width": w,
+            "original_height": h,
             "task": "image_removal"
         }, timeout=60)
 
@@ -78,7 +78,7 @@ async def run_image_removal(image_path: str) -> Dict[str, Any]:
     except Exception as e:
         return {"error": str(e)}
 
-async def run_deep_forensics(image_path: str) -> float:
+async def run_deep_forensics(image_path: str, width: int = 0, height: int = 0) -> float:
     """
     Offloads the expensive SigLIP forensic scan to a RunPod GPU worker.
     Returns the AI score (0.0 to 1.0).
@@ -88,12 +88,21 @@ async def run_deep_forensics(image_path: str) -> float:
         logger.error("RUNPOD_ENDPOINT_ID not configured")
         return 0.0
 
+    key_peek = config["api_key"][:4] if config["api_key"] else "MISSING"
+    logger.info(f"Using RunPod Key: {key_peek}... | Endpoint: {config['endpoint_id']}")
+
     try:
         runpod.api_key = config["api_key"]
         endpoint = runpod.Endpoint(config["endpoint_id"])
         
         # Optimize image for transfer (SigLIP only needs 224px, 512px is plenty)
-        image_base64, w, h = optimize_image(image_path, max_size=512)
+        # Use provided dimensions if available to avoid extra Image.open
+        if width > 0 and height > 0:
+            # We still need to resize and encode, so we call a slightly modified version or just use existing
+            image_base64, _, _ = optimize_image(image_path, max_size=512)
+            w, h = width, height
+        else:
+            image_base64, w, h = optimize_image(image_path, max_size=512)
 
         # Ensure API key is set just before the call
         runpod.api_key = config["api_key"]
@@ -101,8 +110,8 @@ async def run_deep_forensics(image_path: str) -> float:
         logger.info(f"Calling RunPod {config['endpoint_id']} for deep_forensic...")
         job_result = endpoint.run_sync({
             "image": image_base64,
-            "orig_w": w,
-            "orig_h": h,
+            "original_width": w,
+            "original_height": h,
             "task": "deep_forensic"
         }, timeout=90)
 
