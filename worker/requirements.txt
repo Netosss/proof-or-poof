@@ -1,4 +1,6 @@
 runpod
-transformers==4.38.2
+transformers>=4.49.0
 Pillow
 timm
+opencv-python-headless
+numpy
