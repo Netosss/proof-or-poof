@@ -40,7 +40,8 @@ try:
         "image-classification",
         model="haywoodsloan/ai-image-detector-dev-deploy",
         device=device,
-        trust_remote_code=True
+        trust_remote_code=True,
+        use_fast=True
     )
     logger.info("New model loaded successfully!")
 except Exception as e:
