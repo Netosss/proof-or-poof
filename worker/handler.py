@@ -2,24 +2,33 @@ import runpod
 import base64
 import io
 import torch
+import logging
 from PIL import Image
 from transformers import pipeline
 
+# Set up logging for RunPod
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # --- Global Initialization ---
-# This runs once when the container starts
 device = 0 if torch.cuda.is_available() else -1
-print(f"Initializing worker on device: {'GPU' if device == 0 else 'CPU'}")
+logger.info(f"Initializing worker on device: {'GPU' if device == 0 else 'CPU'}")
+
+detector = None
 
 try:
-    print("Loading SigLIP model (Ateeqq/ai-vs-human-image-detector)...")
+    logger.info("Loading SigLIP model (Ateeqq/ai-vs-human-image-detector)...")
+    # SigLIP often requires timm and newer transformers versions.
+    # We added 'timm' to requirements.txt and bumped transformers to 4.38.2.
     detector = pipeline(
         "image-classification", 
         model="Ateeqq/ai-vs-human-image-detector",
-        device=device
+        device=device,
+        trust_remote_code=True
     )
-    print("Model loaded successfully!")
+    logger.info("Model loaded successfully!")
 except Exception as e:
-    print(f"CRITICAL: Failed to load model: {e}")
+    logger.error(f"CRITICAL: Failed to load model: {e}", exc_info=True)
     detector = None
 
 def handler(job):
@@ -31,7 +40,7 @@ def handler(job):
     
     if task == "deep_forensic":
         if detector is None:
-            return {"error": "Model failed to initialize on worker"}
+            return {"error": "Model failed to initialize on worker. Check worker logs."}
 
         image_base64 = job_input.get("image")
         if not image_base64:
@@ -44,22 +53,21 @@ def handler(job):
             
             # Run detection
             results = detector(img)
-            print(f"Scan results: {results}")
+            logger.info(f"Scan results: {results}")
             
             # Extract AI score
             ai_score = 0.0
             for res in results:
-                # The model labels are 'ai' and 'hum'
+                # The model labels are usually 'ai' and 'hum' or 'AI' and 'Human'
                 if res['label'].lower() == 'ai':
                     ai_score = float(res['score'])
             
             return {"ai_score": ai_score}
         except Exception as e:
-            print(f"Scan Error: {e}")
+            logger.error(f"Scan Error: {e}", exc_info=True)
             return {"error": f"Internal scan error: {str(e)}"}
 
     elif task == "video_removal":
-        # Placeholder for video logic
         return {"status": "mocked_success", "message": "Video removal not yet implemented in worker"}
     
     return {"error": f"Invalid task: {task}"}
