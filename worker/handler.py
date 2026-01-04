@@ -34,18 +34,17 @@ class WorkerLRUCache:
 worker_cache = WorkerLRUCache(capacity=500)
 
 try:
-    logger.info("Loading Fine-tuned SigLIP2 model (Ateeqq/ai-vs-human-image-detector-2)...")
-    # This is the expert model trained specifically to catch AI textures
+    logger.info("Loading New Expert Model (haywoodsloan/ai-image-detector-dev-deploy)...")
+    # This model is a SwinV2-based detector known for high accuracy on recent AI generators
     detector = pipeline(
         "image-classification",
-        model="Ateeqq/ai-vs-human-image-detector-2",
+        model="haywoodsloan/ai-image-detector-dev-deploy",
         device=device,
-        dtype=torch.float16, # Fixed: Use 'dtype' instead of deprecated 'torch_dtype'
         trust_remote_code=True
     )
-    logger.info("SigLIP2 model loaded successfully!")
+    logger.info("New model loaded successfully!")
 except Exception as e:
-    logger.error(f"CRITICAL: Failed to load SigLIP2: {e}", exc_info=True)
+    logger.error(f"CRITICAL: Failed to load model: {e}", exc_info=True)
     detector = None
 
 # ---------------- FFT Heuristic ----------------
@@ -123,19 +122,21 @@ def handler(job):
         except Exception as e:
             logger.warning(f"Metadata extraction failed: {e}")
 
-        # ---------------- SigLIP2 ----------------
-        # Use the fine-tuned binary classifier (AI vs Human)
+        # ---------------- AI Model Inference ----------------
         results = detector(img)
         logger.info(f"Expert Model Raw Results: {results}")
         
-        # Parse results (Expected labels: 'AI' and 'Human')
+        # Parse results - handles various possible label names
         ai_score = 0.0
         for res in results:
-            if res['label'].lower() == 'ai':
-                ai_score = float(res['score'])
+            label = res['label'].lower()
+            score = float(res['score'])
+            # Match common AI labels: 'ai', 'fake', 'generated', 'artificial'
+            if any(term in label for term in ['ai', 'fake', 'generated', 'artificial']):
+                ai_score = max(ai_score, score)
         
         # ---------------- Weighted Combination ----------------
-        # Consensus: SigLIP2 (80%) + Normalized FFT (20%)
+        # Consensus: Model (80%) + Normalized FFT (20%)
         final_score = (ai_score * 0.8) + (normalized_fft_score * 0.2)
         
         # Apply the cumulative human biases
@@ -147,7 +148,7 @@ def handler(job):
         # ---------------- Cache & Return ----------------
         result = {
             "ai_score": final_score,
-            "siglip2_score": ai_score,
+            "model_score": ai_score,
             "fft_score": normalized_fft_score,
             "high_res_bias": high_res_bias,
             "metadata_bias": metadata_bias,

@@ -5,3 +5,4 @@ Pillow
 timm
 opencv-python-headless
 numpy
+safetensors
