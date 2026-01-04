@@ -11,3 +11,7 @@ Pillow
 numpy
 pandas
 plotly
+torch
+transformers
+timm
+safetensors
