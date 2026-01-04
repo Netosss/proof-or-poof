@@ -1,3 +1,11 @@
+fastapi
+uvicorn
+python-multipart
+c2pa-python==0.27.1
+aiofiles
+pydantic
 runpod
-transformers==4.36.2
+python-dotenv
+opencv-python-headless
 Pillow
+numpy
