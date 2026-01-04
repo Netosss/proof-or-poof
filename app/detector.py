@@ -185,7 +185,7 @@ async def detect_ai_media(file_path: str) -> dict:
     
     if forensic_probability > 0.85: l2_data["signals"].append("Deep Learning identifies generative AI textures")
     if forensic_probability > 0.5: l2_data["signals"].append("Pixel forensics suggest artificial origin")
-    l2_data["signals"].append("Multi-layered consensus applied (SigLIP2 + FFT)")
+    l2_data["signals"].append("Multi-layered consensus applied (Deep Learning + FFT)")
 
     # --- Verdict Logic ---
     if forensic_probability > 0.92: 
