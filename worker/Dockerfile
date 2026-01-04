@@ -1,5 +1,5 @@
-# Use a runtime image (MUCH smaller than devel) and higher PyTorch version
-FROM runpod/pytorch:2.2.1-py3.10-cuda12.1.1-runtime-ubuntu22.04
+# Use a stable devel image (verified to exist on RunPod Docker Hub)
+FROM runpod/pytorch:2.2.1-py3.10-cuda12.1.1-devel-ubuntu22.04
 
 WORKDIR /app
 
