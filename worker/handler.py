@@ -138,8 +138,9 @@ def handler(job):
                 ai_score = max(ai_score, score)
         
         # ---------------- Weighted Combination ----------------
-        # Consensus: Model (80%) + Normalized FFT (20%)
-        final_score = (ai_score * 0.8) + (normalized_fft_score * 0.2)
+        # Consensus: Model (90%) + Normalized FFT (10%)
+        # Increased model weight to 90% since haywoodsloan SwinV2 is highly reliable.
+        final_score = (ai_score * 0.9) + (normalized_fft_score * 0.1)
         
         # Apply the cumulative human biases
         final_score *= high_res_bias
