@@ -1,16 +1,18 @@
-# Use a stable devel image (verified to exist on RunPod Docker Hub)
+# Use a stable devel image
 FROM runpod/pytorch:2.2.1-py3.10-cuda12.1.1-devel-ubuntu22.04
 
 WORKDIR /app
 
-# Copy requirements from the worker directory
+# Copy requirements
 COPY worker/requirements.txt .
 
-# We ONLY install the extra libraries. 
-# We DO NOT reinstall torch/torchvision because they are already in the base image.
+# Install dependencies
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt && \
-    rm -rf /root/.cache/pip
+    pip install --no-cache-dir -r requirements.txt
+
+# --- PRE-DOWNLOAD MODEL ---
+# This ensures the model is cached in the container image
+RUN python3 -c "from transformers import pipeline; pipeline('image-classification', model='haywoodsloan/ai-image-detector-dev-deploy')"
 
 # Copy the handler
 COPY worker/handler.py .
