@@ -250,43 +250,21 @@ async def detect_ai_media_image_logic(file_path: Optional[str], l1_data: dict = 
         }
 
     # --- 3️⃣ LAYER 3: Forensic Fallback ---
-    # GPU COST GUARD: Re-check file size before GPU scan
+    # GPU COST GUARD: Skip huge files
     if not frame and os.path.exists(file_path):
         f_size = os.path.getsize(file_path)
-        if f_size > 50 * 1024 * 1024: # 50MB Wallet Guard
-            logger.warning(f"GPU Cost Guard: Skipping {f_size//1024//1024}MB file to avoid RunPod over-burn.")
-            return {
-                "summary": "Ambiguous (File too large for Deep Scan)",
-                "confidence_score": 0.5,
-                "layers": {
-                    "layer1_metadata": l1_data,
-                    "layer2_forensics": {"status": "skipped", "probability": 0.5, "signals": ["GPU scan skipped for cost safety (>50MB)."]}
-                }
-            }
+        if f_size > 50 * 1024 * 1024:
+            return {"summary": "Ambiguous (File too large)", "confidence_score": 0.5, "layers": {"layer2_forensics": {"status": "skipped"}}}
 
     img_hash = get_image_hash(source_for_hash)
     cached_score = forensic_cache.get(img_hash)
     if cached_score is not None:
         forensic_probability = cached_score
     else:
-        logger.info(f"Ambiguous Pre-filter ({pre_filter_human_score}). Running GPU Scan...")
-        
-        # If we have a PIL image but no file path (video frame), 
-        # we must create one temporary file JUST for the RunPod upload.
-        if frame and not source_path:
-            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-                frame.save(tmp.name, "JPEG")
-                upload_path = tmp.name
-        else:
-            upload_path = source_path
-
-        try:
-            forensic_probability = await run_deep_forensics(upload_path, width, height)
-            forensic_cache.put(img_hash, forensic_probability)
-        finally:
-            # Only delete if it was a temporary frame file
-            if frame and not source_path and os.path.exists(upload_path):
-                os.remove(upload_path)
+        logger.info(f"Ambiguous Pre-filter. Running In-Memory GPU Scan...")
+        # NO DISK: Pass PIL Image (source_for_hash) directly to RunPod client
+        forensic_probability = await run_deep_forensics(source_for_hash, width, height)
+        forensic_cache.put(img_hash, forensic_probability)
     
     l2_data = {
         "status": "detected" if forensic_probability > 0.85 else "suspicious" if forensic_probability > 0.5 else "not_detected",
