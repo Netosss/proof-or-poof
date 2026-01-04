@@ -3,6 +3,7 @@ import base64
 import io
 import torch
 import logging
+import numpy as np
 from PIL import Image
 from transformers import pipeline
 
@@ -50,6 +51,11 @@ def handler(job):
             # Decode base64 to image
             image_bytes = base64.b64decode(image_base64)
             img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+            
+            # --- Normalization / Standardization ---
+            # Resize to a standard size for more consistent classification results
+            # even though the pipeline handles its own resizing.
+            img = img.resize((512, 512), Image.LANCZOS)
             
             # Run detection
             results = detector(img)
