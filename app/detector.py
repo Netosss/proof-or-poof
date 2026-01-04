@@ -4,10 +4,6 @@ import numpy as np
 from app.c2pa_reader import get_c2pa_manifest
 from app.runpod_client import run_deep_forensics
 
-# --- HYBRID CONSENSUS ENGINE ---
-# Local: C2PA & FFT
-# Remote: RunPod (SigLIP GPU)
-
 logger = logging.getLogger(__name__)
 
 def get_fft_score(image_path: str) -> float:

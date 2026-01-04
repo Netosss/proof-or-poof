@@ -2,24 +2,28 @@ import runpod
 import os
 import asyncio
 import base64
+import logging
 from typing import Dict, Any, Optional
-from dotenv import load_dotenv
 
-load_dotenv()
+logger = logging.getLogger(__name__)
 
-# Configure RunPod
-runpod.api_key = os.getenv("RUNPOD_API_KEY")
-ENDPOINT_ID = os.getenv("RUNPOD_ENDPOINT_ID")
+def get_config():
+    return {
+        "api_key": os.getenv("RUNPOD_API_KEY"),
+        "endpoint_id": os.getenv("RUNPOD_ENDPOINT_ID")
+    }
 
 async def run_image_removal(image_path: str) -> Dict[str, Any]:
     """
     Calls RunPod Serverless synchronously for image cleansing.
     """
-    if not ENDPOINT_ID:
+    config = get_config()
+    if not config["endpoint_id"]:
         return {"error": "RUNPOD_ENDPOINT_ID not configured"}
 
     try:
-        endpoint = runpod.Endpoint(ENDPOINT_ID)
+        runpod.api_key = config["api_key"]
+        endpoint = runpod.Endpoint(config["endpoint_id"])
         
         # Read image and convert to base64
         with open(image_path, "rb") as image_file:
@@ -41,44 +45,58 @@ async def run_deep_forensics(image_path: str) -> float:
     Offloads the expensive SigLIP forensic scan to a RunPod GPU worker.
     Returns the AI score (0.0 to 1.0).
     """
-    if not ENDPOINT_ID:
-        print("Error: RUNPOD_ENDPOINT_ID not configured")
+    config = get_config()
+    if not config["endpoint_id"]:
+        logger.error("RUNPOD_ENDPOINT_ID not configured")
         return 0.0
 
     try:
-        endpoint = runpod.Endpoint(ENDPOINT_ID)
+        runpod.api_key = config["api_key"]
+        endpoint = runpod.Endpoint(config["endpoint_id"])
         
         with open(image_path, "rb") as image_file:
             image_base64 = base64.b64encode(image_file.read()).decode("utf-8")
 
         # Use run_sync for a fast 1-2 second GPU scan
+        logger.info(f"Calling RunPod endpoint {config['endpoint_id']} for deep_forensic task...")
+        
+        # Ensure API key is set just before the call
+        runpod.api_key = config["api_key"]
+        
         job_result = endpoint.run_sync({
             "image": image_base64,
             "task": "deep_forensic"
-        }, timeout=30)
+        }, timeout=90)
+
+        if job_result is None:
+            logger.error("RunPod returned None. Check if RUNPOD_API_KEY is valid and has credits.")
+            return 0.0
 
         if "ai_score" in job_result:
-            return float(job_result["ai_score"])
+            score = float(job_result["ai_score"])
+            logger.info(f"RunPod result: ai_score={score}")
+            return score
         
-        print(f"RunPod Error: {job_result.get('error', 'Unknown error')}")
+        logger.error(f"RunPod Error response: {job_result}")
         return 0.0
     except Exception as e:
-        print(f"Failed to call RunPod: {e}")
+        logger.error(f"Failed to call RunPod: {e}", exc_info=True)
         return 0.0
 
 async def run_video_removal(video_path: str) -> Dict[str, Any]:
     """
     Calls RunPod Serverless asynchronously and polls for video cleansing.
     """
-    if not ENDPOINT_ID:
+    config = get_config()
+    if not config["endpoint_id"]:
         return {"error": "RUNPOD_ENDPOINT_ID not configured"}
 
     try:
-        endpoint = runpod.Endpoint(ENDPOINT_ID)
+        runpod.api_key = config["api_key"]
+        endpoint = runpod.Endpoint(config["endpoint_id"])
         
-        # In a real scenario, you'd likely upload the video to S3 and send the URL
-        # For this POC, we'll assume the worker can handle the size or we send a placeholder
-        # For now, let's assume we send a path or small video as base64
+        # ⚠️ CRITICAL WARNING: For production, do NOT use base64 for videos.
+        # Upload to S3/GCS first and send the 'video_url' instead.
         with open(video_path, "rb") as video_file:
             video_base64 = base64.b64encode(video_file.read()).decode("utf-8")
 
@@ -101,5 +119,3 @@ async def run_video_removal(video_path: str) -> Dict[str, Any]:
             
     except Exception as e:
         return {"error": str(e)}
-
-
