@@ -6,7 +6,7 @@ ENV PYTHONPATH=/app
 
 WORKDIR /app
 
-# Install system dependencies (OpenCV)
+# Install system dependencies (Minimally required for headless OpenCV)
 RUN apt-get update && apt-get install -y \
     libgl1 \
     libglib2.0-0 \
