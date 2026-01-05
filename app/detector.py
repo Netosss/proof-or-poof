@@ -1,4 +1,5 @@
 import logging
+import time
 import cv2
 import numpy as np
 import asyncio
@@ -199,6 +200,8 @@ def boost_score(score: float) -> float:
 
 async def detect_ai_media(file_path: str) -> dict:
     """Final Optimized Consensus Engine."""
+    total_start = time.perf_counter()
+    
     l1_data = {
         "status": "not_found",
         "provider": None,
@@ -206,7 +209,10 @@ async def detect_ai_media(file_path: str) -> dict:
     }
 
     # --- 1️⃣ LAYER 1: C2PA ---
+    t_c2pa = time.perf_counter()
     manifest = get_c2pa_manifest(file_path)
+    c2pa_time_ms = (time.perf_counter() - t_c2pa) * 1000
+    logger.info(f"[TIMING] Layer 1 - C2PA check: {c2pa_time_ms:.2f}ms")
     if manifest:
         gen_info = manifest.get("claim_generator_info", [])
         generator = gen_info[0].get("name", "Unknown AI") if gen_info else manifest.get("claim_generator", "Unknown AI")
@@ -291,9 +297,13 @@ async def detect_ai_media(file_path: str) -> dict:
 
 async def detect_ai_media_image_logic(file_path: Optional[str], l1_data: dict = None, frame: Image.Image = None) -> dict:
     """Core consensus logic for images and video frames."""
+    layer_start = time.perf_counter()
+    
     if l1_data is None:
         l1_data = {"status": "not_found", "provider": None, "description": "N/A"}
 
+    # --- EXIF Extraction ---
+    t_exif = time.perf_counter()
     if frame:
         img_for_res = frame
         exif = {} 
@@ -309,9 +319,15 @@ async def detect_ai_media_image_logic(file_path: Optional[str], l1_data: dict = 
             source_path = file_path
         except:
             return {"error": "Invalid image file"}
+    exif_time_ms = (time.perf_counter() - t_exif) * 1000
+    logger.info(f"[TIMING] EXIF extraction: {exif_time_ms:.2f}ms")
     
+    # --- Metadata Scoring ---
+    t_scoring = time.perf_counter()
     human_score, human_signals = get_forensic_metadata_score(exif)
     ai_score, ai_signals = get_ai_suspicion_score(exif)
+    scoring_time_ms = (time.perf_counter() - t_scoring) * 1000
+    logger.info(f"[TIMING] Metadata scoring: {scoring_time_ms:.2f}ms (human={human_score:.2f}, ai={ai_score:.2f})")
     
     # 1. VERIFIED HUMAN (Early Exit)
     if human_score >= 0.80:
@@ -394,11 +410,21 @@ async def detect_ai_media_image_logic(file_path: Optional[str], l1_data: dict = 
 
     img_hash = get_image_hash(source_for_hash)
     cached_score = forensic_cache.get(img_hash)
+    
+    # --- GPU Scan ---
+    t_gpu = time.perf_counter()
     if cached_score is not None:
         forensic_probability = cached_score
+        gpu_time_ms = (time.perf_counter() - t_gpu) * 1000
+        logger.info(f"[TIMING] Layer 2 - GPU scan (CACHED): {gpu_time_ms:.2f}ms")
     else:
         forensic_probability = await run_deep_forensics(source_for_hash, width, height)
         forensic_cache.put(img_hash, forensic_probability)
+        gpu_time_ms = (time.perf_counter() - t_gpu) * 1000
+        logger.info(f"[TIMING] Layer 2 - GPU scan (RunPod): {gpu_time_ms:.2f}ms")
+    
+    total_layer_time_ms = (time.perf_counter() - layer_start) * 1000
+    logger.info(f"[TIMING] Layer 2 - Total: {total_layer_time_ms:.2f}ms | Result: {forensic_probability:.4f}")
     
     l2_data = {
         "status": "detected" if forensic_probability > 0.85 else "suspicious" if forensic_probability > 0.5 else "not_detected",
