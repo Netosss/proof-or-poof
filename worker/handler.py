@@ -13,6 +13,8 @@ from transformers import AutoImageProcessor, AutoModelForImageClassification
 # Enable TF32 for significantly faster matmuls on Ampere+ GPUs (Safe for classification)
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
+# Enable cuDNN benchmark for fixed-size inputs (speedup after first call)
+torch.backends.cudnn.benchmark = True
 
 # ---------------- Logging ----------------
 logging.basicConfig(level=logging.INFO)
@@ -43,10 +45,11 @@ try:
     MODEL_ID = "haywoodsloan/ai-image-detector-dev-deploy"
     logger.info(f"Loading Model and Processor: {MODEL_ID}")
     
-    # 1. Load Processor
+    # 1. Load Processor with fast implementation (Big latency win)
     processor = AutoImageProcessor.from_pretrained(
         MODEL_ID, 
-        trust_remote_code=True
+        trust_remote_code=True,
+        use_fast=True
     )
     
     # 2. Load Model directly in FP16 (Fast & Memory Efficient)
@@ -57,7 +60,8 @@ try:
     ).eval()
     
     if device == "cuda":
-        model = model.to("cuda")
+        # Use channels_last memory format for faster inference on modern GPUs
+        model = model.to("cuda", memory_format=torch.channels_last)
     
     # 3. Pre-parse Label IDs for AI classes (Remove string logic from hot path)
     id2label = {
@@ -72,10 +76,17 @@ try:
 
     # 4. GPU Warm-up (Important for first-request latency)
     if device == "cuda":
-        logger.info("Warming up GPU...")
-        dummy = torch.zeros(1, 3, 224, 224, device="cuda", dtype=torch.float16)
-        with torch.inference_mode(), torch.cuda.amp.autocast():
-            model(pixel_values=dummy)
+        logger.info("Warming up GPU (full pipeline)...")
+        # Create a dummy image and run it through the full pipeline
+        dummy_img = Image.new("RGB", (224, 224))
+        inputs = processor(images=dummy_img, return_tensors="pt")
+        inputs = {k: v.to("cuda", non_blocking=True) for k, v in inputs.items()}
+
+        with torch.inference_mode():
+            _ = model(**inputs)
+        
+        # Ensure kernels are finished before accepting jobs
+        torch.cuda.synchronize()
             
     logger.info("Model and Processor loaded successfully!")
 except Exception as e:
@@ -104,7 +115,7 @@ def get_cpu_fft_score(img: Image.Image) -> float:
 # ---------------- Inference Wrapper ----------------
 @torch.inference_mode()
 def run_deep_scan(img: Image.Image, debug: bool = False):
-    """Direct model call using FP16 and Autocast for maximum GPU throughput."""
+    """Direct model call using FP16 for maximum GPU throughput."""
     if model is None or processor is None:
         return None, None
     
@@ -112,10 +123,13 @@ def run_deep_scan(img: Image.Image, debug: bool = False):
     inputs = processor(images=img, return_tensors="pt")
     
     if device == "cuda":
+        # Micro-opt: Match model memory format on CPU before transfer
+        if "pixel_values" in inputs:
+            inputs["pixel_values"] = inputs["pixel_values"].to(memory_format=torch.channels_last)
+        
+        # Transfer to GPU (Removed pin_memory overhead for single-image serverless path)
         inputs = {k: v.to("cuda", non_blocking=True) for k, v in inputs.items()}
-        # Use Autocast for mixed precision inference (Tensor Core usage)
-        with torch.cuda.amp.autocast():
-            outputs = model(**inputs)
+        outputs = model(**inputs)
     else:
         outputs = model(**inputs)
 
@@ -166,17 +180,24 @@ def handler(job):
         img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         orig_w, orig_h = img.size
 
-        # 1. FFT Score (Now much faster due to internal resize)
+        # 1. KICK GPU SCAN FIRST (Maximizes GPU scheduling efficiency)
+        debug_mode = job_input.get("debug", False)
+        ai_score, raw_results = run_deep_scan(img, debug=debug_mode)
+        if ai_score is None:
+            return {"error": "Inference failed"}
+
+        # 2. RUN CPU HEURISTICS WHILE GPU IS BUSY
+        # 2.1 FFT Score (Now much faster due to internal resize)
         fft_score = get_cpu_fft_score(img)
         megapixels = (orig_w * orig_h) / 1_000_000
         normalized_fft_score = fft_score / max(1.0, megapixels)
 
-        # 2. Dynamic High-resolution Bias
+        # 2.2 Dynamic High-resolution Bias
         high_res_bias = 1.0
         if megapixels > 2.0:
             high_res_bias = max(0.5, 1.0 - (megapixels / 20.0))
 
-        # 3. EXIF/Software Metadata Bias
+        # 2.3 EXIF/Software Metadata Bias
         metadata_bias = 1.0
         try:
             exif = img.getexif()
@@ -190,14 +211,23 @@ def handler(job):
         except Exception as e:
             logger.warning(f"Metadata extraction failed: {e}")
 
-        # 4. Optimized Model Inference
-        debug_mode = job_input.get("debug", False)
-        ai_score, raw_results = run_deep_scan(img, debug=debug_mode)
-        if ai_score is None:
-            return {"error": "Inference failed"}
+        # 2.4 Digital UI / Screen Record Detection (Shield)
+        is_ui_recording = False
+        try:
+            small_gray = np.array(img.resize((32, 32)).convert("L"))
+            unique_colors = len(np.unique(small_gray))
+            if unique_colors < 200: 
+                is_ui_recording = True
+                logger.info(f"UI/Screen Record detected (Unique colors: {unique_colors}). Applying Human bonus.")
+        except:
+            pass
 
-        # 5. Weighted Combination
+        # 3. Weighted Combination
         final_score = (ai_score * 0.9) + (normalized_fft_score * 0.1)
+        
+        if is_ui_recording:
+            final_score *= 0.4 
+        
         final_score *= high_res_bias
         final_score *= metadata_bias
         final_score = max(0.0, min(1.0, final_score))
