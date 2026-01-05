@@ -261,7 +261,18 @@ async def detect(request: Request, file: UploadFile = File(...)):
         duration = time.time() - start_time
         gpu_used = result.get("layers", {}).get("layer2_forensics", {}).get("status") != "skipped"
         
-        if gpu_used:
+        # Use actual GPU time for cost calculation (not round-trip time)
+        actual_gpu_time_ms = result.get("gpu_time_ms", 0.0)
+        actual_gpu_sec = actual_gpu_time_ms / 1000.0
+        
+        if gpu_used and actual_gpu_sec > 0:
+            # Cost based on actual GPU utilization, not network round-trip
+            cost = actual_gpu_sec * GPU_RATE_PER_SEC
+            method = "detect_with_gpu"
+            gpu_sec, cpu_sec = actual_gpu_sec, duration - actual_gpu_sec
+            logger.info(f"[COST] GPU: {actual_gpu_sec:.3f}s (actual) vs {duration:.3f}s (round-trip) | Cost: ${cost:.6f}")
+        elif gpu_used:
+            # Fallback: worker didn't return timing, use round-trip (legacy)
             cost = duration * GPU_RATE_PER_SEC
             method = "detect_with_gpu"
             gpu_sec, cpu_sec = duration, 0
@@ -271,6 +282,9 @@ async def detect(request: Request, file: UploadFile = File(...)):
             gpu_sec, cpu_sec = 0, duration
             
         log_usage(file.filename, filesize, method, cost, gpu_seconds=gpu_sec, cpu_seconds=cpu_sec)
+        
+        # Remove internal field before returning response
+        result.pop("gpu_time_ms", None)
         return result
     finally:
         if os.path.exists(temp_path):

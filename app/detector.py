@@ -409,19 +409,22 @@ async def detect_ai_media_image_logic(file_path: Optional[str], l1_data: dict = 
             }
 
     img_hash = get_image_hash(source_for_hash)
-    cached_score = forensic_cache.get(img_hash)
+    cached_result = forensic_cache.get(img_hash)
     
     # --- GPU Scan ---
     t_gpu = time.perf_counter()
-    if cached_score is not None:
-        forensic_probability = cached_score
-        gpu_time_ms = (time.perf_counter() - t_gpu) * 1000
-        logger.info(f"[TIMING] Layer 2 - GPU scan (CACHED): {gpu_time_ms:.2f}ms")
+    if cached_result is not None:
+        forensic_probability = cached_result.get("ai_score", cached_result) if isinstance(cached_result, dict) else cached_result
+        actual_gpu_time_ms = 0.0  # Cached, no GPU used
+        roundtrip_ms = (time.perf_counter() - t_gpu) * 1000
+        logger.info(f"[TIMING] Layer 2 - GPU scan (CACHED): {roundtrip_ms:.2f}ms")
     else:
-        forensic_probability = await run_deep_forensics(source_for_hash, width, height)
-        forensic_cache.put(img_hash, forensic_probability)
-        gpu_time_ms = (time.perf_counter() - t_gpu) * 1000
-        logger.info(f"[TIMING] Layer 2 - GPU scan (RunPod): {gpu_time_ms:.2f}ms")
+        forensic_result = await run_deep_forensics(source_for_hash, width, height)
+        forensic_probability = forensic_result.get("ai_score", 0.0)
+        actual_gpu_time_ms = forensic_result.get("gpu_time_ms", 0.0)
+        forensic_cache.put(img_hash, forensic_result)
+        roundtrip_ms = (time.perf_counter() - t_gpu) * 1000
+        logger.info(f"[TIMING] Layer 2 - GPU scan (RunPod): {roundtrip_ms:.2f}ms | Actual GPU: {actual_gpu_time_ms:.2f}ms")
     
     total_layer_time_ms = (time.perf_counter() - layer_start) * 1000
     logger.info(f"[TIMING] Layer 2 - Total: {total_layer_time_ms:.2f}ms | Result: {forensic_probability:.4f}")
@@ -452,5 +455,6 @@ async def detect_ai_media_image_logic(file_path: Optional[str], l1_data: dict = 
         "layers": {
             "layer1_metadata": l1_data, 
             "layer2_forensics": l2_data
-        }
+        },
+        "gpu_time_ms": actual_gpu_time_ms  # Actual GPU time for cost calculation
     }
