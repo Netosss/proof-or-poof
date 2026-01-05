@@ -17,6 +17,5 @@ class DetectionLayers(BaseModel):
 
 class DetectionResponse(BaseModel):
     summary: str
-    media_type: str # "image" or "video"
     confidence_score: float
     layers: DetectionLayers
