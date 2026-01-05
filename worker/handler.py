@@ -74,13 +74,21 @@ try:
     ]
     logger.info(f"Detected AI labels at indices: {ai_label_ids}")
 
+    def safe_to_fp16(tensor):
+        """Helper to safely move tensors to GPU with optional FP16 casting."""
+        if tensor.dtype == torch.float32:
+            return tensor.to(device="cuda", dtype=torch.float16, non_blocking=True)
+        return tensor.to(device="cuda", non_blocking=True)
+
     # 4. GPU Warm-up (Important for first-request latency)
     if device == "cuda":
         logger.info("Warming up GPU (full pipeline)...")
         # Create a dummy image and run it through the full pipeline
         dummy_img = Image.new("RGB", (224, 224))
         inputs = processor(images=dummy_img, return_tensors="pt")
-        inputs = {k: v.to("cuda", non_blocking=True) for k, v in inputs.items()}
+        
+        # Safe transfer using helper
+        inputs = {k: safe_to_fp16(v) if torch.is_tensor(v) else v for k, v in inputs.items()}
 
         with torch.inference_mode():
             _ = model(**inputs)
@@ -127,8 +135,8 @@ def run_deep_scan(img: Image.Image, debug: bool = False):
         if "pixel_values" in inputs:
             inputs["pixel_values"] = inputs["pixel_values"].to(memory_format=torch.channels_last)
         
-        # Transfer to GPU (Removed pin_memory overhead for single-image serverless path)
-        inputs = {k: v.to("cuda", non_blocking=True) for k, v in inputs.items()}
+        # Safe transfer using helper (Removed pin_memory overhead for single-image serverless path)
+        inputs = {k: safe_to_fp16(v) if torch.is_tensor(v) else v for k, v in inputs.items()}
         outputs = model(**inputs)
     else:
         outputs = model(**inputs)
@@ -136,8 +144,9 @@ def run_deep_scan(img: Image.Image, debug: bool = False):
     # Get probabilities
     probs = torch.softmax(outputs.logits, dim=-1)[0]
     
-    # Extract AI score from pre-parsed indices
+    # Extract AI score from pre-parsed indices and clamp to safeguard against FP16 rounding
     ai_score = float(probs[ai_label_ids].max())
+    ai_score = max(0.0, min(1.0, ai_score))
     
     # Construct raw results for API compatibility (Only if debug is requested)
     raw_results = None
