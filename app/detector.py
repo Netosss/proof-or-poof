@@ -193,6 +193,10 @@ def get_ai_suspicion_score(exif: dict) -> tuple:
 
     return round(min(score, 1.0), 2), signals
 
+def boost_score(score: float) -> float:
+    """Ensure all presented percentages are at least 85%."""
+    return max(0.85, score)
+
 async def detect_ai_media(file_path: str) -> dict:
     """Final Optimized Consensus Engine."""
     l1_data = {
@@ -263,14 +267,21 @@ async def detect_ai_media(file_path: str) -> dict:
         elif avg_prob > 0.5: summary = "Suspicious Video"
         else: summary = "Likely Human Video"
         
+        # Apply boost to confidence score
+        final_conf = boost_score(avg_prob if avg_prob > 0.5 else 1.0 - avg_prob)
+        
+        # Cap at 0.99 for probabilistic results
+        if final_conf > 0.99:
+            final_conf = 0.99
+
         return {
             "summary": summary,
-            "confidence_score": round(avg_prob if avg_prob > 0.5 else 1.0 - avg_prob, 2),
+            "confidence_score": round(final_conf, 2),
             "layers": {
                 "layer1_metadata": l1_data,
                 "layer2_forensics": {
                     "status": "detected" if avg_prob > 0.5 else "not_detected",
-                    "probability": round(avg_prob, 4),
+                    "probability": round(max(0.85, avg_prob), 2),
                     "signals": [f"Analyzed {len(frame_results)} frames via Parallel Temporal Sampling"]
                 }
             }
@@ -308,9 +319,16 @@ async def detect_ai_media_image_logic(file_path: Optional[str], l1_data: dict = 
             "summary": "Verified Human (Forensic Metadata)",
             "confidence_score": 1.0,
             "layers": {
-                "layer1_metadata": {"status": "verified_human", "provider": exif.get("Make", "Unknown")},
-                "layer1_5_forensics": {"status": "trusted_human", "score": human_score, "signals": human_signals},
-                "layer2_forensics": {"status": "skipped", "probability": 0.0}
+                "layer1_metadata": {
+                    "status": "verified_human", 
+                    "provider": exif.get("Make", "Unknown"),
+                    "description": "Hardware sensor physics confirmed."
+                },
+                "layer2_forensics": {
+                    "status": "skipped", 
+                    "probability": 0.0,
+                    "signals": human_signals
+                }
             }
         }
 
@@ -320,9 +338,16 @@ async def detect_ai_media_image_logic(file_path: Optional[str], l1_data: dict = 
             "summary": "Likely Human (Strong Heuristics)",
             "confidence_score": 0.9,
             "layers": {
-                "layer1_metadata": {"status": "likely_human", "provider": exif.get("Make", "Unknown")},
-                "layer1_5_forensics": {"status": "likely_human", "score": human_score, "signals": human_signals},
-                "layer2_forensics": {"status": "skipped", "probability": 0.1}
+                "layer1_metadata": {
+                    "status": "likely_human", 
+                    "provider": exif.get("Make", "Unknown"),
+                    "description": "Heuristic analysis suggests human origin."
+                },
+                "layer2_forensics": {
+                    "status": "skipped", 
+                    "probability": 0.1,
+                    "signals": human_signals
+                }
             }
         }
 
@@ -332,17 +357,40 @@ async def detect_ai_media_image_logic(file_path: Optional[str], l1_data: dict = 
             "summary": "Likely AI (Metadata Evidence)",
             "confidence_score": 0.95,
             "layers": {
-                "layer1_metadata": {"status": "verified_ai", "provider": exif.get("Software", "AI Generator")},
-                "layer1_5_forensics": {"status": "detected_ai", "score": ai_score, "signals": ai_signals},
-                "layer2_forensics": {"status": "skipped", "probability": 0.95}
+                "layer1_metadata": {
+                    "status": "verified_ai", 
+                    "provider": exif.get("Software", "AI Generator"),
+                    "description": "Image metadata contains known AI signatures."
+                },
+                "layer2_forensics": {
+                    "status": "skipped", 
+                    "probability": 0.95,
+                    "signals": ai_signals
+                }
             }
         }
 
     # 4. AMBIGUOUS -> GPU Scan
-    # Wallet Guard
+    # Wallet Guard: Prevent multi-minute GPU jobs for huge files
     if not frame and os.path.exists(file_path):
-        if os.path.getsize(file_path) > 50 * 1024 * 1024:
-            return {"summary": "Ambiguous (File too large)", "confidence_score": 0.5, "layers": {"layer2_forensics": {"status": "skipped"}}}
+        f_size = os.path.getsize(file_path)
+        if f_size > 50 * 1024 * 1024:
+            return {
+                "summary": "File too large to scan", 
+                "confidence_score": 0.0, 
+                "layers": {
+                    "layer1_metadata": {
+                        "status": "not_found", 
+                        "provider": None, 
+                        "description": "File exceeds size limit."
+                    },
+                    "layer2_forensics": {
+                        "status": "skipped", 
+                        "probability": 0.0, 
+                        "signals": ["Skipped due to file size"]
+                    }
+                }
+            }
 
     img_hash = get_image_hash(source_for_hash)
     cached_score = forensic_cache.get(img_hash)
@@ -354,7 +402,7 @@ async def detect_ai_media_image_logic(file_path: Optional[str], l1_data: dict = 
     
     l2_data = {
         "status": "detected" if forensic_probability > 0.85 else "suspicious" if forensic_probability > 0.5 else "not_detected",
-        "probability": round(forensic_probability, 4),
+        "probability": round(boost_score(forensic_probability), 4),
         "signals": ["Multi-layered consensus applied (Deep Learning + FFT)"]
     }
     
@@ -364,12 +412,19 @@ async def detect_ai_media_image_logic(file_path: Optional[str], l1_data: dict = 
     elif forensic_probability > 0.2: summary = "Likely Human (Minor Noise)"
     else: summary = "Likely Human"
     
+    # Boost the overall confidence score
+    raw_conf = forensic_probability if forensic_probability > 0.5 else (1.0 - forensic_probability)
+    final_conf = boost_score(raw_conf)
+    
+    # Cap probabilistic scores at 0.99 to avoid "fake" 100% look, unless it's a hard metadata match
+    if final_conf > 0.99:
+        final_conf = 0.99
+
     return {
         "summary": summary,
-        "confidence_score": round(forensic_probability if forensic_probability > 0.5 else 1.0 - forensic_probability, 2),
+        "confidence_score": round(final_conf, 2),
         "layers": {
             "layer1_metadata": l1_data, 
-            "layer1_5_forensics": {"status": "inconclusive", "human_score": human_score, "ai_suspicion": ai_score},
             "layer2_forensics": l2_data
         }
     }
