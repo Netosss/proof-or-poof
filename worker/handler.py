@@ -196,30 +196,8 @@ def handler(job):
         if ai_score is None:
             return {"error": "Inference failed"}
 
-        # 4.5 NEW: Digital UI / Screen Record Detection
-        # Check for "Flatness" - real photos and AI photos have noise. 
-        # Screen recordings have perfectly flat digital blocks.
-        is_ui_recording = False
-        try:
-            # Convert to small array to check for identical neighbor pixels (flatness)
-            small_gray = np.array(img.resize((32, 32)).convert("L"))
-            unique_colors = len(np.unique(small_gray))
-            # If a 32x32 block has relatively few unique colors, it's likely a UI/Vector graphic
-            # Real photos and complex AI textures typically have > 250 unique colors in 32x32
-            if unique_colors < 200: 
-                is_ui_recording = True
-                logger.info(f"UI/Screen Record detected (Unique colors: {unique_colors}). Applying Human bonus.")
-        except:
-            pass
-
         # 5. Weighted Combination
-        # Reverted FFT weight to 10% (0.1) as requested.
         final_score = (ai_score * 0.9) + (normalized_fft_score * 0.1)
-        
-        if is_ui_recording:
-            # Apply a strong reduction for confirmed digital UI content
-            final_score *= 0.4 
-        
         final_score *= high_res_bias
         final_score *= metadata_bias
         final_score = max(0.0, min(1.0, final_score))
