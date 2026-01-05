@@ -91,6 +91,108 @@ def extract_video_frames(video_path: str, num_frames: int = 2) -> list:
         logger.error(f"Error extracting video frames: {e}")
     return frames
 
+def get_forensic_metadata_score(exif: dict) -> tuple:
+    """
+    Advanced forensic check for human sensor physics using weighted tiers.
+    Includes type and range validation to prevent metadata spoofing.
+    """
+    score = 0.0
+    signals = []
+
+    def to_float(val):
+        try: return float(val)
+        except: return None
+
+    # --- Tier 1: Device Provenance (Max 0.55) ---
+    make = str(exif.get("Make", "")).lower()
+    software = str(exif.get("Software", "")).lower()
+    
+    if any(m in make for m in ["apple", "google", "samsung", "sony", "canon", "nikon"]):
+        score += 0.30
+        signals.append("Trusted device manufacturer provenance")
+    
+    if any(s in software for s in ["hdr+", "ios", "android", "deep fusion", "one ui", "version"]):
+        score += 0.25
+        signals.append("Validated vendor-specific camera pipeline")
+
+    # --- Tier 2: Physical Camera Consistency (Max 0.30) ---
+    # Signal 2.1: Exposure Time (0.10) - Valid range: 0 < exp < 30s
+    exp = to_float(exif.get("ExposureTime"))
+    if exp is not None and 0 < exp < 30:
+        score += 0.10
+        signals.append("Physically valid exposure duration")
+    
+    # Signal 2.2: ISO Speed (0.10) - Valid range: 50 < ISO < 102400
+    iso = to_float(exif.get("ISOSpeedRatings"))
+    if iso is not None and 50 <= iso <= 102400:
+        score += 0.10
+        signals.append("Realistic sensor sensitivity (ISO)")
+        
+    # Signal 2.3: Aperture/F-Number (0.10) - Valid range: 0.95 < f < 32
+    f_num = to_float(exif.get("FNumber"))
+    if f_num is not None and 0.95 <= f_num <= 32:
+        score += 0.10
+        signals.append("Valid physical aperture geometry")
+
+    # --- Tier 3: Temporal Authenticity (Max 0.05) ---
+    if "DateTimeOriginal" in exif:
+        score += 0.03
+        signals.append("Temporal capture timestamp present")
+        
+    subsec = str(exif.get("SubSecTimeOriginal", exif.get("SubSecTimeDigitized", "")))
+    if subsec and subsec.isdigit() and subsec not in ["000", "000000"]:
+        score += 0.02
+        signals.append("High-precision sensor timing")
+
+    # --- Tier 4: JPEG Structure (Max 0.10) ---
+    if "JPEGInterchangeFormat" in exif:
+        score += 0.05
+        signals.append("Firmware-level segment tables")
+        
+    if exif.get("Compression") in [6, 1]: 
+        score += 0.05
+        signals.append("Standard camera compression")
+
+    return round(score, 2), signals
+
+def get_ai_suspicion_score(exif: dict) -> tuple:
+    """
+    Weighted AI suspicion score based on blatant signatures and missing camera metadata.
+    """
+    score = 0.0
+    signals = []
+    
+    # 1. Hard AI Evidence (Software/Make keywords)
+    ai_keywords = ["stable", "diffusion", "midjourney", "dalle", "flux", "sora", "kling", "firefly", "generative", "artificial"]
+    software = str(exif.get("Software", "")).lower()
+    make = str(exif.get("Make", "")).lower()
+    
+    if any(k in software for k in ai_keywords):
+        score += 0.40
+        signals.append(f"AI software signature: {software}")
+    elif any(k in make for k in ai_keywords):
+        score += 0.40
+        signals.append(f"AI manufacturer signature: {make}")
+
+    # 2. Negative Signals (Missing Metadata statistically unlikely for real cameras)
+    if not exif.get("Make") and not exif.get("Model"):
+        score += 0.10
+        signals.append("Missing camera hardware provenance")
+
+    if "DateTimeOriginal" not in exif:
+        score += 0.05
+        signals.append("Missing capture timestamp")
+
+    if not exif.get("SubSecTimeOriginal") and not exif.get("SubSecTimeDigitized"):
+        score += 0.03
+        signals.append("Missing high-precision sensor timing")
+
+    if "JPEGInterchangeFormat" not in exif:
+        score += 0.05
+        signals.append("Non-standard JPEG segment structure")
+
+    return round(min(score, 1.0), 2), signals
+
 async def detect_ai_media(file_path: str) -> dict:
     """Final Optimized Consensus Engine."""
     l1_data = {
@@ -147,13 +249,11 @@ async def detect_ai_media(file_path: str) -> dict:
         if not frames:
             return {"error": "Could not extract frames from video."}
             
-        # Process frames in parallel for 2x speedup
         tasks = [detect_ai_media_image_logic(None, frame=f) for f in frames]
         frame_results = await asyncio.gather(*tasks)
         
-        # Smart Early Exit: If any frame is confidently human, the video is likely real
         for res in frame_results:
-            if res.get("summary") == "Verified Human (Exif Confidence)":
+            if res.get("summary") == "Verified Human (Forensic Metadata)":
                 logger.info(f"Video Early Exit: Frame scan found trusted human metadata.")
                 return res
         
@@ -179,11 +279,10 @@ async def detect_ai_media(file_path: str) -> dict:
         return await detect_ai_media_image_logic(file_path, l1_data)
 
 async def detect_ai_media_image_logic(file_path: Optional[str], l1_data: dict = None, frame: Image.Image = None) -> dict:
-    """Refactored image logic. No more long-lived file handles."""
+    """Core consensus logic for images and video frames."""
     if l1_data is None:
         l1_data = {"status": "not_found", "provider": None, "description": "N/A"}
 
-    # --- 2️⃣ LAYER 2: Pre-filter ---
     if frame:
         img_for_res = frame
         exif = {} 
@@ -193,7 +292,6 @@ async def detect_ai_media_image_logic(file_path: Optional[str], l1_data: dict = 
     else:
         exif = get_exif_data(file_path)
         try:
-            # Use 'with' to get size and close handle immediately
             with Image.open(file_path) as img:
                 width, height = img.size
             source_for_hash = file_path
@@ -201,59 +299,49 @@ async def detect_ai_media_image_logic(file_path: Optional[str], l1_data: dict = 
         except:
             return {"error": "Invalid image file"}
     
-    make = str(exif.get("Make", "")).lower()
-    software = str(exif.get("Software", "")).lower()
-
-    pre_filter_human_score = 0.0
-    ai_suspicion_score = 0.0
+    human_score, human_signals = get_forensic_metadata_score(exif)
+    ai_score, ai_signals = get_ai_suspicion_score(exif)
     
-    # Trusted Signals
-    trusted_makes = ["canon", "nikon", "sony", "fujifilm", "panasonic", "olympus", "leica", "apple", "samsung", "google"]
-    has_trusted_make = any(m in make for m in trusted_makes)
-    if has_trusted_make:
-        pre_filter_human_score += 0.3
-        
-    trusted_software = ["lightroom", "photoshop", "capture one", "gimp", "apple", "android", "darktable"]
-    if any(s in software for s in trusted_software):
-        pre_filter_human_score += 0.3
-        
-    if width > 2500 and height > 2000:
-        pre_filter_human_score += 0.2
-        if has_trusted_make:
-            pre_filter_human_score += 0.2 
-
-    # AI Suspicion
-    is_pow2_w = (width > 0) and (width & (width - 1) == 0)
-    is_pow2_h = (height > 0) and (height & (height - 1) == 0)
-    if (is_pow2_w and is_pow2_h) and width <= 1024:
-        ai_suspicion_score += 0.25 
-
-    if has_trusted_make and (width * height) < 500000:
-        pre_filter_human_score -= 0.1 
-        ai_suspicion_score += 0.1
-
-    net_human_confidence = pre_filter_human_score - ai_suspicion_score
-
-    if net_human_confidence >= 0.7:
-        logger.info(f"Pre-filter Confidence ({net_human_confidence}) passed. Skipping GPU.")
+    # 1. VERIFIED HUMAN (Early Exit)
+    if human_score >= 0.80:
         return {
-            "summary": "Verified Human (Exif Confidence)",
+            "summary": "Verified Human (Forensic Metadata)",
             "confidence_score": 1.0,
             "layers": {
-                "layer0_prefilter": {
-                    "status": "trusted_human",
-                    "details": f"Make: {make}, Software: {software}, Res: {width}x{height}, NetScore: {round(net_human_confidence, 2)}"
-                },
-                "layer1_metadata": {"status": "skipped", "provider": make, "description": "EXIF indicates professional photography workflow."},
-                "layer2_forensics": {"status": "skipped", "probability": 0.0, "signals": ["Skipped: High Exif confidence."]}
+                "layer1_metadata": {"status": "verified_human", "provider": exif.get("Make", "Unknown")},
+                "layer1_5_forensics": {"status": "trusted_human", "score": human_score, "signals": human_signals},
+                "layer2_forensics": {"status": "skipped", "probability": 0.0}
             }
         }
 
-    # --- 3️⃣ LAYER 3: Forensic Fallback ---
-    # GPU COST GUARD: Skip huge files
+    # 2. LIKELY HUMAN (Early Exit)
+    if human_score >= 0.60 and ai_score < 0.20:
+        return {
+            "summary": "Likely Human (Strong Heuristics)",
+            "confidence_score": 0.9,
+            "layers": {
+                "layer1_metadata": {"status": "likely_human", "provider": exif.get("Make", "Unknown")},
+                "layer1_5_forensics": {"status": "likely_human", "score": human_score, "signals": human_signals},
+                "layer2_forensics": {"status": "skipped", "probability": 0.1}
+            }
+        }
+
+    # 3. LIKELY AI (Early Exit)
+    if ai_score >= 0.50:
+        return {
+            "summary": "Likely AI (Metadata Evidence)",
+            "confidence_score": 0.95,
+            "layers": {
+                "layer1_metadata": {"status": "verified_ai", "provider": exif.get("Software", "AI Generator")},
+                "layer1_5_forensics": {"status": "detected_ai", "score": ai_score, "signals": ai_signals},
+                "layer2_forensics": {"status": "skipped", "probability": 0.95}
+            }
+        }
+
+    # 4. AMBIGUOUS -> GPU Scan
+    # Wallet Guard
     if not frame and os.path.exists(file_path):
-        f_size = os.path.getsize(file_path)
-        if f_size > 50 * 1024 * 1024:
+        if os.path.getsize(file_path) > 50 * 1024 * 1024:
             return {"summary": "Ambiguous (File too large)", "confidence_score": 0.5, "layers": {"layer2_forensics": {"status": "skipped"}}}
 
     img_hash = get_image_hash(source_for_hash)
@@ -261,8 +349,6 @@ async def detect_ai_media_image_logic(file_path: Optional[str], l1_data: dict = 
     if cached_score is not None:
         forensic_probability = cached_score
     else:
-        logger.info(f"Ambiguous Pre-filter. Running In-Memory GPU Scan...")
-        # NO DISK: Pass PIL Image (source_for_hash) directly to RunPod client
         forensic_probability = await run_deep_forensics(source_for_hash, width, height)
         forensic_cache.put(img_hash, forensic_probability)
     
@@ -278,10 +364,12 @@ async def detect_ai_media_image_logic(file_path: Optional[str], l1_data: dict = 
     elif forensic_probability > 0.2: summary = "Likely Human (Minor Noise)"
     else: summary = "Likely Human"
     
-    confidence_score = forensic_probability if forensic_probability > 0.5 else (1.0 - forensic_probability)
-        
     return {
         "summary": summary,
-        "confidence_score": round(confidence_score, 2),
-        "layers": {"layer1_metadata": l1_data, "layer2_forensics": l2_data}
+        "confidence_score": round(forensic_probability if forensic_probability > 0.5 else 1.0 - forensic_probability, 2),
+        "layers": {
+            "layer1_metadata": l1_data, 
+            "layer1_5_forensics": {"status": "inconclusive", "human_score": human_score, "ai_suspicion": ai_score},
+            "layer2_forensics": l2_data
+        }
     }

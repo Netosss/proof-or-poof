@@ -75,126 +75,143 @@ async def health():
 # ---- Dashboard endpoint ----
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard():
+    # 1. Check if log exists
     if not os.path.exists(USAGE_LOG):
+        logger.info("Dashboard requested but usage_log.csv does not exist yet.")
         return """
         <body style="background-color: #111217; color: white; font-family: sans-serif; padding: 50px; text-align: center;">
-            <h2>No usage data yet. Start scanning images! 🚀</h2>
+            <div style="border: 1px solid #24272e; padding: 40px; border-radius: 8px; display: inline-block;">
+                <h1 style="color: #32d1df;">Empty Dashboard 🌌</h1>
+                <p style="color: #8e8e8e;">No usage data found on this instance.</p>
+                <p style="font-size: 0.8em; color: #555;">Note: History is cleared on every Railway redeploy unless using Volumes.</p>
+                <a href="/detect" style="color: #73bf69; text-decoration: none; border: 1px solid #73bf69; padding: 10px 20px; border-radius: 4px; display: inline-block; margin-top: 20px;">Try a Scan! 🚀</a>
+            </div>
         </body>
         """
 
     try:
+        # 2. Read and Validate Data
         df = pd.read_csv(USAGE_LOG)
-    except:
-        return "<body style='background-color: #111217; color: white;'><h2>Log file error.</h2></body>"
+        if df.empty:
+            raise ValueError("CSV is empty")
+            
+        # Ensure timestamp is numeric
+        df['timestamp'] = pd.to_numeric(df['timestamp'], errors='coerce')
+        df = df.dropna(subset=['timestamp'])
         
-    if df.empty:
-        return "<body style='background-color: #111217; color: white; text-align: center;'><h2>No data records found.</h2></body>"
-    
-    # Pre-processing
-    df['datetime'] = pd.to_datetime(df['timestamp'], unit='s')
-    df['date_label'] = df['datetime'].dt.strftime('%H:%M:%S')
-    df = df.sort_values('timestamp')
+        # Pre-processing
+        df['datetime'] = pd.to_datetime(df['timestamp'], unit='s')
+        df['date_label'] = df['datetime'].dt.strftime('%H:%M:%S')
+        df = df.sort_values('timestamp')
 
-    # Create Grafana-like Scatter Plot
-    fig = px.scatter(
-        df, x="datetime", y="cost_usd", color="method",
-        text="request_id",
-        hover_data={
-            "datetime": "|%Y-%m-%d %H:%M:%S",
-            "cost_usd": ":$.4f",
-            "filename": True,
-            "filesize": True,
-            "gpu_seconds": ":.2f",
-            "cpu_seconds": ":.2f"
-        },
-        title="Operational Spending (USD)",
-        template="plotly_dark"
-    )
+        # 3. Create Grafana-like Scatter Plot
+        fig = px.scatter(
+            df, x="datetime", y="cost_usd", color="method",
+            text="request_id",
+            hover_data={
+                "datetime": "|%Y-%m-%d %H:%M:%S",
+                "cost_usd": ":$.4f",
+                "filename": True,
+                "filesize": True,
+                "gpu_seconds": ":.2f",
+                "cpu_seconds": ":.2f"
+            },
+            title="Operational Spending (USD)",
+            template="plotly_dark"
+        )
 
-    # Style the graph to look like Grafana
-    fig.update_traces(
-        marker=dict(size=14, line=dict(width=2, color='white')),
-        textposition='top center',
-        mode='markers+text'
-    )
-    
-    fig.update_layout(
-        paper_bgcolor="#111217",
-        plot_bgcolor="#111217",
-        font_color="#d8d9da",
-        xaxis=dict(gridcolor="#24272e", title="Time"),
-        yaxis=dict(gridcolor="#24272e", title="Cost", tickformat="$.4f"),
-        legend=dict(bgcolor="rgba(0,0,0,0)", bordercolor="#24272e", borderwidth=1),
-        margin=dict(l=40, r=40, t=60, b=40)
-    )
+        fig.update_traces(
+            marker=dict(size=14, line=dict(width=2, color='white')),
+            textposition='top center',
+            mode='markers+text'
+        )
+        
+        fig.update_layout(
+            paper_bgcolor="#111217",
+            plot_bgcolor="#111217",
+            font_color="#d8d9da",
+            xaxis=dict(gridcolor="#24272e", title="Time"),
+            yaxis=dict(gridcolor="#24272e", title="Cost", tickformat="$.4f"),
+            legend=dict(bgcolor="rgba(0,0,0,0)", bordercolor="#24272e", borderwidth=1),
+            margin=dict(l=40, r=40, t=60, b=40)
+        )
 
-    # Build HTML table for "Logs" look
-    table_rows = ""
-    for _, row in df.tail(10).iloc[::-1].iterrows(): # Last 10, newest first
-        table_rows += f"""
-        <tr style="border-bottom: 1px solid #24272e;">
-            <td style="padding: 10px; color: #32d1df;">{row['request_id']}</td>
-            <td style="padding: 10px;">{row['date_label']}</td>
-            <td style="padding: 10px;">{row['filename']}</td>
-            <td style="padding: 10px;">{row['method']}</td>
-            <td style="padding: 10px; color: #73bf69;">${row['cost_usd']:.4f}</td>
-            <td style="padding: 10px;">{row['gpu_seconds']:.2f}s</td>
-        </tr>
-        """
+        # Build HTML table for "Logs" look
+        table_rows = ""
+        for _, row in df.tail(10).iloc[::-1].iterrows(): # Last 10, newest first
+            table_rows += f"""
+            <tr style="border-bottom: 1px solid #24272e;">
+                <td style="padding: 10px; color: #32d1df;">{row['request_id']}</td>
+                <td style="padding: 10px;">{row['date_label']}</td>
+                <td style="padding: 10px;">{row['filename']}</td>
+                <td style="padding: 10px;">{row['method']}</td>
+                <td style="padding: 10px; color: #73bf69;">${row['cost_usd']:.4f}</td>
+                <td style="padding: 10px;">{row['gpu_seconds']:.2f}s</td>
+            </tr>
+            """
 
-    html = f"""
-    <html>
-        <head>
-            <meta http-equiv="refresh" content="10">
-            <title>AI Ops Dashboard</title>
-            <style>
-                body {{ font-family: 'Inter', sans-serif; background-color: #111217; color: #d8d9da; margin: 0; padding: 20px; }}
-                .header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #24272e; padding-bottom: 10px; margin-bottom: 20px; }}
-                .card {{ background-color: #181b1f; border: 1px solid #24272e; border-radius: 4px; padding: 20px; margin-bottom: 20px; }}
-                .stat-box {{ display: flex; gap: 20px; }}
-                .stat {{ background: #21262d; padding: 10px 20px; border-radius: 4px; border-left: 4px solid #32d1df; }}
-                .stat-val {{ font-size: 1.5em; font-weight: bold; color: #ffffff; }}
-                .stat-label {{ font-size: 0.8em; color: #8e8e8e; text-transform: uppercase; }}
-                table {{ width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.9em; }}
-                th {{ text-align: left; background: #21262d; padding: 10px; color: #8e8e8e; text-transform: uppercase; font-size: 0.8em; }}
-            </style>
-        </head>
-        <body>
-            <div class="header">
-                <div style="font-size: 1.2em; font-weight: bold;">AI OPS / <span style="color: #32d1df;">USAGE_TRACKER</span></div>
-                <div class="stat-box">
-                    <div class="stat">
-                        <div class="stat-label">Total Burn</div>
-                        <div class="stat-val">${df['cost_usd'].sum():.4f}</div>
-                    </div>
-                    <div class="stat" style="border-left-color: #73bf69;">
-                        <div class="stat-label">Requests</div>
-                        <div class="stat-val">{len(df)}</div>
+        html = f"""
+        <html>
+            <head>
+                <meta http-equiv="refresh" content="10">
+                <title>AI Ops Dashboard</title>
+                <style>
+                    body {{ font-family: 'Inter', sans-serif; background-color: #111217; color: #d8d9da; margin: 0; padding: 20px; }}
+                    .header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #24272e; padding-bottom: 10px; margin-bottom: 20px; }}
+                    .card {{ background-color: #181b1f; border: 1px solid #24272e; border-radius: 4px; padding: 20px; margin-bottom: 20px; }}
+                    .stat-box {{ display: flex; gap: 20px; }}
+                    .stat {{ background: #21262d; padding: 10px 20px; border-radius: 4px; border-left: 4px solid #32d1df; }}
+                    .stat-val {{ font-size: 1.5em; font-weight: bold; color: #ffffff; }}
+                    .stat-label {{ font-size: 0.8em; color: #8e8e8e; text-transform: uppercase; }}
+                    table {{ width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.9em; }}
+                    th {{ text-align: left; background: #21262d; padding: 10px; color: #8e8e8e; text-transform: uppercase; font-size: 0.8em; }}
+                </style>
+            </head>
+            <body>
+                <div class="header">
+                    <div style="font-size: 1.2em; font-weight: bold;">AI OPS / <span style="color: #32d1df;">USAGE_TRACKER</span></div>
+                    <div class="stat-box">
+                        <div class="stat">
+                            <div class="stat-label">Total Burn</div>
+                            <div class="stat-val">${df['cost_usd'].sum():.4f}</div>
+                        </div>
+                        <div class="stat" style="border-left-color: #73bf69;">
+                            <div class="stat-label">Requests</div>
+                            <div class="stat-val">{len(df)}</div>
+                        </div>
                     </div>
                 </div>
-            </div>
 
-            <div class="card">
-                {fig.to_html(full_html=False, include_plotlyjs='cdn')}
-            </div>
+                <div class="card">
+                    {fig.to_html(full_html=False, include_plotlyjs='cdn')}
+                </div>
 
-            <div class="card">
-                <div style="font-weight: bold; margin-bottom: 15px; color: #32d1df;">LIVE REQUEST LOGS</div>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>ID</th><th>Time</th><th>File</th><th>Method</th><th>Cost</th><th>GPU Time</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {table_rows}
-                    </tbody>
-                </table>
-            </div>
+                <div class="card">
+                    <div style="font-weight: bold; margin-bottom: 15px; color: #32d1df;">LIVE REQUEST LOGS</div>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>ID</th><th>Time</th><th>File</th><th>Method</th><th>Cost</th><th>GPU Time</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {table_rows}
+                        </tbody>
+                    </table>
+                </div>
+            </body>
+        </html>
+        """
+        return HTMLResponse(html)
+    except Exception as e:
+        logger.error(f"Dashboard render error: {e}", exc_info=True)
+        return f"""
+        <body style="background-color: #111217; color: white; padding: 50px;">
+            <h2>Dashboard Error ⚠️</h2>
+            <p>Could not load usage data: {str(e)}</p>
+            <p style="color: #8e8e8e;">Try scanning another image to regenerate the log file.</p>
         </body>
-    </html>
-    """
-    return HTMLResponse(html)
+        """
 
 # ---- WebSocket endpoint ----
 connected_clients = []
