@@ -220,22 +220,9 @@ def handler(job):
         except Exception as e:
             logger.warning(f"Metadata extraction failed: {e}")
 
-        # 2.4 Digital UI / Screen Record Detection (Shield)
-        is_ui_recording = False
-        try:
-            small_gray = np.array(img.resize((32, 32)).convert("L"))
-            unique_colors = len(np.unique(small_gray))
-            if unique_colors < 200: 
-                is_ui_recording = True
-                logger.info(f"UI/Screen Record detected (Unique colors: {unique_colors}). Applying Human bonus.")
-        except:
-            pass
-
         # 3. Weighted Combination
+        # Reverted FFT weight to 10% (0.1) as requested.
         final_score = (ai_score * 0.9) + (normalized_fft_score * 0.1)
-        
-        if is_ui_recording:
-            final_score *= 0.4 
         
         final_score *= high_res_bias
         final_score *= metadata_bias
