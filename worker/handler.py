@@ -1,6 +1,7 @@
 import runpod
 import base64
 import io
+import time
 import torch
 import logging
 import hashlib
@@ -185,21 +186,32 @@ def handler(job):
         return cached
 
     try:
+        total_start = time.perf_counter()
+        
         # Decode and load image
+        t0 = time.perf_counter()
         img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         orig_w, orig_h = img.size
+        decode_time_ms = (time.perf_counter() - t0) * 1000
+        logger.info(f"[TIMING] Image decode: {decode_time_ms:.2f}ms")
 
         # 1. KICK GPU SCAN FIRST (Maximizes GPU scheduling efficiency)
+        t1 = time.perf_counter()
         debug_mode = job_input.get("debug", False)
         ai_score, raw_results = run_deep_scan(img, debug=debug_mode)
+        model_time_ms = (time.perf_counter() - t1) * 1000
+        logger.info(f"[TIMING] Model inference: {model_time_ms:.2f}ms")
         if ai_score is None:
             return {"error": "Inference failed"}
 
         # 2. RUN CPU HEURISTICS WHILE GPU IS BUSY
         # 2.1 FFT Score (Now much faster due to internal resize)
+        t2 = time.perf_counter()
         fft_score = get_cpu_fft_score(img)
         megapixels = (orig_w * orig_h) / 1_000_000
         normalized_fft_score = fft_score / max(1.0, megapixels)
+        fft_time_ms = (time.perf_counter() - t2) * 1000
+        logger.info(f"[TIMING] FFT analysis: {fft_time_ms:.2f}ms")
 
         # 2.2 Dynamic High-resolution Bias
         high_res_bias = 1.0
@@ -207,6 +219,7 @@ def handler(job):
             high_res_bias = max(0.5, 1.0 - (megapixels / 20.0))
 
         # 2.3 EXIF/Software Metadata Bias
+        t3 = time.perf_counter()
         metadata_bias = 1.0
         try:
             exif = img.getexif()
@@ -219,14 +232,24 @@ def handler(job):
                     metadata_bias *= 0.85
         except Exception as e:
             logger.warning(f"Metadata extraction failed: {e}")
+        metadata_time_ms = (time.perf_counter() - t3) * 1000
+        logger.info(f"[TIMING] Metadata extraction: {metadata_time_ms:.2f}ms")
 
         # 3. Weighted Combination
-        # Reverted FFT weight to 10% (0.1) as requested.
-        final_score = (ai_score * 0.9) + (normalized_fft_score * 0.1)
+        # Skip FFT weighting if model confidence is high (>85%)
+        if ai_score > 0.85:
+            final_score = ai_score
+            logger.info(f"[LOGIC] Model score {ai_score:.4f} > 0.85, skipping FFT weighting")
+        else:
+            final_score = (ai_score * 0.9) + (normalized_fft_score * 0.1)
+            logger.info(f"[LOGIC] Applied FFT weighting: {ai_score:.4f} * 0.9 + {normalized_fft_score:.4f} * 0.1 = {final_score:.4f}")
         
         final_score *= high_res_bias
         final_score *= metadata_bias
         final_score = max(0.0, min(1.0, final_score))
+
+        total_time_ms = (time.perf_counter() - total_start) * 1000
+        logger.info(f"[TIMING] Total processing: {total_time_ms:.2f}ms")
 
         result = {
             "ai_score": final_score,
@@ -235,7 +258,14 @@ def handler(job):
             "high_res_bias": high_res_bias,
             "metadata_bias": metadata_bias,
             "image_size": [orig_w, orig_h],
-            "raw_results": raw_results
+            "raw_results": raw_results,
+            "timing_ms": {
+                "decode": round(decode_time_ms, 2),
+                "model": round(model_time_ms, 2),
+                "fft": round(fft_time_ms, 2),
+                "metadata": round(metadata_time_ms, 2),
+                "total": round(total_time_ms, 2)
+            }
         }
         worker_cache.put(img_hash, result)
         return result
