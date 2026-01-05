@@ -1,5 +1,6 @@
 runpod
 transformers>=4.49.0
+accelerate
 Pillow
 timm
 numpy
