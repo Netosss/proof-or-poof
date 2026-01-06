@@ -742,7 +742,7 @@ async def detect_ai_media(file_path: str) -> dict:
             logger.info(f"[VIDEO] Early exit: Verified Human via metadata (h={human_score:.2f}, ai={ai_meta_score:.2f})")
             return {
                 "summary": "Verified Human Video",
-                "confidence_score": 1.0,
+                "confidence_score": 0.99,  # Max 99% without C2PA
                 "layers": {
                     "layer1_metadata": {
                         "status": "verified_human",
@@ -764,7 +764,7 @@ async def detect_ai_media(file_path: str) -> dict:
             logger.info(f"[VIDEO] Early exit: AI Generator detected via metadata (h={human_score:.2f}, ai={ai_meta_score:.2f})")
             return {
                 "summary": "Verified AI Video",
-                "confidence_score": 1.0,
+                "confidence_score": 0.99,  # Max 99% without C2PA
                 "layers": {
                     "layer1_metadata": {
                         "status": "verified_ai",
@@ -976,7 +976,7 @@ async def detect_ai_media_image_logic(file_path: Optional[str], l1_data: dict = 
         logger.info(f"[EARLY EXIT] Skipping GPU scan: High confidence human metadata ({human_score:.2f})")
         return {
             "summary": "Verified Human (Metadata)",
-            "confidence_score": 1.0,
+            "confidence_score": 0.99,  # Max 99% without C2PA
             "layers": {
                 "layer1_metadata": {
                     "status": "verified_human", 
@@ -1034,7 +1034,29 @@ async def detect_ai_media_image_logic(file_path: Optional[str], l1_data: dict = 
             "gpu_time_ms": 0  # $0.00 cost
         }
 
-    # 4. AMBIGUOUS -> GPU Scan
+    # 4. SUSPICIOUS AI (Early Exit) - AI indicators + zero human signals
+    # If metadata shows AI patterns and NO human camera evidence, flag as suspicious
+    if ai_score >= 0.30 and human_score == 0.0:
+        logger.info(f"[EARLY EXIT] Skipping GPU scan: AI indicators + no human metadata (ai={ai_score:.2f}, human={human_score:.2f})")
+        return {
+            "summary": "Suspicious (No Camera Metadata)",
+            "confidence_score": 0.80,
+            "layers": {
+                "layer1_metadata": {
+                    "status": "suspicious", 
+                    "provider": None,
+                    "description": "No camera metadata found, AI-typical characteristics detected."
+                },
+                "layer2_forensics": {
+                    "status": "skipped", 
+                    "probability": 0.80,
+                    "signals": ai_signals
+                }
+            },
+            "gpu_time_ms": 0  # $0.00 cost
+        }
+
+    # 5. AMBIGUOUS -> GPU Scan
     # Wallet Guard: Prevent multi-minute GPU jobs for huge files
     if not frame and os.path.exists(file_path):
         f_size = os.path.getsize(file_path)
