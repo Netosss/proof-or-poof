@@ -595,12 +595,15 @@ def get_forensic_metadata_score(exif: dict) -> tuple:
 
     return round(score, 2), signals
 
-def get_ai_suspicion_score(exif: dict) -> tuple:
+def get_ai_suspicion_score(exif: dict, width: int = 0, height: int = 0, file_size: int = 0) -> tuple:
     """
-    Weighted AI suspicion score based on blatant signatures and missing camera metadata.
+    Weighted AI suspicion score based on blatant signatures, missing camera metadata,
+    and image characteristics (dimensions, file size).
     """
     score = 0.0
     signals = []
+    
+    has_camera_info = exif.get("Make") or exif.get("Model")
     
     # 1. Hard AI Evidence (Software/Make keywords)
     ai_keywords = ["stable", "diffusion", "midjourney", "dalle", "flux", "sora", "kling", "firefly", "generative", "artificial"]
@@ -614,8 +617,8 @@ def get_ai_suspicion_score(exif: dict) -> tuple:
         score += 0.40
         signals.append(f"AI manufacturer signature: {make}")
 
-    # 2. Negative Signals (Missing Metadata statistically unlikely for real cameras)
-    if not exif.get("Make") and not exif.get("Model"):
+    # 2. Missing Metadata (statistically unlikely for real cameras)
+    if not has_camera_info:
         score += 0.10
         signals.append("Missing camera hardware provenance")
 
@@ -630,6 +633,38 @@ def get_ai_suspicion_score(exif: dict) -> tuple:
     if "JPEGInterchangeFormat" not in exif:
         score += 0.05
         signals.append("Non-standard JPEG segment structure")
+
+    # 3. AI-typical dimensions (only if no camera info)
+    if width > 0 and height > 0 and not has_camera_info:
+        # AI generators often use power-of-2 or specific widths
+        ai_typical_widths = [512, 768, 1024, 1536, 2048]
+        if width in ai_typical_widths:
+            score += 0.15
+            signals.append(f"AI-typical width: {width}px")
+        elif height in ai_typical_widths:
+            score += 0.10
+            signals.append(f"AI-typical height: {height}px")
+        
+        # 4. Non-standard aspect ratio (not 4:3, 3:2, 16:9, 1:1)
+        aspect = width / height if height > 0 else 0
+        standard_aspects = [1.0, 1.33, 1.5, 1.78, 0.75, 0.67, 0.56, 1.0]  # Common camera ratios
+        is_standard = any(abs(aspect - std) < 0.08 for std in standard_aspects)
+        if not is_standard and aspect > 0:
+            score += 0.05
+            signals.append(f"Non-standard aspect ratio: {aspect:.2f}")
+
+    # 5. File size analysis (small file for resolution = likely AI/compressed)
+    if width > 0 and height > 0 and file_size > 0 and not has_camera_info:
+        pixels = width * height
+        bytes_per_pixel = file_size / pixels if pixels > 0 else 0
+        # Real photos typically have 0.5-3 bytes per pixel
+        # AI images are often heavily compressed or have lower detail
+        if bytes_per_pixel < 0.15 and pixels > 500000:
+            score += 0.10
+            signals.append(f"Low bytes/pixel: {bytes_per_pixel:.2f} (heavily compressed)")
+        elif bytes_per_pixel < 0.3 and pixels > 500000:
+            score += 0.05
+            signals.append(f"Compressed image: {bytes_per_pixel:.2f} bytes/pixel")
 
     return round(min(score, 1.0), 2), signals
 
@@ -884,6 +919,7 @@ async def detect_ai_media_image_logic(file_path: Optional[str], l1_data: dict = 
 
     # --- EXIF Extraction ---
     t_exif = time.perf_counter()
+    file_size = 0
     if frame:
         img_for_res = frame
         exif = {} 
@@ -897,6 +933,7 @@ async def detect_ai_media_image_logic(file_path: Optional[str], l1_data: dict = 
                 width, height = img.size
             source_for_hash = file_path
             source_path = file_path
+            file_size = os.path.getsize(file_path)
         except:
             return {"error": "Invalid image file"}
     exif_time_ms = (time.perf_counter() - t_exif) * 1000
@@ -905,9 +942,13 @@ async def detect_ai_media_image_logic(file_path: Optional[str], l1_data: dict = 
     # --- Metadata Scoring ---
     t_scoring = time.perf_counter()
     human_score, human_signals = get_forensic_metadata_score(exif)
-    ai_score, ai_signals = get_ai_suspicion_score(exif)
+    ai_score, ai_signals = get_ai_suspicion_score(exif, width, height, file_size)
     scoring_time_ms = (time.perf_counter() - t_scoring) * 1000
     logger.info(f"[TIMING] Metadata scoring: {scoring_time_ms:.2f}ms (human={human_score:.2f}, ai={ai_score:.2f})")
+    if human_signals:
+        logger.info(f"[META] Human signals: {human_signals}")
+    if ai_signals:
+        logger.info(f"[META] AI signals: {ai_signals}")
     
     # 1. VERIFIED HUMAN (Early Exit)
     if human_score >= 0.80:
@@ -1010,10 +1051,23 @@ async def detect_ai_media_image_logic(file_path: Optional[str], l1_data: dict = 
     total_layer_time_ms = (time.perf_counter() - layer_start) * 1000
     logger.info(f"[TIMING] Layer 2 - Total: {total_layer_time_ms:.2f}ms | Result: {forensic_probability:.4f}")
     
+    # --- Metadata-Model Conflict Resolution (Weighted Blend) ---
+    # When metadata signals strongly suggest AI but model disagrees, blend the scores
+    final_signals = ["Multi-layered consensus applied (Deep Learning + FFT)"]
+    original_prob = forensic_probability
+    
+    if ai_score >= 0.40 and forensic_probability < 0.20:
+        # Conflict: Metadata screams AI, model says human
+        # Blend: 65% metadata suspicion, 35% model (gentle nudge)
+        blended_prob = (ai_score * 0.65) + (forensic_probability * 0.35)
+        forensic_probability = blended_prob
+        final_signals.append(f"Metadata-model conflict: blended {ai_score:.2f}*0.65 + {original_prob:.4f}*0.35 = {blended_prob:.4f}")
+        logger.info(f"[CONFLICT] Metadata ai_score={ai_score:.2f}, model={original_prob:.4f} → blended={blended_prob:.4f}")
+    
     l2_data = {
         "status": "detected" if forensic_probability > 0.85 else "suspicious" if forensic_probability > 0.5 else "not_detected",
         "probability": round(forensic_probability, 4),  # RAW probability for video aggregation
-        "signals": ["Multi-layered consensus applied (Deep Learning + FFT)"]
+        "signals": final_signals
     }
     
     is_ai_likely = forensic_probability > 0.5
