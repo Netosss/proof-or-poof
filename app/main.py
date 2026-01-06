@@ -1,12 +1,10 @@
 import os
-import shutil
 import tempfile
 import logging
 import csv
 import time
 import uuid
 import hashlib
-from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 from app.detector import detect_ai_media
 from app.schemas import DetectionResponse
-from app.runpod_client import run_image_removal, run_video_removal, pending_jobs, webhook_result_buffer, cleanup_stale_jobs
+from app.runpod_client import run_video_removal, pending_jobs, webhook_result_buffer, cleanup_stale_jobs
 from app.security import security_manager
 from contextlib import asynccontextmanager
 

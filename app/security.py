@@ -3,7 +3,7 @@ import time
 import logging
 import hashlib
 import re
-from typing import Dict, Tuple, Optional, Callable, Any
+from typing import Dict, Callable, Any
 from fastapi import HTTPException, Request
 from PIL import Image
 import cv2

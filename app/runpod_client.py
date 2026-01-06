@@ -6,7 +6,7 @@ import logging
 import io
 import time
 from PIL import Image
-from typing import Dict, Any, Optional, Union
+from typing import Dict, Any, Union
 
 logger = logging.getLogger(__name__)
 

@@ -3,16 +3,13 @@ import time
 import cv2
 import numpy as np
 import asyncio
-import hashlib
 import os
 import io
-import tempfile
-import subprocess
 import json
 from collections import OrderedDict 
 from PIL import Image
 from PIL.ExifTags import TAGS
-from typing import Optional, List, Union
+from typing import Optional, Union
 from app.c2pa_reader import get_c2pa_manifest
 from app.runpod_client import run_deep_forensics
 from app.security import security_manager
