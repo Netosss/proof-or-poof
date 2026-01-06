@@ -11,10 +11,8 @@ from PIL import Image
 from transformers import AutoImageProcessor, AutoModelForImageClassification
 
 # ---------------- Optimization Flags ----------------
-# Enable TF32 for significantly faster matmuls on Ampere+ GPUs (Safe for classification)
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
-# Enable cuDNN benchmark for fixed-size inputs (speedup after first call)
 torch.backends.cudnn.benchmark = True
 
 # ---------------- Logging ----------------
@@ -46,14 +44,12 @@ try:
     MODEL_ID = "haywoodsloan/ai-image-detector-dev-deploy"
     logger.info(f"Loading Model and Processor: {MODEL_ID}")
     
-    # 1. Load Processor with fast implementation (Big latency win)
     processor = AutoImageProcessor.from_pretrained(
         MODEL_ID, 
         trust_remote_code=True,
         use_fast=True
     )
     
-    # 2. Load Model directly in FP16 (Fast & Memory Efficient)
     model = AutoModelForImageClassification.from_pretrained(
         MODEL_ID,
         torch_dtype=torch.float16,
@@ -61,14 +57,9 @@ try:
     ).eval()
     
     if device == "cuda":
-        # Use channels_last memory format for faster inference on modern GPUs
         model = model.to("cuda", memory_format=torch.channels_last)
     
-    # 3. Pre-parse Label IDs for AI classes (Remove string logic from hot path)
-    id2label = {
-        idx: label.lower()
-        for idx, label in model.config.id2label.items()
-    }
+    id2label = {idx: label.lower() for idx, label in model.config.id2label.items()}
     ai_label_ids = [
         idx for idx, label in id2label.items()
         if any(x in label for x in ("ai", "fake", "generated", "artificial"))
@@ -76,25 +67,18 @@ try:
     logger.info(f"Detected AI labels at indices: {ai_label_ids}")
 
     def safe_to_fp16(tensor):
-        """Helper to safely move tensors to GPU with optional FP16 casting."""
         if tensor.dtype == torch.float32:
             return tensor.to(device="cuda", dtype=torch.float16, non_blocking=True)
         return tensor.to(device="cuda", non_blocking=True)
 
-    # 4. GPU Warm-up (Important for first-request latency)
+    # GPU Warm-up with batch dimension
     if device == "cuda":
-        logger.info("Warming up GPU (full pipeline)...")
-        # Create a dummy image and run it through the full pipeline
-        dummy_img = Image.new("RGB", (224, 224))
-        inputs = processor(images=dummy_img, return_tensors="pt")
-        
-        # Safe transfer using helper
+        logger.info("Warming up GPU (batch pipeline)...")
+        dummy_imgs = [Image.new("RGB", (224, 224)) for _ in range(3)]
+        inputs = processor(images=dummy_imgs, return_tensors="pt")
         inputs = {k: safe_to_fp16(v) if torch.is_tensor(v) else v for k, v in inputs.items()}
-
         with torch.inference_mode():
             _ = model(**inputs)
-        
-        # Ensure kernels are finished before accepting jobs
         torch.cuda.synchronize()
             
     logger.info("Model and Processor loaded successfully!")
@@ -103,176 +87,190 @@ except Exception as e:
     model = None
     processor = None
 
-# ---------------- Optimized FFT Heuristic ----------------
+# ---------------- Utilities ----------------
 def get_cpu_fft_score(img: Image.Image) -> float:
-    """Optimized CPU FFT check: Resizes to 256x256 first for consistent speed."""
+    """Optimized CPU FFT check."""
     try:
-        # Downscale for 4-6x faster FFT - patterns survive downscaling
         fft_img = img.resize((256, 256), Image.BILINEAR)
         gray_img = np.array(fft_img.convert("L"))
-        
         dft = np.fft.fft2(gray_img)
         dft_shift = np.fft.fftshift(dft)
         magnitude_spectrum = 20 * np.log(np.abs(dft_shift) + 1e-9)
         mean_val = np.mean(magnitude_spectrum)
         peaks = np.sum(magnitude_spectrum > (mean_val * 2.0))
         return min(peaks / 10000, 1.0)
-    except Exception as e:
-        logger.error(f"FFT error: {e}")
+    except:
         return 0.5
 
-# ---------------- Inference Wrapper ----------------
 @torch.inference_mode()
-def run_deep_scan(img: Image.Image, debug: bool = False):
-    """Direct model call using FP16 for maximum GPU throughput."""
-    if model is None or processor is None:
-        return None, None
-    
-    # Let processor handle standard resizing and normalization
-    inputs = processor(images=img, return_tensors="pt")
-    
+def launch_gpu_batch(images: list):
+    """Launch batch inference for a list of PIL images."""
+    if not images or model is None or processor is None:
+        return None
+    inputs = processor(images=images, return_tensors="pt")
     if device == "cuda":
-        # Micro-opt: Match model memory format on CPU before transfer
         if "pixel_values" in inputs:
             inputs["pixel_values"] = inputs["pixel_values"].to(memory_format=torch.channels_last)
-        
-        # Safe transfer using helper (Removed pin_memory overhead for single-image serverless path)
         inputs = {k: safe_to_fp16(v) if torch.is_tensor(v) else v for k, v in inputs.items()}
-        outputs = model(**inputs)
-    else:
-        outputs = model(**inputs)
+    return model(**inputs).logits
 
-    # Get probabilities
-    probs = torch.softmax(outputs.logits, dim=-1)[0]
-    
-    # Extract AI score from pre-parsed indices and clamp to safeguard against FP16 rounding
-    ai_score = float(probs[ai_label_ids].max())
-    ai_score = max(0.0, min(1.0, ai_score))
-    
-    # Construct raw results for API compatibility (Only if debug is requested)
-    raw_results = None
-    if debug:
-        raw_results = []
-        for idx, prob in enumerate(probs):
-            raw_results.append({"label": id2label[idx], "score": float(prob)})
-        
-    return ai_score, raw_results
-
-# ---------------- Handler ----------------
+# ---------------- Main Handler (Batch Support) ----------------
 def handler(job):
     job_input = job.get("input", {})
     task = job_input.get("task")
-
+    
     if task != "deep_forensic":
         return {"error": f"Invalid task: {task}"}
-
+    
     if model is None:
         return {"error": "Model failed to initialize on worker."}
 
-    image_base64 = job_input.get("image")
-    if not image_base64:
+    # Normalize input to list (supports both single and batch)
+    images_b64 = []
+    is_batch = False
+    if "images" in job_input and isinstance(job_input["images"], list):
+        images_b64 = job_input["images"]
+        is_batch = True
+    elif "image" in job_input:
+        images_b64 = [job_input["image"]]
+    else:
         return {"error": "No image data provided"}
 
-    # Cache check
-    try:
-        img_bytes = base64.b64decode(image_base64)
-        img_hash = hashlib.md5(img_bytes).hexdigest()
-    except Exception as e:
-        return {"error": f"Invalid base64: {str(e)}"}
-
-    cached = worker_cache.get(img_hash)
-    if cached:
-        logger.info("Result retrieved from cache.")
-        return cached
-
-    try:
-        total_start = time.perf_counter()
-        
-        # Decode and load image
-        t0 = time.perf_counter()
-        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-        orig_w, orig_h = img.size
-        decode_time_ms = (time.perf_counter() - t0) * 1000
-        logger.info(f"[TIMING] Image decode: {decode_time_ms:.2f}ms")
-
-        # 1. KICK GPU SCAN FIRST (Maximizes GPU scheduling efficiency)
-        t1 = time.perf_counter()
-        debug_mode = job_input.get("debug", False)
-        ai_score, raw_results = run_deep_scan(img, debug=debug_mode)
-        model_time_ms = (time.perf_counter() - t1) * 1000
-        logger.info(f"[TIMING] Model inference: {model_time_ms:.2f}ms")
-        if ai_score is None:
-            return {"error": "Inference failed"}
-
-        # 2. RUN CPU HEURISTICS WHILE GPU IS BUSY
-        # 2.1 FFT Score (Now much faster due to internal resize)
-        t2 = time.perf_counter()
-        fft_score = get_cpu_fft_score(img)
-        megapixels = (orig_w * orig_h) / 1_000_000
-        normalized_fft_score = fft_score / max(1.0, megapixels)
-        fft_time_ms = (time.perf_counter() - t2) * 1000
-        logger.info(f"[TIMING] FFT analysis: {fft_time_ms:.2f}ms")
-
-        # 2.2 Dynamic High-resolution Bias
-        high_res_bias = 1.0
-        if megapixels > 2.0:
-            high_res_bias = max(0.5, 1.0 - (megapixels / 20.0))
-
-        # 2.3 EXIF/Software Metadata Bias
-        t3 = time.perf_counter()
-        metadata_bias = 1.0
+    total_start = time.perf_counter()
+    
+    # Results array (maintain order)
+    results = [None] * len(images_b64)
+    
+    # Images that need GPU processing (cache misses)
+    images_to_process = []  # (original_index, PIL_Image, width, height, metadata_bias)
+    hashes_to_process = []
+    
+    # 1. DECODE & CACHE CHECK
+    t0 = time.perf_counter()
+    for idx, b64_str in enumerate(images_b64):
         try:
-            exif = img.getexif()
-            if exif:
-                software = str(exif.get(305, "")).lower()
-                make = str(exif.get(271, "")).lower()
-                if any(s in software for s in ["photoshop", "lightroom", "capture one", "gimp"]):
-                    metadata_bias *= 0.9
-                if any(m in make for m in ["canon", "nikon", "sony", "fujifilm", "leica", "apple", "google"]):
-                    metadata_bias *= 0.85
+            img_bytes = base64.b64decode(b64_str)
+            img_hash = hashlib.md5(img_bytes).hexdigest()
+            
+            # Check cache
+            cached = worker_cache.get(img_hash)
+            if cached:
+                cached_result = cached.copy()
+                cached_result["cache_hit"] = True
+                results[idx] = cached_result
+                continue
+            
+            # Decode for processing
+            original_img = Image.open(io.BytesIO(img_bytes))
+            orig_w, orig_h = original_img.size
+            
+            # Extract EXIF before conversion
+            metadata_bias = 1.0
+            try:
+                exif = original_img.getexif()
+                if exif:
+                    software = str(exif.get(305, "")).lower()
+                    make = str(exif.get(271, "")).lower()
+                    if any(s in software for s in ["photoshop", "lightroom", "capture one", "gimp"]):
+                        metadata_bias *= 0.9
+                    if any(m in make for m in ["canon", "nikon", "sony", "fujifilm", "leica", "apple", "google"]):
+                        metadata_bias *= 0.85
+            except:
+                pass
+            
+            # Convert for model
+            img = original_img.convert("RGB")
+            
+            images_to_process.append((idx, img, orig_w, orig_h, metadata_bias))
+            hashes_to_process.append(img_hash)
+            
         except Exception as e:
-            logger.warning(f"Metadata extraction failed: {e}")
-        metadata_time_ms = (time.perf_counter() - t3) * 1000
-        logger.info(f"[TIMING] Metadata extraction: {metadata_time_ms:.2f}ms")
-
-        # 3. Weighted Combination
-        # Skip FFT weighting if model confidence is high (>85%)
-        if ai_score > 0.85:
-            final_score = ai_score
-            logger.info(f"[LOGIC] Model score {ai_score:.4f} > 0.85, skipping FFT weighting")
-        else:
-            final_score = (ai_score * 0.9) + (normalized_fft_score * 0.1)
-            logger.info(f"[LOGIC] Applied FFT weighting: {ai_score:.4f} * 0.9 + {normalized_fft_score:.4f} * 0.1 = {final_score:.4f}")
+            results[idx] = {"error": str(e), "ai_score": 0.0}
+    
+    decode_ms = (time.perf_counter() - t0) * 1000
+    cache_hits = len(images_b64) - len(images_to_process)
+    logger.info(f"[TIMING] Decode & cache check: {decode_ms:.2f}ms ({cache_hits} hits, {len(images_to_process)} misses)")
+    
+    # 2. PROCESS CACHE MISSES (Batch GPU)
+    if images_to_process:
+        pil_images = [x[1] for x in images_to_process]
         
-        final_score *= high_res_bias
-        final_score *= metadata_bias
-        final_score = max(0.0, min(1.0, final_score))
-
-        total_time_ms = (time.perf_counter() - total_start) * 1000
-        logger.info(f"[TIMING] Total processing: {total_time_ms:.2f}ms")
-
-        result = {
-            "ai_score": final_score,
-            "model_score": ai_score,
-            "fft_score": normalized_fft_score,
-            "high_res_bias": high_res_bias,
-            "metadata_bias": metadata_bias,
-            "image_size": [orig_w, orig_h],
-            "raw_results": raw_results,
-            "timing_ms": {
-                "decode": round(decode_time_ms, 2),
-                "model": round(model_time_ms, 2),
-                "fft": round(fft_time_ms, 2),
-                "metadata": round(metadata_time_ms, 2),
-                "total": round(total_time_ms, 2)
-            }
-        }
-        worker_cache.put(img_hash, result)
-        return result
-
-    except Exception as e:
-        logger.error(f"Worker processing error: {e}", exc_info=True)
-        return {"error": f"Internal scan error: {str(e)}"}
+        # 2A. Launch GPU Batch (non-blocking dispatch)
+        t1 = time.perf_counter()
+        logits_batch = launch_gpu_batch(pil_images)
+        
+        # 2B. CPU Heuristics (FFT) - runs while GPU is busy
+        fft_data = []
+        for _, img, w, h, _ in images_to_process:
+            fft_raw = get_cpu_fft_score(img)
+            megapixels = (w * h) / 1_000_000
+            fft_norm = fft_raw / max(1.0, megapixels)
+            
+            # High-res bias (capped at 15% penalty)
+            hr_bias = 1.0
+            if megapixels > 2.0:
+                hr_bias = max(0.85, 1.0 - (megapixels / 40.0))
+            
+            fft_data.append((fft_norm, hr_bias))
+        
+        fft_ms = (time.perf_counter() - t1) * 1000
+        
+        # 2C. Gather GPU Results (CUDA sync happens here)
+        if logits_batch is not None:
+            probs_batch = torch.softmax(logits_batch, dim=-1)
+            
+            for i, (idx, _, w, h, meta_bias) in enumerate(images_to_process):
+                probs = probs_batch[i]
+                ai_score = float(probs[ai_label_ids].max())
+                ai_score = max(0.0, min(1.0, ai_score))
+                
+                fft_norm, hr_bias = fft_data[i]
+                
+                # Weighted combination
+                if ai_score > 0.85:
+                    final_score = ai_score
+                else:
+                    final_score = (ai_score * 0.9) + (fft_norm * 0.1)
+                
+                final_score = max(0.0, min(1.0, final_score * hr_bias * meta_bias))
+                
+                res_obj = {
+                    "ai_score": final_score,
+                    "model_score": ai_score,
+                    "fft_score": fft_norm,
+                    "high_res_bias": hr_bias,
+                    "metadata_bias": meta_bias,
+                    "image_size": [w, h],
+                    "cache_hit": False
+                }
+                
+                # Cache result
+                worker_cache.put(hashes_to_process[i], res_obj)
+                results[idx] = res_obj
+        
+        gpu_ms = (time.perf_counter() - t1) * 1000
+        logger.info(f"[TIMING] Batch GPU + FFT: {gpu_ms:.2f}ms for {len(images_to_process)} images")
+    
+    total_ms = (time.perf_counter() - total_start) * 1000
+    logger.info(f"[TIMING] Total: {total_ms:.2f}ms for {len(images_b64)} images ({cache_hits} cached)")
+    
+    # Add timing to response
+    timing = {
+        "decode": round(decode_ms, 2),
+        "total": round(total_ms, 2),
+        "batch_size": len(images_b64),
+        "cache_hits": cache_hits
+    }
+    
+    # Return single result or batch
+    if is_batch:
+        return {"results": results, "timing_ms": timing}
+    else:
+        # Single image: return flat result with timing
+        single_result = results[0] if results else {"error": "No result"}
+        if isinstance(single_result, dict):
+            single_result["timing_ms"] = timing
+        return single_result
 
 # ---------------- Start RunPod Loop ----------------
 runpod.serverless.start({"handler": handler})
