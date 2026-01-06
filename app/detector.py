@@ -41,17 +41,18 @@ class LRUCache:
 forensic_cache = LRUCache(capacity=1000)
 
 def get_image_hash(source: Union[str, Image.Image]) -> str:
-    """Generate a secure SHA-256 hash of the image source."""
+    """Generate a secure SHA-256 hash of the image source (optimized with grayscale)."""
     if isinstance(source, str):
         with open(source, 'rb') as f:
             # Hash first 2MB for speed, but use secure method
             return security_manager.get_safe_hash(f.read(2048 * 1024))
     else:
-        # For PIL Images, hash a small thumbnail
+        # For PIL Images: small grayscale thumbnail for fast, unique hash
         thumb = source.copy()
-        thumb.thumbnail((128, 128))
+        thumb.thumbnail((64, 64))  # Smaller for speed
+        thumb = thumb.convert("L")  # Grayscale reduces data while preserving uniqueness
         buf = io.BytesIO()
-        thumb.save(buf, format="JPEG")
+        thumb.save(buf, format="JPEG", quality=50)  # Lower quality = faster
         return security_manager.get_safe_hash(buf.getvalue())
 
 def get_exif_data(file_path: str) -> dict:
@@ -67,24 +68,30 @@ def get_exif_data(file_path: str) -> dict:
     except Exception:
         return {}
 
-def is_frame_quality_ok(frame: np.ndarray, min_brightness: float = 20, min_sharpness: float = 50) -> bool:
-    """Check if frame is not too dark or blurry for reliable AI detection."""
+def is_frame_quality_ok(frame: np.ndarray, min_brightness: float = 20, min_sharpness: float = 50) -> tuple:
+    """
+    Check if frame is not too dark or blurry for reliable AI detection.
+    Returns (is_ok, brightness, sharpness) for potential weighted aggregation.
+    """
     try:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
-        # Check brightness (avoid very dark frames)
+        # Quick brightness check first (fast, avoids expensive Laplacian for dark frames)
         brightness = np.mean(gray)
         if brightness < min_brightness:
-            return False
+            return False, brightness, 0.0
         
         # Check sharpness via Laplacian variance (avoid blurry frames)
-        laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+        # Use smaller region for speed (center crop)
+        h, w = gray.shape
+        center_crop = gray[h//4:3*h//4, w//4:3*w//4]
+        laplacian_var = cv2.Laplacian(center_crop, cv2.CV_64F).var()
         if laplacian_var < min_sharpness:
-            return False
+            return False, brightness, laplacian_var
         
-        return True
+        return True, brightness, laplacian_var
     except:
-        return True  # If check fails, include frame anyway
+        return True, 128.0, 100.0  # Safe defaults if check fails
 
 def extract_video_frames(video_path: str, num_frames: int = 8) -> list:
     """Extract N evenly-spaced quality frames from a video file."""
@@ -104,16 +111,19 @@ def extract_video_frames(video_path: str, num_frames: int = 8) -> list:
         sample_points = np.linspace(start_frame, end_frame, num=min(num_frames, total_frames), dtype=int)
         
         quality_rejected = 0
+        frame_qualities = []  # Store (brightness, sharpness) for potential weighted aggregation
         for pos in sample_points:
             cap.set(cv2.CAP_PROP_POS_FRAMES, pos)
             ret, frame = cap.read()
             if ret:
                 # Quality filter: skip dark/blurry frames
-                if not is_frame_quality_ok(frame):
+                is_ok, brightness, sharpness = is_frame_quality_ok(frame)
+                if not is_ok:
                     quality_rejected += 1
                     continue
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 frames.append(Image.fromarray(frame_rgb))
+                frame_qualities.append((brightness, sharpness))
         
         cap.release()
         
@@ -371,9 +381,14 @@ def get_ai_suspicion_score(exif: dict) -> tuple:
 
     return round(min(score, 1.0), 2), signals
 
-def boost_score(score: float) -> float:
-    """Ensure all presented percentages are at least 85%."""
-    return max(0.85, score)
+def boost_score(score: float, is_ai_likely: bool = True) -> float:
+    """
+    Boost confidence only for AI-likely results.
+    Human-likely results keep their raw confidence to avoid misleading scores.
+    """
+    if is_ai_likely:
+        return max(0.85, score)
+    return score  # No boost for human results
 
 async def detect_ai_media(file_path: str) -> dict:
     """Final Optimized Consensus Engine."""
@@ -433,6 +448,13 @@ async def detect_ai_media(file_path: str) -> dict:
         safe_path = security_manager.sanitize_log_message(file_path)
         logger.info(f"Detecting AI in video: {safe_path}")
         
+        # --- VIDEO CACHE CHECK (same as images) ---
+        video_hash = get_image_hash(file_path)  # Uses first 2MB of file
+        cached_video_result = forensic_cache.get(f"video_{video_hash}")
+        if cached_video_result is not None:
+            logger.info(f"[VIDEO] Cache hit! Returning cached result.")
+            return cached_video_result
+        
         # --- VIDEO METADATA EARLY EXIT ---
         t_video_meta = time.perf_counter()
         video_metadata = get_video_metadata(file_path)
@@ -442,9 +464,19 @@ async def detect_ai_media(file_path: str) -> dict:
         logger.info(f"[VIDEO META] Human score: {human_score:.2f}, AI score: {ai_meta_score:.2f}")
         logger.info(f"[VIDEO META] Signals: {meta_signals}")
         
+        # Check for strong device markers (Android/Apple/Samsung)
+        strong_device_markers = ["android", "apple", "samsung", "iphone", "pixel", "galaxy", "gopro", "dji"]
+        has_strong_device = any(
+            any(marker in signal.lower() for marker in strong_device_markers)
+            for signal in meta_signals
+        )
+        
         # Early exit: Strong human metadata (camera/phone recording)
-        if human_score >= 0.70 and ai_meta_score < 0.20:
-            logger.info(f"[VIDEO] Early exit: Verified Human via metadata (score={human_score:.2f})")
+        # Lower threshold (0.40) if we have a strong device marker like Android/Apple
+        early_exit_threshold = 0.40 if has_strong_device else 0.70
+        
+        if human_score >= early_exit_threshold and ai_meta_score < 0.20:
+            logger.info(f"[VIDEO] Early exit: Verified Human via metadata (score={human_score:.2f}, device_marker={has_strong_device})")
             return {
                 "summary": "Verified Human Video",
                 "confidence_score": 1.0,
@@ -528,6 +560,7 @@ async def detect_ai_media(file_path: str) -> dict:
             final_prob = median_prob
         
         # Determine summary based on final probability
+        is_ai_likely = final_prob > 0.5
         if final_prob > 0.85: 
             summary = "Likely AI Video"
         elif final_prob > 0.5: 
@@ -535,8 +568,9 @@ async def detect_ai_media(file_path: str) -> dict:
         else: 
             summary = "Likely Human Video"
         
-        # Apply boost to confidence score
-        final_conf = boost_score(final_prob if final_prob > 0.5 else 1.0 - final_prob)
+        # Apply boost to confidence score (only for AI-likely results)
+        raw_conf = final_prob if is_ai_likely else 1.0 - final_prob
+        final_conf = boost_score(raw_conf, is_ai_likely=is_ai_likely)
         
         # Cap at 0.99 for probabilistic results
         if final_conf > 0.99:
@@ -552,7 +586,7 @@ async def detect_ai_media(file_path: str) -> dict:
         if meta_signals:
             analysis_signals.extend(meta_signals[:2])  # Add top 2 metadata signals
         
-        return {
+        video_result = {
             "summary": summary,
             "confidence_score": round(final_conf, 2),
             "layers": {
@@ -564,6 +598,12 @@ async def detect_ai_media(file_path: str) -> dict:
                 }
             }
         }
+        
+        # Cache the video result for future requests
+        forensic_cache.put(f"video_{video_hash}", video_result)
+        logger.info(f"[VIDEO] Cached result for future requests")
+        
+        return video_result
     else:
         return await detect_ai_media_image_logic(file_path, l1_data)
 
@@ -707,15 +747,16 @@ async def detect_ai_media_image_logic(file_path: Optional[str], l1_data: dict = 
         "signals": ["Multi-layered consensus applied (Deep Learning + FFT)"]
     }
     
+    is_ai_likely = forensic_probability > 0.5
     if forensic_probability > 0.92: summary = "Likely AI (High Confidence)"
     elif forensic_probability > 0.75: summary = "Possible AI (Forensic Match)"
     elif forensic_probability > 0.5: summary = "Suspicious (Inconsistent Pixels)"
     elif forensic_probability > 0.2: summary = "Likely Human (Minor Noise)"
     else: summary = "Likely Human"
     
-    # Boost the overall confidence score
-    raw_conf = forensic_probability if forensic_probability > 0.5 else (1.0 - forensic_probability)
-    final_conf = boost_score(raw_conf)
+    # Boost the overall confidence score (only for AI-likely results)
+    raw_conf = forensic_probability if is_ai_likely else (1.0 - forensic_probability)
+    final_conf = boost_score(raw_conf, is_ai_likely=is_ai_likely)
     
     # Cap probabilistic scores at 0.99 to avoid "fake" 100% look, unless it's a hard metadata match
     if final_conf > 0.99:
