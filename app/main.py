@@ -24,10 +24,52 @@ logger = logging.getLogger(__name__)
 
 from app.detector import detect_ai_media
 from app.schemas import DetectionResponse
-from app.runpod_client import run_image_removal, run_video_removal
+from app.runpod_client import run_image_removal, run_video_removal, pending_jobs, webhook_result_buffer, cleanup_stale_jobs
 from app.security import security_manager
+from contextlib import asynccontextmanager
 
-app = FastAPI(title="AI Provenance & Cleansing API")
+# Webhook authentication secret (set via environment variable)
+RUNPOD_WEBHOOK_SECRET = os.getenv("RUNPOD_WEBHOOK_SECRET", "")
+
+# Dashboard authentication (optional but recommended)
+DASHBOARD_SECRET = os.getenv("DASHBOARD_SECRET", "")
+
+# Background cleanup task
+cleanup_task = None
+
+async def periodic_cleanup():
+    """Background task to clean up stale pending jobs every 30 seconds."""
+    while True:
+        try:
+            await asyncio.sleep(30)
+            cleanup_stale_jobs()
+            logger.debug("[CLEANUP] Periodic cleanup completed")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"[CLEANUP] Error in periodic cleanup: {e}")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup and shutdown events."""
+    global cleanup_task
+    # Startup: start background cleanup
+    cleanup_task = asyncio.create_task(periodic_cleanup())
+    logger.info("[STARTUP] Background cleanup task started")
+    yield
+    # Shutdown: cancel cleanup task
+    if cleanup_task:
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
+    logger.info("[SHUTDOWN] Background cleanup task stopped")
+
+app = FastAPI(title="AI Provenance & Cleansing API", lifespan=lifespan)
+
+# ---- RunPod Webhook Storage ----
+# This is imported from runpod_client and shared
 
 USAGE_LOG = "usage_log.csv"
 
@@ -72,9 +114,81 @@ app.add_middleware(
 async def health():
     return {"status": "healthy"}
 
+# ---- RunPod Webhook Endpoint ----
+@app.post("/webhook/runpod")
+async def runpod_webhook(request: Request):
+    """
+    Receives webhook callbacks from RunPod when jobs complete.
+    This eliminates polling and provides instant results.
+    
+    Security: Validates X-Runpod-Signature header if RUNPOD_WEBHOOK_SECRET is set.
+    """
+    try:
+        # ---- Authentication ----
+        if RUNPOD_WEBHOOK_SECRET:
+            signature = request.headers.get("X-Runpod-Signature", "")
+            # RunPod sends the secret directly in the header (not HMAC)
+            # Adjust this if RunPod uses HMAC - check their docs
+            if signature != RUNPOD_WEBHOOK_SECRET:
+                logger.warning(f"[WEBHOOK] Invalid signature received")
+                raise HTTPException(status_code=401, detail="Invalid webhook signature")
+        
+        payload = await request.json()
+        job_id = payload.get("id")
+        status = payload.get("status")
+        output = payload.get("output")
+        
+        logger.info(f"[WEBHOOK] Received callback for job {job_id}, status: {status}")
+        
+        if job_id and job_id in pending_jobs:
+            future, start_time = pending_jobs[job_id]
+            elapsed_ms = (time.time() - start_time) * 1000
+            
+            if status == "COMPLETED" and output:
+                if not future.done():
+                    future.set_result(output)
+                logger.info(f"[WEBHOOK] Job {job_id} completed in {elapsed_ms:.2f}ms")
+            elif status == "FAILED":
+                if not future.done():
+                    future.set_result({"error": "Job failed", "details": payload.get("error")})
+                logger.error(f"[WEBHOOK] Job {job_id} failed: {payload.get('error')}")
+            else:
+                # IN_PROGRESS or other status - don't resolve yet
+                logger.info(f"[WEBHOOK] Job {job_id} status update: {status}")
+                return {"status": "acknowledged"}
+        elif job_id and status == "COMPLETED" and output:
+            # Race condition: webhook arrived before pending_jobs was set
+            # Buffer the result for the main function to pick up
+            webhook_result_buffer[job_id] = (output, time.time())
+            logger.info(f"[WEBHOOK] Job {job_id} buffered (arrived before pending_jobs set)")
+        else:
+            logger.warning(f"[WEBHOOK] Unknown or incomplete job_id: {job_id}")
+        
+        return {"status": "ok"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[WEBHOOK] Error processing callback: {e}")
+        return {"status": "error", "message": str(e)}
+
 # ---- Dashboard endpoint ----
 @app.get("/dashboard", response_class=HTMLResponse)
-async def dashboard():
+async def dashboard(request: Request, secret: str = ""):
+    # ---- Authentication (optional) ----
+    if DASHBOARD_SECRET:
+        # Check query param or header
+        provided_secret = secret or request.headers.get("X-Dashboard-Secret", "")
+        if provided_secret != DASHBOARD_SECRET:
+            return HTMLResponse(
+                content="""
+                <body style="background-color: #111217; color: white; font-family: sans-serif; padding: 50px; text-align: center;">
+                    <h1 style="color: #ff6b6b;">🔒 Access Denied</h1>
+                    <p>Dashboard requires authentication. Add ?secret=YOUR_SECRET to the URL.</p>
+                </body>
+                """,
+                status_code=401
+            )
+    
     # 1. Check if log exists
     if not os.path.exists(USAGE_LOG):
         logger.info("Dashboard requested but usage_log.csv does not exist yet.")
