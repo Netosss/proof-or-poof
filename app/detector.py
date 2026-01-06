@@ -790,7 +790,18 @@ async def detect_ai_media(file_path: str) -> dict:
             None, extract_video_frames, file_path
         )
         if not frames:
-            return {"error": "Could not extract frames from video."}
+            return {
+                "summary": "Analysis Failed",
+                "confidence_score": 0.0,
+                "layers": {
+                    "layer1_metadata": l1_data,
+                    "layer2_forensics": {
+                        "status": "error",
+                        "probability": 0.0,
+                        "signals": ["Could not extract frames from video"]
+                    }
+                }
+            }
         
         logger.info(f"[VIDEO] Extracted {len(frames)} frames (rejected {quality_rejected} low-quality)")
         
@@ -799,19 +810,54 @@ async def detect_ai_media(file_path: str) -> dict:
         batch_result = await run_batch_forensics(frames)
         
         if batch_result.get("error"):
-            logger.warning(f"[VIDEO] Batch error: {batch_result['error']}")
-            return {"error": f"Frame analysis failed: {batch_result['error']}"}
+            error_msg = batch_result['error']
+            logger.warning(f"[VIDEO] Batch error: {error_msg}")
+            # Return proper schema even on error
+            return {
+                "summary": "Analysis Failed",
+                "confidence_score": 0.0,
+                "layers": {
+                    "layer1_metadata": l1_data,
+                    "layer2_forensics": {
+                        "status": "error",
+                        "probability": 0.0,
+                        "signals": [f"Frame analysis failed: {error_msg}"]
+                    }
+                }
+            }
         
         results = batch_result.get("results", [])
         gpu_time_ms = batch_result.get("gpu_time_ms", 0.0)
         
         if not results:
-            return {"error": "No frame results returned"}
+            return {
+                "summary": "Analysis Failed",
+                "confidence_score": 0.0,
+                "layers": {
+                    "layer1_metadata": l1_data,
+                    "layer2_forensics": {
+                        "status": "error",
+                        "probability": 0.0,
+                        "signals": ["No frame results returned"]
+                    }
+                }
+            }
         
         # Extract AI scores from batch results
         frame_probs = [r.get("ai_score", 0.0) for r in results if isinstance(r, dict) and "ai_score" in r]
         if not frame_probs:
-            return {"error": "Invalid frame results"}
+            return {
+                "summary": "Analysis Failed",
+                "confidence_score": 0.0,
+                "layers": {
+                    "layer1_metadata": l1_data,
+                    "layer2_forensics": {
+                        "status": "error",
+                        "probability": 0.0,
+                        "signals": ["Invalid frame results format"]
+                    }
+                }
+            }
         
         num_frames_analyzed = len(frame_probs)
         
@@ -898,7 +944,18 @@ async def detect_ai_media_image_logic(file_path: Optional[str], l1_data: dict = 
             source_path = file_path
             file_size = os.path.getsize(file_path)
         except:
-            return {"error": "Invalid image file"}
+            return {
+                "summary": "Analysis Failed",
+                "confidence_score": 0.0,
+                "layers": {
+                    "layer1_metadata": l1_data if l1_data else {"status": "not_found", "provider": None, "description": "N/A"},
+                    "layer2_forensics": {
+                        "status": "error",
+                        "probability": 0.0,
+                        "signals": ["Invalid image file - could not open"]
+                    }
+                }
+            }
     exif_time_ms = (time.perf_counter() - t_exif) * 1000
     logger.info(f"[TIMING] EXIF extraction: {exif_time_ms:.2f}ms")
     
