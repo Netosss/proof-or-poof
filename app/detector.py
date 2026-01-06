@@ -1036,7 +1036,7 @@ async def detect_ai_media_image_logic(file_path: Optional[str], l1_data: dict = 
 
     # 4. SUSPICIOUS AI (Early Exit) - AI indicators + zero human signals
     # If metadata shows AI patterns and NO human camera evidence, flag as suspicious
-    if ai_score >= 0.30 and human_score == 0.0:
+    if ai_score >= 0.38 and human_score == 0.0:
         logger.info(f"[EARLY EXIT] Skipping GPU scan: AI indicators + no human metadata (ai={ai_score:.2f}, human={human_score:.2f})")
         return {
             "summary": "Suspicious (No Camera Metadata)",

@@ -156,14 +156,19 @@ async def runpod_webhook(request: Request):
                 if not isinstance(output, dict):
                     logger.warning(f"[WEBHOOK] Job {job_id} output is not a dict: {type(output)}")
                     output = {"ai_score": 0.0, "gpu_time_ms": 0.0, "error": "Invalid output format"}
-                elif "ai_score" not in output:
-                    logger.warning(f"[WEBHOOK] Job {job_id} output missing ai_score, keys: {output.keys()}")
-                    output["ai_score"] = output.get("ai_score", 0.0)
-                    output["gpu_time_ms"] = output.get("gpu_time_ms", 0.0)
                 
                 if not future.done():
                     future.set_result(output)
-                logger.info(f"[WEBHOOK] Job {job_id} completed in {elapsed_ms:.2f}ms, ai_score={output.get('ai_score', 'N/A')}")
+                
+                # Log based on response type (single vs batch)
+                if "results" in output:
+                    # Batch response
+                    batch_size = len(output.get("results", []))
+                    gpu_time = output.get("timing_ms", {}).get("total", 0)
+                    logger.info(f"[WEBHOOK] Job {job_id} completed in {elapsed_ms:.2f}ms (batch={batch_size}, gpu={gpu_time:.1f}ms)")
+                else:
+                    # Single image response
+                    logger.info(f"[WEBHOOK] Job {job_id} completed in {elapsed_ms:.2f}ms, ai_score={output.get('ai_score', 'N/A')}")
             elif status == "FAILED":
                 error_output = {
                     "error": "Job failed", 
