@@ -633,14 +633,34 @@ def get_ai_suspicion_score(exif: dict, width: int = 0, height: int = 0, file_siz
             score += 0.15
             signals.append(f"AI-typical width: {width}px")
         elif height in ai_typical_widths:
-            score += 0.10
+            score += 0.15  # Same weight as width - equally suspicious
             signals.append(f"AI-typical height: {height}px")
+        
+        # Small images with AI-typical dimensions are highly suspicious
+        # (Real photos are rarely this small AND have power-of-2 dimensions)
+        total_pixels = width * height
+        if total_pixels < 500000 and (width in ai_typical_widths or height in ai_typical_widths):
+            score += 0.10
+            signals.append(f"Small image ({total_pixels//1000}K pixels) with AI-typical dimensions")
         
         # 4. Non-standard aspect ratio (not 4:3, 3:2, 16:9, 1:1)
         aspect = width / height if height > 0 else 0
         standard_aspects = [1.0, 1.33, 1.5, 1.78, 0.75, 0.67, 0.56, 1.0]  # Common camera ratios
         is_standard = any(abs(aspect - std) < 0.08 for std in standard_aspects)
-        if not is_standard and aspect > 0:
+        
+        # 4a. SCREENSHOT PROTECTION LOGIC
+        # If it looks like a phone screenshot, reduce AI suspicion to force GPU scan.
+        # We don't want to auto-flag screenshots as AI, we want to analyze their pixels.
+        phone_widths = range(640, 1500)  # Common phone widths (iPhone/Android viewports)
+        is_portrait = height > width
+        is_phone_width = width in phone_widths
+        is_phone_aspect = 0.40 < aspect < 0.60  # Modern phones: 9:16 to 9:22
+        
+        if is_portrait and is_phone_width and is_phone_aspect:
+            # Likely a phone screenshot - reduce AI suspicion significantly
+            score -= 0.20
+            signals.append(f"Likely phone screenshot ({width}x{height}) - forcing GPU analysis")
+        elif not is_standard and aspect > 0:
             score += 0.05
             signals.append(f"Non-standard aspect ratio: {aspect:.2f}")
 
