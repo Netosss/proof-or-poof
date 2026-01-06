@@ -6,11 +6,12 @@ ENV PYTHONPATH=/app
 
 WORKDIR /app
 
-# Install system dependencies (Minimally required for headless OpenCV)
+# Install system dependencies (OpenCV + FFprobe for video metadata)
 RUN apt-get update && apt-get install -y \
     libgl1 \
     libglib2.0-0 \
     curl \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install
