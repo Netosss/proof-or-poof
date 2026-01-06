@@ -126,6 +126,8 @@ async def run_deep_forensics(source: Union[str, Image.Image], width: int = 0, he
         
         if webhook_url:
             # ---- WEBHOOK MODE (Fast!) ----
+            # Webhook URL goes inside the payload per RunPod docs:
+            # https://docs.runpod.io/serverless/endpoints/send-requests#webhook-notifications
             job_result = await _run_with_webhook(endpoint, payload, webhook_url, timeout_seconds=90)
             mode = "webhook"
         else:
@@ -169,7 +171,12 @@ async def _run_with_webhook(endpoint, payload: dict, webhook_url: str, timeout_s
     """
     Submit job with webhook and wait for callback. Much faster than polling!
     Includes buffer polling to handle race conditions.
+    
+    Uses raw HTTP request to include webhook in payload per RunPod docs:
+    https://docs.runpod.io/serverless/endpoints/send-requests#webhook-notifications
     """
+    import aiohttp
+    
     loop = asyncio.get_event_loop()
     future = loop.create_future()
     start_time = time.time()
@@ -177,9 +184,36 @@ async def _run_with_webhook(endpoint, payload: dict, webhook_url: str, timeout_s
     # Periodic cleanup to prevent memory leaks
     cleanup_stale_jobs()
     
-    # Submit job with webhook
-    job = endpoint.run(payload, webhook=webhook_url)
-    job_id = job.job_id
+    # Build the full request payload with webhook at top level
+    request_payload = {
+        "input": payload,
+        "webhook": webhook_url
+    }
+    
+    config = get_config()
+    endpoint_id = config["endpoint_id"]
+    api_key = config["api_key"]
+    
+    # Use raw HTTP request to include webhook (SDK doesn't support it directly)
+    url = f"https://api.runpod.ai/v2/{endpoint_id}/run"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=request_payload, headers=headers) as response:
+            if response.status != 200:
+                error_text = await response.text()
+                logger.error(f"[WEBHOOK] RunPod API error: {response.status} - {error_text}")
+                return {"ai_score": 0.0, "gpu_time_ms": 0.0, "error": f"API error: {response.status}"}
+            
+            result = await response.json()
+            job_id = result.get("id")
+    
+    if not job_id:
+        logger.error("[WEBHOOK] No job_id returned from RunPod")
+        return {"ai_score": 0.0, "gpu_time_ms": 0.0, "error": "No job_id returned"}
     
     logger.info(f"[WEBHOOK] Submitted job {job_id}, waiting for callback...")
     
@@ -201,10 +235,17 @@ async def _run_with_webhook(endpoint, payload: dict, webhook_url: str, timeout_s
         return result
     except asyncio.TimeoutError:
         logger.error(f"[WEBHOOK] Job {job_id} timed out after {timeout_seconds}s, falling back to status check")
-        # Fallback: check job status directly
-        status = job.status()
-        if status == "COMPLETED":
-            return job.output()
+        # Fallback: check job status via API
+        try:
+            status_url = f"https://api.runpod.ai/v2/{endpoint_id}/status/{job_id}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(status_url, headers=headers) as response:
+                    if response.status == 200:
+                        status_result = await response.json()
+                        if status_result.get("status") == "COMPLETED":
+                            return status_result.get("output", {})
+        except Exception as e:
+            logger.error(f"[WEBHOOK] Fallback status check failed: {e}")
         return {"error": "Webhook timeout", "ai_score": 0.0, "gpu_time_ms": 0.0}
     finally:
         # Cleanup
