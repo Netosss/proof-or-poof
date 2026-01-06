@@ -4,7 +4,6 @@ import cv2
 import numpy as np
 import asyncio
 import os
-import io
 import json
 from collections import OrderedDict 
 from PIL import Image
@@ -47,15 +46,14 @@ def get_image_hash(source: Union[str, Image.Image], fast_mode: bool = False) -> 
             # Hash first 2MB for speed, but use secure method
             return security_manager.get_safe_hash(f.read(2048 * 1024))
     else:
-        # For PIL Images: small grayscale thumbnail for fast, unique hash
+        # For PIL Images: hash raw pixel bytes (no JPEG artifacts)
         thumb = source.copy()
         # Use 32x32 for video frames (fast_mode), 64x64 for standalone images
         size = (32, 32) if fast_mode else (64, 64)
         thumb.thumbnail(size)
         thumb = thumb.convert("L")  # Grayscale reduces data while preserving uniqueness
-        buf = io.BytesIO()
-        thumb.save(buf, format="JPEG", quality=50)  # Lower quality = faster
-        return security_manager.get_safe_hash(buf.getvalue())
+        # Hash raw pixel bytes directly (faster, no compression artifacts)
+        return security_manager.get_safe_hash(np.array(thumb).tobytes())
 
 def get_exif_data(file_path: str) -> dict:
     """Extract EXIF metadata from the image. Explicitly closed via 'with'."""
@@ -95,29 +93,30 @@ def is_frame_quality_ok(frame: np.ndarray, min_brightness: float = 20, min_sharp
     except:
         return True, 128.0, 100.0  # Safe defaults if check fails
 
-def extract_video_frames(video_path: str, num_frames: int = 8) -> tuple:
+def extract_video_frames(video_path: str) -> tuple:
     """
-    Extract N evenly-spaced quality frames from a video file.
-    Returns (frames, quality_rejected_count, frame_qualities)
-    frame_qualities: list of (brightness, sharpness) tuples for weighted aggregation
+    Extract 3 frames at 20%, 50%, 80% of video duration (Tri-Frame Strategy).
+    Optimized for batch GPU processing - 3 frames process in ~same time as 1.
+    Returns (frames, quality_rejected_count)
     """
     frames = []
-    frame_qualities = []  # Store (brightness, sharpness) for weighted aggregation
     quality_rejected = 0
     
     try:
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
-            return [], 0, []
+            return [], 0
             
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         if total_frames <= 0:
-            return [], 0, []
+            return [], 0
         
-        # Evenly spaced sampling points (skip first/last 5% to avoid black frames)
-        start_frame = int(total_frames * 0.05)
-        end_frame = int(total_frames * 0.95)
-        sample_points = np.linspace(start_frame, end_frame, num=min(num_frames, total_frames), dtype=int)
+        # Tri-Frame: 20%, 50%, 80% (avoids intro/outro black frames)
+        sample_points = [
+            int(total_frames * 0.20),
+            int(total_frames * 0.50),
+            int(total_frames * 0.80)
+        ]
         
         for pos in sample_points:
             cap.set(cv2.CAP_PROP_POS_FRAMES, pos)
@@ -130,31 +129,26 @@ def extract_video_frames(video_path: str, num_frames: int = 8) -> tuple:
                     continue
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 frames.append(Image.fromarray(frame_rgb))
-                frame_qualities.append((brightness, sharpness))
         
         cap.release()
         
         if quality_rejected > 0:
             logger.info(f"[VIDEO] Skipped {quality_rejected} low-quality frames (dark/blurry)")
         
-        # Ensure we have at least 2 frames
-        if len(frames) < 2 and total_frames >= 2:
-            # Fallback: just grab first and last readable frames
+        # Fallback if too many frames rejected
+        if len(frames) < 1 and total_frames >= 1:
             cap = cv2.VideoCapture(video_path)
-            for pos in [start_frame, end_frame]:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, pos)
-                ret, frame = cap.read()
-                if ret:
-                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    frames.append(Image.fromarray(frame_rgb))
-                    # Use default quality for fallback frames
-                    frame_qualities.append((128.0, 100.0))
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(total_frames * 0.5))
+            ret, frame = cap.read()
+            if ret:
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frames.append(Image.fromarray(frame_rgb))
             cap.release()
             
     except Exception as e:
         logger.error(f"Error extracting video frames: {e}")
     
-    return frames, quality_rejected, frame_qualities
+    return frames, quality_rejected
 
 async def get_video_metadata(video_path: str) -> dict:
     """Extract video metadata using ffprobe (async to avoid blocking event loop)."""
@@ -787,83 +781,55 @@ async def detect_ai_media(file_path: str) -> dict:
                 }
             }
         
-        # No early exit - proceed to frame analysis
-        logger.info(f"[VIDEO] No early exit, proceeding to frame analysis...")
-        frames, quality_rejected, frame_qualities = extract_video_frames(file_path)
+        # No early exit - proceed to frame analysis (Tri-Frame Batch Strategy)
+        logger.info(f"[VIDEO] No early exit, proceeding to tri-frame batch analysis...")
+        
+        # Run blocking video extraction in thread pool
+        loop = asyncio.get_running_loop()
+        frames, quality_rejected = await loop.run_in_executor(
+            None, extract_video_frames, file_path
+        )
         if not frames:
             return {"error": "Could not extract frames from video."}
         
         logger.info(f"[VIDEO] Extracted {len(frames)} frames (rejected {quality_rejected} low-quality)")
-            
-        tasks = [detect_ai_media_image_logic(None, frame=f) for f in frames]
-        frame_results = await asyncio.gather(*tasks)
         
-        # Check for strong human metadata in any frame (early exit)
-        for res in frame_results:
-            if res.get("summary") == "Verified Human (Forensic Metadata)":
-                logger.info(f"[VIDEO] Early exit: Frame scan found trusted human metadata.")
-                return res
+        # SINGLE BATCH REQUEST to RunPod (3 frames = ~same GPU time as 1)
+        from app.runpod_client import run_batch_forensics
+        batch_result = await run_batch_forensics(frames)
         
-        # Extract probabilities for robust aggregation
-        frame_probs = [r['layers']['layer2_forensics']['probability'] for r in frame_results]
+        if batch_result.get("error"):
+            logger.warning(f"[VIDEO] Batch error: {batch_result['error']}")
+            return {"error": f"Frame analysis failed: {batch_result['error']}"}
+        
+        results = batch_result.get("results", [])
+        gpu_time_ms = batch_result.get("gpu_time_ms", 0.0)
+        
+        if not results:
+            return {"error": "No frame results returned"}
+        
+        # Extract AI scores from batch results
+        frame_probs = [r.get("ai_score", 0.0) for r in results if isinstance(r, dict) and "ai_score" in r]
+        if not frame_probs:
+            return {"error": "Invalid frame results"}
+        
         num_frames_analyzed = len(frame_probs)
         
-        # Calculate quality weights (higher brightness + sharpness = more reliable)
-        # Normalize weights so they sum to 1
-        if frame_qualities and len(frame_qualities) == len(frame_probs):
-            # Quality score = brightness * sharpness (both contribute)
-            # Use max(0.01, ...) to avoid zero weights while still allowing differentiation
-            # Typical values: brightness ~50-200, sharpness ~50-500
-            # Normalized: (b/255) * (s/200) gives ~0.05-0.8 range
-            quality_scores = [max(0.01, (b / 255.0) * (s / 200.0)) for b, s in frame_qualities]
-            total_quality = sum(quality_scores)
-            quality_weights = [q / total_quality for q in quality_scores] if total_quality > 0 else [1.0/len(frame_probs)] * len(frame_probs)
-            
-            # Weighted mean
-            weighted_mean = sum(p * w for p, w in zip(frame_probs, quality_weights))
-            logger.info(f"[VIDEO] Quality weights: {[f'{w:.2f}' for w in quality_weights]} (scores: {[f'{q:.3f}' for q in quality_scores]})")
-        else:
-            quality_weights = None
-            weighted_mean = float(np.mean(frame_probs))
-        
-        # Use MEDIAN instead of mean (more robust to outliers)
+        # Simple aggregation: MEDIAN (robust to outliers)
         median_prob = float(np.median(frame_probs))
         mean_prob = float(np.mean(frame_probs))
-        std_prob = float(np.std(frame_probs))
+        max_prob = float(np.max(frame_probs))
         
-        logger.info(f"[VIDEO] Frame analysis: {num_frames_analyzed} frames | "
-                   f"Median: {median_prob:.3f}, Mean: {mean_prob:.3f}, Std: {std_prob:.3f}, "
-                   f"Weighted: {weighted_mean:.3f}")
+        logger.info(f"[VIDEO] Tri-frame results: {[f'{p:.3f}' for p in frame_probs]} | "
+                   f"Median: {median_prob:.3f}, Mean: {mean_prob:.3f}, Max: {max_prob:.3f}")
         
-        # Temporal consistency check
-        # If high variance (some frames AI, some human), be conservative
-        # NOTE: Threshold 0.35 may need dataset tuning for borderline cases
-        VARIANCE_THRESHOLD = 0.35
-        if std_prob > VARIANCE_THRESHOLD:
-            logger.info(f"[VIDEO] High variance detected ({std_prob:.3f}) - inconsistent frames")
-            # If most frames are human-like, trust the majority
-            human_frames = sum(1 for p in frame_probs if p < 0.5)
-            if human_frames > len(frame_probs) / 2:
-                # Majority human - use quality-weighted mean if available, else trimmed mean
-                if quality_weights:
-                    # Weight by quality: dark/blurry frames contribute less
-                    low_idx = [i for i, p in enumerate(frame_probs) if p < 0.5]
-                    if low_idx:
-                        low_sum = sum(frame_probs[i] * quality_weights[i] for i in low_idx)
-                        low_weight = sum(quality_weights[i] for i in low_idx)
-                        final_prob = low_sum / low_weight if low_weight > 0 else median_prob
-                    else:
-                        final_prob = median_prob
-                else:
-                    low_probs = [p for p in frame_probs if p < 0.5]
-                    final_prob = float(np.mean(low_probs)) if low_probs else median_prob
-                logger.info(f"[VIDEO] Majority human ({human_frames}/{num_frames_analyzed}), using quality-weighted: {final_prob:.3f}")
-            else:
-                # Mixed or majority AI - use quality-weighted mean (conservative)
-                final_prob = weighted_mean if quality_weights else median_prob
-        else:
-            # Consistent frames - use quality-weighted mean
-            final_prob = weighted_mean if quality_weights else median_prob
+        # Use median as final score (safest for 3 frames)
+        final_prob = median_prob
+        
+        # If any frame is strongly AI (>0.85), trust it
+        if max_prob > 0.85:
+            final_prob = max_prob
+            logger.info(f"[VIDEO] Strong AI frame detected ({max_prob:.3f}), using max")
         
         # Determine summary based on final probability
         is_ai_likely = final_prob > 0.5
@@ -884,11 +850,10 @@ async def detect_ai_media(file_path: str) -> dict:
 
         # Build detailed signals
         analysis_signals = [
-            f"Analyzed {num_frames_analyzed} frames (quality-weighted aggregation)",
-            f"Frame scores: median={median_prob:.2f}, weighted={weighted_mean:.2f}, std={std_prob:.2f}"
+            f"Tri-frame batch analysis ({num_frames_analyzed} frames)",
+            f"Frame scores: {[f'{p:.2f}' for p in frame_probs]}",
+            f"Aggregation: median={median_prob:.2f}, max={max_prob:.2f}"
         ]
-        if std_prob > VARIANCE_THRESHOLD:
-            analysis_signals.append(f"High variance ({std_prob:.2f}) - used conservative estimate")
         if meta_signals:
             analysis_signals.extend(meta_signals[:2])  # Add top 2 metadata signals
         
@@ -902,7 +867,8 @@ async def detect_ai_media(file_path: str) -> dict:
                     "probability": round(final_prob, 2),
                     "signals": analysis_signals
                 }
-            }
+            },
+            "gpu_time_ms": gpu_time_ms
         }
     else:
         return await detect_ai_media_image_logic(file_path, l1_data)
@@ -947,29 +913,33 @@ async def detect_ai_media_image_logic(file_path: Optional[str], l1_data: dict = 
     if ai_signals:
         logger.info(f"[META] AI signals: {ai_signals}")
     
-    # 1. VERIFIED HUMAN (Early Exit)
-    if human_score >= 0.80:
+    # 1. VERIFIED HUMAN (Early Exit) - Optimized for non-adversarial users
+    # Non-adversarial assumption: If metadata looks like real camera, trust it
+    if human_score >= 0.60:
+        logger.info(f"[EARLY EXIT] Skipping GPU scan: High confidence human metadata ({human_score:.2f})")
         return {
-            "summary": "Verified Human (Forensic Metadata)",
+            "summary": "Verified Human (Metadata)",
             "confidence_score": 1.0,
             "layers": {
                 "layer1_metadata": {
                     "status": "verified_human", 
                     "provider": exif.get("Make", "Unknown"),
-                    "description": "Hardware sensor physics confirmed."
+                    "description": "Device metadata verified - real camera footprint."
                 },
                 "layer2_forensics": {
                     "status": "skipped", 
                     "probability": 0.0,
                     "signals": human_signals
                 }
-            }
+            },
+            "gpu_time_ms": 0  # $0.00 cost
         }
 
-    # 2. LIKELY HUMAN (Early Exit)
-    if human_score >= 0.60 and ai_score < 0.20:
+    # 2. LIKELY HUMAN (Weaker signals but still skip GPU)
+    if human_score >= 0.40 and ai_score < 0.15:
+        logger.info(f"[EARLY EXIT] Skipping GPU scan: Likely human metadata ({human_score:.2f}, ai={ai_score:.2f})")
         return {
-            "summary": "Likely Human (Strong Heuristics)",
+            "summary": "Likely Human (Metadata)",
             "confidence_score": 0.9,
             "layers": {
                 "layer1_metadata": {
@@ -982,11 +952,13 @@ async def detect_ai_media_image_logic(file_path: Optional[str], l1_data: dict = 
                     "probability": 0.1,
                     "signals": human_signals
                 }
-            }
+            },
+            "gpu_time_ms": 0  # $0.00 cost
         }
 
-    # 3. LIKELY AI (Early Exit)
+    # 3. LIKELY AI (Early Exit) - Strong AI signals in metadata
     if ai_score >= 0.50:
+        logger.info(f"[EARLY EXIT] Skipping GPU scan: High AI suspicion in metadata ({ai_score:.2f})")
         return {
             "summary": "Likely AI (Metadata Evidence)",
             "confidence_score": 0.95,
@@ -1001,7 +973,8 @@ async def detect_ai_media_image_logic(file_path: Optional[str], l1_data: dict = 
                     "probability": 0.95,
                     "signals": ai_signals
                 }
-            }
+            },
+            "gpu_time_ms": 0  # $0.00 cost
         }
 
     # 4. AMBIGUOUS -> GPU Scan

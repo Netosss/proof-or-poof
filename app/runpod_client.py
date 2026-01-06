@@ -167,6 +167,99 @@ async def run_deep_forensics(source: Union[str, Image.Image], width: int = 0, he
         return {"ai_score": 0.0, "gpu_time_ms": 0.0, "error": error_msg}
 
 
+def _batch_encode_images(frames: list) -> list:
+    """CPU-bound: Encode frames to base64 (runs in thread pool)."""
+    encoded = []
+    for frame in frames:
+        img = frame.copy()
+        # Resize for efficiency (512px max)
+        if max(img.size) > 512:
+            img.thumbnail((512, 512))
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        
+        buffer = io.BytesIO()
+        img.save(buffer, format="JPEG", quality=85)
+        encoded.append(base64.b64encode(buffer.getvalue()).decode("utf-8"))
+    return encoded
+
+
+async def run_batch_forensics(frames: list) -> Dict[str, Any]:
+    """
+    Batch process multiple frames in a SINGLE RunPod request.
+    Tri-Frame Strategy: GPU processes 3 images in ~same time as 1.
+    Returns: dict with 'results' list and 'gpu_time_ms'.
+    """
+    config = get_config()
+    if not config["endpoint_id"]:
+        return {"results": [], "gpu_time_ms": 0.0, "error": "No endpoint configured"}
+    
+    if not frames:
+        return {"results": [], "gpu_time_ms": 0.0}
+
+    try:
+        total_start = time.perf_counter()
+        
+        runpod.api_key = config["api_key"]
+        endpoint = runpod.Endpoint(config["endpoint_id"])
+        
+        # Offload CPU-bound encoding to thread pool (avoids blocking event loop)
+        t_opt = time.perf_counter()
+        loop = asyncio.get_running_loop()
+        images_b64 = await loop.run_in_executor(None, _batch_encode_images, frames)
+        
+        opt_time_ms = (time.perf_counter() - t_opt) * 1000
+        total_payload_kb = sum(len(b) for b in images_b64) / 1024
+        logger.info(f"[TIMING] Batch encode ({len(frames)} frames): {opt_time_ms:.2f}ms | Total: {total_payload_kb:.1f}KB")
+
+        payload = {
+            "images": images_b64,  # Batch list
+            "task": "deep_forensic"
+        }
+
+        t_api = time.perf_counter()
+        webhook_url = config.get("webhook_url")
+        
+        if webhook_url:
+            job_result = await _run_with_webhook(endpoint, payload, webhook_url, timeout_seconds=90)
+            mode = "webhook"
+        else:
+            job_result = await _run_with_polling(endpoint, payload, timeout_seconds=90)
+            mode = "polling"
+        
+        api_time_ms = (time.perf_counter() - t_api) * 1000
+        total_time_ms = (time.perf_counter() - total_start) * 1000
+        
+        # Extract results
+        gpu_time_ms = 0.0
+        results = []
+        
+        if job_result:
+            if "results" in job_result:
+                # Batch response
+                results = job_result["results"]
+            elif "ai_score" in job_result:
+                # Single result (fallback)
+                results = [job_result]
+            
+            if "timing_ms" in job_result:
+                gpu_time_ms = job_result["timing_ms"].get("total", 0.0)
+                logger.info(f"[TIMING] Batch worker: {job_result['timing_ms']}")
+        
+        logger.info(f"[TIMING] Batch RunPod ({mode}): {api_time_ms:.2f}ms | Total: {total_time_ms:.2f}ms")
+        
+        return {
+            "results": results,
+            "gpu_time_ms": gpu_time_ms,
+            "error": job_result.get("error") if job_result else None
+        }
+        
+    except Exception as e:
+        error_msg = f"Batch RunPod call failed: {str(e)}"
+        logger.error(f"[RUNPOD] {error_msg}", exc_info=True)
+        return {"results": [], "gpu_time_ms": 0.0, "error": error_msg}
+
+
 async def _run_with_webhook(endpoint, payload: dict, webhook_url: str, timeout_seconds: int = 90) -> Dict[str, Any]:
     """
     Submit job with webhook and wait for callback. Much faster than polling!
