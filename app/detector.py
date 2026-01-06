@@ -688,8 +688,16 @@ def boost_score(score: float, is_ai_likely: bool = True) -> float:
         return max(0.85, score)
     return score  # No boost for human results
 
-async def detect_ai_media(file_path: str) -> dict:
-    """Final Optimized Consensus Engine."""
+async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict:
+    """
+    Final Optimized Consensus Engine.
+    
+    Args:
+        file_path: Path to the media file
+        trusted_metadata: Optional sidecar metadata from mobile device.
+            Bypasses OS privacy stripping. Fields: Make, Model, Software, 
+            DateTime, width, height, fileSize, namingEntropy, isOriginalPath, etc.
+    """
     total_start = time.perf_counter()
     
     l1_data = {
@@ -937,10 +945,23 @@ async def detect_ai_media(file_path: str) -> dict:
             "gpu_time_ms": gpu_time_ms
         }
     else:
-        return await detect_ai_media_image_logic(file_path, l1_data)
+        return await detect_ai_media_image_logic(file_path, l1_data, trusted_metadata=trusted_metadata)
 
-async def detect_ai_media_image_logic(file_path: Optional[str], l1_data: dict = None, frame: Image.Image = None) -> dict:
-    """Core consensus logic for images and video frames."""
+async def detect_ai_media_image_logic(
+    file_path: Optional[str], 
+    l1_data: dict = None, 
+    frame: Image.Image = None,
+    trusted_metadata: dict = None
+) -> dict:
+    """
+    Core consensus logic for images and video frames.
+    
+    Args:
+        file_path: Path to image file (None if using frame)
+        l1_data: Layer 1 (C2PA) data
+        frame: PIL Image for video frames
+        trusted_metadata: Optional sidecar from mobile device (bypasses privacy stripping)
+    """
     layer_start = time.perf_counter()
     
     if l1_data is None:
@@ -976,6 +997,29 @@ async def detect_ai_media_image_logic(file_path: Optional[str], l1_data: dict = 
                     }
                 }
             }
+    
+    # --- Merge Trusted Metadata (Sidecar) ---
+    # Prioritize trusted_metadata over file-extracted EXIF (bypasses mobile privacy stripping)
+    if trusted_metadata:
+        logger.info(f"[SIDECAR] Using trusted metadata from device")
+        # Override EXIF with sidecar data
+        if "Make" in trusted_metadata:
+            exif["Make"] = trusted_metadata["Make"]
+        if "Model" in trusted_metadata:
+            exif["Model"] = trusted_metadata["Model"]
+        if "Software" in trusted_metadata:
+            exif["Software"] = trusted_metadata["Software"]
+        if "DateTime" in trusted_metadata:
+            exif["DateTimeOriginal"] = trusted_metadata["DateTime"]
+        if "LensModel" in trusted_metadata:
+            exif["LensModel"] = trusted_metadata["LensModel"]
+        # Use sidecar dimensions if provided (more reliable than file dims after compression)
+        if "width" in trusted_metadata and "height" in trusted_metadata:
+            width = trusted_metadata["width"]
+            height = trusted_metadata["height"]
+        if "fileSize" in trusted_metadata:
+            file_size = trusted_metadata["fileSize"]
+            
     exif_time_ms = (time.perf_counter() - t_exif) * 1000
     logger.info(f"[TIMING] EXIF extraction: {exif_time_ms:.2f}ms")
     

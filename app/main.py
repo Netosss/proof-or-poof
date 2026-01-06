@@ -5,8 +5,10 @@ import csv
 import time
 import uuid
 import hashlib
+import json
+from typing import Optional
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket, Request
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 import pandas as pd
@@ -383,7 +385,29 @@ async def ws_usage(websocket: WebSocket):
 
 # ---- Detect endpoint ----
 @app.post("/detect", response_model=DetectionResponse)
-async def detect(request: Request, file: UploadFile = File(...)):
+async def detect(
+    request: Request, 
+    file: UploadFile = File(...),
+    trusted_metadata: Optional[str] = Form(None)
+):
+    """
+    Detect AI-generated content in images/videos.
+    
+    Args:
+        file: The media file to analyze (image or video)
+        trusted_metadata: Optional JSON string with device-extracted EXIF data.
+            This "sidecar" bypasses mobile OS privacy stripping.
+            Expected fields: Make, Model, Software, DateTime, width, height, fileSize, etc.
+    """
+    # Parse trusted metadata sidecar if provided
+    sidecar_metadata = None
+    if trusted_metadata:
+        try:
+            sidecar_metadata = json.loads(trusted_metadata)
+            logger.info(f"[SIDECAR] Received trusted metadata: {list(sidecar_metadata.keys())}")
+        except json.JSONDecodeError as e:
+            logger.warning(f"[SIDECAR] Invalid JSON in trusted_metadata: {e}")
+    
     # Use Secure Wrapper for primary security checks
     # (Rate limiting + Type/Size validation + Content Deep Check)
     file_content = await file.read()
@@ -398,8 +422,10 @@ async def detect(request: Request, file: UploadFile = File(...)):
         start_time = time.time()
         
         # The wrapper handles security logic; we pass detect_ai_media as the worker function
+        # Pass sidecar metadata to detector for prioritized analysis
         result = await security_manager.secure_execute(
-            request, file.filename, filesize, temp_path, detect_ai_media
+            request, file.filename, filesize, temp_path, 
+            lambda path: detect_ai_media(path, trusted_metadata=sidecar_metadata)
         )
         
         duration = time.time() - start_time
