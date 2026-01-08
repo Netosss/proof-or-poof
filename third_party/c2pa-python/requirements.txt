@@ -1,2 +1,0 @@
-# only used in the training example
-cryptography>=45.0.6

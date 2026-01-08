@@ -29,27 +29,12 @@ Build a production-ready Python server that:
    ```
 
 ## API Usage
-`POST /detect`
-Accepts a multipart form-data file (image or video).
+`POST /detect` accepts a `multipart/form-data` upload (image or video) and returns a structured
+`DetectionResponse` object (summary + confidence + layered evidence).
 
-Returns:
-```json
-{
-  "is_ai": true,
-  "provider": "OpenAI DALL-E 3",
-  "method": "c2pa",
-  "confidence": 1.0
-}
-```
-If no metadata is found:
-```json
-{
-  "is_ai": null,
-  "provider": null,
-  "method": "none",
-  "confidence": 0.0
-}
-```
+See `API.md` for:
+- exact request fields (`file`, `trusted_metadata`, `captured_in_app`, etc.)
+- response schema (including `gpu_bypassed`, `gpu_time_ms`, and `metadata` debug payload)
 
 
 

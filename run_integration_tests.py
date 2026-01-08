@@ -5,7 +5,7 @@ import json
 import time
 
 API_URL = "http://localhost:8000/detect"
-TEST_DATA_DIR = "tests/data"
+TEST_DATA_DIR = os.path.expanduser(os.getenv("AI_DETECTOR_DATASETS_ROOT", "tests/data"))
 
 def get_all_test_files():
     files = []

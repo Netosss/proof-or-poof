@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta http-equiv="refresh" content="10">
+    <title>AI Ops Dashboard</title>
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #111217; color: #d8d9da; margin: 0; padding: 20px; }
+        .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #24272e; padding-bottom: 10px; margin-bottom: 20px; }
+        .card { background-color: #181b1f; border: 1px solid #24272e; border-radius: 4px; padding: 20px; margin-bottom: 20px; }
+        .stat-box { display: flex; gap: 20px; }
+        .stat { background: #21262d; padding: 10px 20px; border-radius: 4px; border-left: 4px solid #32d1df; }
+        .stat-val { font-size: 1.5em; font-weight: bold; color: #ffffff; }
+        .stat-label { font-size: 0.8em; color: #8e8e8e; text-transform: uppercase; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.9em; }
+        th { text-align: left; background: #21262d; padding: 10px; color: #8e8e8e; text-transform: uppercase; font-size: 0.8em; }
+        tr { border-bottom: 1px solid #24272e; }
+        td { padding: 10px; }
+        .col-id { color: #32d1df; }
+        .col-cost { color: #73bf69; }
+        .empty-dash { text-align: center; padding: 50px; }
+        .empty-box { border: 1px solid #24272e; padding: 40px; border-radius: 8px; display: inline-block; }
+        .btn-try { color: #73bf69; text-decoration: none; border: 1px solid #73bf69; padding: 10px 20px; border-radius: 4px; display: inline-block; margin-top: 20px; }
+        .error-page { text-align: center; padding: 50px; }
+    </style>
+</head>
+<body>
+    {% if error %}
+    <div class="error-page">
+        <h2>Dashboard Error ⚠️</h2>
+        <p>{{ error }}</p>
+        <p style="color: #8e8e8e;">Try scanning another image to regenerate the log file.</p>
+    </div>
+    {% elif is_empty %}
+    <div class="empty-dash">
+        <div class="empty-box">
+            <h1 style="color: #32d1df;">Empty Dashboard 🌌</h1>
+            <p style="color: #8e8e8e;">No usage data found on this instance.</p>
+            <p style="font-size: 0.8em; color: #555;">Note: History is cleared on every Railway redeploy unless using Volumes.</p>
+            <a href="/detect" class="btn-try">Try a Scan! 🚀</a>
+        </div>
+    </div>
+    {% else %}
+    <div class="header">
+        <div style="font-size: 1.2em; font-weight: bold;">AI OPS / <span style="color: #32d1df;">USAGE_TRACKER</span></div>
+        <div class="stat-box">
+            <div class="stat">
+                <div class="stat-label">Total Burn</div>
+                <div class="stat-val">${{ "%.4f"|format(total_cost) }}</div>
+            </div>
+            <div class="stat" style="border-left-color: #73bf69;">
+                <div class="stat-label">Requests</div>
+                <div class="stat-val">{{ total_requests }}</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        {{ plot_html | safe }}
+    </div>
+
+    <div class="card">
+        <div style="font-weight: bold; margin-bottom: 15px; color: #32d1df;">LIVE REQUEST LOGS</div>
+        <table>
+            <thead>
+                <tr>
+                    <th>ID</th><th>Time</th><th>File</th><th>Method</th><th>Cost</th><th>GPU Time</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in rows %}
+                <tr>
+                    <td class="col-id">{{ row.request_id }}</td>
+                    <td>{{ row.date_label }}</td>
+                    <td>{{ row.filename }}</td>
+                    <td>{{ row.method }}</td>
+                    <td class="col-cost">${{ "%.4f"|format(row.cost_usd) }}</td>
+                    <td>{{ "%.2f"|format(row.gpu_seconds) }}s</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</body>
+</html>

@@ -9,15 +9,16 @@ import requests
 import json
 
 API_URL = "http://localhost:8000/detect"
+DATA_ROOT = os.path.expanduser(os.getenv("AI_DETECTOR_DATASETS_ROOT", "tests/data"))
 
 # Dataset configurations: (name, ai_dir, real_dir, ai_prefix, real_prefix)
 DATASETS = [
-    ("Kaggle", "tests/data/kaggle_benchmark/AiArtData/AiArtData", "tests/data/kaggle_benchmark/RealArt/RealArt", None, None),
-    ("HF_200", "tests/data/hf_200_benchmark/AI", "tests/data/hf_200_benchmark/Real", "ai_hf_", "real_hf_"),
-    ("GenImage", "tests/data/genimage_benchmark", "tests/data/genimage_benchmark", "gen_any_", "nature_"),
-    ("Benchmark_50", "tests/data/benchmark_50/ai", "tests/data/benchmark_50/original", None, None),
-    ("Benchmark_HF_50", "tests/data/benchmark_hf_50/ai", "tests/data/benchmark_hf_50/original", None, None),
-    ("User_Data", "tests/data/ai/images", "tests/data/original/images", None, None),
+    ("Kaggle", os.path.join(DATA_ROOT, "kaggle_benchmark/AiArtData/AiArtData"), os.path.join(DATA_ROOT, "kaggle_benchmark/RealArt/RealArt"), None, None),
+    ("HF_200", os.path.join(DATA_ROOT, "hf_200_benchmark/AI"), os.path.join(DATA_ROOT, "hf_200_benchmark/Real"), "ai_hf_", "real_hf_"),
+    ("GenImage", os.path.join(DATA_ROOT, "genimage_benchmark"), os.path.join(DATA_ROOT, "genimage_benchmark"), "gen_any_", "nature_"),
+    ("Benchmark_50", os.path.join(DATA_ROOT, "benchmark_50/ai"), os.path.join(DATA_ROOT, "benchmark_50/original"), None, None),
+    ("Benchmark_HF_50", os.path.join(DATA_ROOT, "benchmark_hf_50/ai"), os.path.join(DATA_ROOT, "benchmark_hf_50/original"), None, None),
+    ("User_Data", os.path.join(DATA_ROOT, "ai/images"), os.path.join(DATA_ROOT, "original/images"), None, None),
 ]
 
 def get_files(directory, prefix=None):
@@ -42,7 +43,7 @@ def run_benchmark(name, ai_files, real_files):
     for f in ai_files:
         try:
             # Pass the original path as filename for ground truth detection
-            filename = f.replace('tests/data/', '')  # Keep relative path for mock detection
+            filename = f.replace(DATA_ROOT.rstrip("/") + "/", "")  # Keep relative path for mock detection
             with open(f, 'rb') as img:
                 r = requests.post(API_URL, files={'file': (filename, img)}, timeout=10)
                 data = r.json()
@@ -58,7 +59,7 @@ def run_benchmark(name, ai_files, real_files):
     for f in real_files:
         try:
             # Pass the original path as filename for ground truth detection
-            filename = f.replace('tests/data/', '')  # Keep relative path for mock detection
+            filename = f.replace(DATA_ROOT.rstrip("/") + "/", "")  # Keep relative path for mock detection
             with open(f, 'rb') as img:
                 r = requests.post(API_URL, files={'file': (filename, img)}, timeout=10)
                 data = r.json()

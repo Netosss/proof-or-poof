@@ -118,10 +118,10 @@ def launch_gpu_batch(images: list):
 def handler(job):
     job_input = job.get("input", {})
     task = job_input.get("task")
-    
+
     if task != "deep_forensic":
         return {"error": f"Invalid task: {task}"}
-    
+
     if model is None:
         return {"error": "Model failed to initialize on worker."}
 
@@ -148,13 +148,13 @@ def handler(job):
     # 1. DECODE & CACHE CHECK
     t0 = time.perf_counter()
     for idx, b64_str in enumerate(images_b64):
-        try:
+    try:
             img_bytes = base64.b64decode(b64_str)
-            img_hash = hashlib.md5(img_bytes).hexdigest()
-            
+        img_hash = hashlib.md5(img_bytes).hexdigest()
+
             # Check cache
-            cached = worker_cache.get(img_hash)
-            if cached:
+    cached = worker_cache.get(img_hash)
+    if cached:
                 cached_result = cached.copy()
                 cached_result["cache_hit"] = True
                 results[idx] = cached_result
@@ -165,16 +165,16 @@ def handler(job):
             orig_w, orig_h = original_img.size
             
             # Extract EXIF before conversion
-            metadata_bias = 1.0
-            try:
+        metadata_bias = 1.0
+        try:
                 exif = original_img.getexif()
-                if exif:
-                    software = str(exif.get(305, "")).lower()
-                    make = str(exif.get(271, "")).lower()
-                    if any(s in software for s in ["photoshop", "lightroom", "capture one", "gimp"]):
-                        metadata_bias *= 0.9
-                    if any(m in make for m in ["canon", "nikon", "sony", "fujifilm", "leica", "apple", "google"]):
-                        metadata_bias *= 0.85
+            if exif:
+                software = str(exif.get(305, "")).lower()
+                make = str(exif.get(271, "")).lower()
+                if any(s in software for s in ["photoshop", "lightroom", "capture one", "gimp"]):
+                    metadata_bias *= 0.9
+                if any(m in make for m in ["canon", "nikon", "sony", "fujifilm", "leica", "apple", "google"]):
+                    metadata_bias *= 0.85
             except:
                 pass
             
@@ -190,7 +190,7 @@ def handler(job):
     decode_ms = (time.perf_counter() - t0) * 1000
     cache_hits = len(images_b64) - len(images_to_process)
     logger.info(f"[TIMING] Decode & cache check: {decode_ms:.2f}ms ({cache_hits} hits, {len(images_to_process)} misses)")
-    
+
     # 2. PROCESS CACHE MISSES (Batch GPU)
     if images_to_process:
         pil_images = [x[1] for x in images_to_process]
@@ -233,10 +233,10 @@ def handler(job):
                     final_score = (ai_score * 0.9) + (fft_norm * 0.1)
                 
                 final_score = max(0.0, min(1.0, final_score * hr_bias * meta_bias))
-                
+
                 res_obj = {
-                    "ai_score": final_score,
-                    "model_score": ai_score,
+            "ai_score": final_score,
+            "model_score": ai_score,
                     "fft_score": fft_norm,
                     "high_res_bias": hr_bias,
                     "metadata_bias": meta_bias,

@@ -11,3 +11,6 @@ Pillow
 numpy
 pandas
 plotly
+jinja2
+pytest
+pytest-asyncio
