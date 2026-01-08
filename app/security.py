@@ -17,13 +17,16 @@ class SecurityManager:
     def __init__(self):
         # Rate limiting storage: {ip: [timestamps]}
         self.rate_limits: Dict[str, list] = {}
-        self.MAX_IMAGE_SIZE = 20 * 1024 * 1024  # 20MB
-        self.MAX_VIDEO_SIZE = 200 * 1024 * 1024 # 200MB
-        self.RATE_LIMIT_WINDOW = 60 # seconds
-        self.MAX_REQUESTS_PER_WINDOW = 15 # requests per minute
+        self.MAX_IMAGE_SIZE = int(os.getenv("MAX_IMAGE_SIZE_BYTES", 20 * 1024 * 1024))   # 20MB
+        self.MAX_VIDEO_SIZE = int(os.getenv("MAX_VIDEO_SIZE_BYTES", 200 * 1024 * 1024)) # 200MB
+        self.RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW_SEC", 60))            # seconds
+        self.MAX_REQUESTS_PER_WINDOW = int(os.getenv("MAX_REQUESTS_PER_WINDOW", 15))    # requests per window
+        self.ENABLE_RATE_LIMIT = os.getenv("ENABLE_RATE_LIMIT", "1").lower() not in {"0", "false", "no"}
 
     def check_rate_limit(self, identifier: str):
         """Simple memory-based rate limiting per IP/Identifier with periodic cleanup."""
+        if not self.ENABLE_RATE_LIMIT:
+            return
         now = time.time()
         
         # Periodic cleanup of the entire storage every 1000 requests (to prevent memory leaks)
@@ -38,7 +41,7 @@ class SecurityManager:
         
         if len(self.rate_limits[identifier]) >= self.MAX_REQUESTS_PER_WINDOW:
             logger.warning(f"Rate limit exceeded for {identifier}")
-            raise HTTPException(status_code=429, detail="Too many requests. Please try again in a minute.")
+            raise HTTPException(status_code=429, detail="Too many requests. Please try again later.")
         
         self.rate_limits[identifier].append(now)
 

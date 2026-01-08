@@ -6,14 +6,15 @@ import time
 import uuid
 import hashlib
 import json
+import pandas as pd
+import plotly.express as px
+import asyncio
 from typing import Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
-import pandas as pd
-import plotly.express as px
-import asyncio
+from fastapi.templating import Jinja2Templates
 
 # Load environment variables at the very beginning
 load_dotenv()
@@ -22,7 +23,8 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-from app.detector import detect_ai_media
+# Import from new modular structure
+from app.detectors import detect_ai_media
 from app.schemas import DetectionResponse
 from app.runpod_client import run_video_removal, pending_jobs, webhook_result_buffer, cleanup_stale_jobs
 from app.security import security_manager
@@ -33,6 +35,9 @@ RUNPOD_WEBHOOK_SECRET = os.getenv("RUNPOD_WEBHOOK_SECRET", "")
 
 # Dashboard authentication (optional but recommended)
 DASHBOARD_SECRET = os.getenv("DASHBOARD_SECRET", "")
+
+# Setup Jinja2 Templates
+templates = Jinja2Templates(directory="app/templates")
 
 # Background cleanup task
 cleanup_task = None
@@ -125,11 +130,7 @@ async def runpod_webhook(request: Request):
     """
     try:
         # ---- Authentication ----
-        # Log headers for debugging (remove in production)
-        logger.info(f"[WEBHOOK] Headers received: {dict(request.headers)}")
-        
         if RUNPOD_WEBHOOK_SECRET:
-            # Try multiple header names that RunPod might use
             signature = (
                 request.headers.get("X-Runpod-Signature", "") or
                 request.headers.get("Authorization", "").replace("Bearer ", "") or
@@ -137,10 +138,8 @@ async def runpod_webhook(request: Request):
             )
             
             if signature != RUNPOD_WEBHOOK_SECRET:
-                logger.warning(f"[WEBHOOK] Signature mismatch. Got: '{signature[:20]}...' Expected: '{RUNPOD_WEBHOOK_SECRET[:20]}...'")
-                # For now, log but don't block - RunPod might not send signature
-                # TODO: Enable strict auth once we confirm RunPod's header format
-                # raise HTTPException(status_code=401, detail="Invalid webhook signature")
+                logger.warning(f"[WEBHOOK] Signature mismatch.")
+                # For now, log but don't block
         
         payload = await request.json()
         job_id = payload.get("id")
@@ -151,26 +150,13 @@ async def runpod_webhook(request: Request):
         
         if job_id and job_id in pending_jobs:
             future, start_time = pending_jobs[job_id]
-            elapsed_ms = (time.time() - start_time) * 1000
             
             if status == "COMPLETED" and output:
-                # Validate output has required fields
                 if not isinstance(output, dict):
-                    logger.warning(f"[WEBHOOK] Job {job_id} output is not a dict: {type(output)}")
                     output = {"ai_score": 0.0, "gpu_time_ms": 0.0, "error": "Invalid output format"}
                 
                 if not future.done():
                     future.set_result(output)
-                
-                # Log based on response type (single vs batch)
-                if "results" in output:
-                    # Batch response
-                    batch_size = len(output.get("results", []))
-                    gpu_time = output.get("timing_ms", {}).get("total", 0)
-                    logger.info(f"[WEBHOOK] Job {job_id} completed in {elapsed_ms:.2f}ms (batch={batch_size}, gpu={gpu_time:.1f}ms)")
-                else:
-                    # Single image response
-                    logger.info(f"[WEBHOOK] Job {job_id} completed in {elapsed_ms:.2f}ms, ai_score={output.get('ai_score', 'N/A')}")
             elif status == "FAILED":
                 error_output = {
                     "error": "Job failed", 
@@ -180,25 +166,16 @@ async def runpod_webhook(request: Request):
                 }
                 if not future.done():
                     future.set_result(error_output)
-                logger.error(f"[WEBHOOK] Job {job_id} failed: {payload.get('error')}")
             else:
-                # IN_PROGRESS or other status - don't resolve yet
-                logger.info(f"[WEBHOOK] Job {job_id} status update: {status}")
                 return {"status": "acknowledged"}
         elif job_id and status == "COMPLETED" and output:
-            # Race condition: webhook arrived before pending_jobs was set
-            # Validate before buffering
             if isinstance(output, dict) and "ai_score" in output:
                 webhook_result_buffer[job_id] = (output, time.time())
-                logger.info(f"[WEBHOOK] Job {job_id} buffered (arrived before pending_jobs set), ai_score={output.get('ai_score')}")
+                logger.info(f"[WEBHOOK] Job {job_id} buffered")
             else:
                 logger.warning(f"[WEBHOOK] Job {job_id} has invalid output, not buffering")
-        else:
-            logger.warning(f"[WEBHOOK] Unknown or incomplete job_id: {job_id}")
         
         return {"status": "ok"}
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"[WEBHOOK] Error processing callback: {e}")
         return {"status": "error", "message": str(e)}
@@ -208,38 +185,28 @@ async def runpod_webhook(request: Request):
 async def dashboard(request: Request, secret: str = ""):
     # ---- Authentication (optional) ----
     if DASHBOARD_SECRET:
-        # Check query param or header
         provided_secret = secret or request.headers.get("X-Dashboard-Secret", "")
         if provided_secret != DASHBOARD_SECRET:
-            return HTMLResponse(
-                content="""
-                <body style="background-color: #111217; color: white; font-family: sans-serif; padding: 50px; text-align: center;">
-                    <h1 style="color: #ff6b6b;">🔒 Access Denied</h1>
-                    <p>Dashboard requires authentication. Add ?secret=YOUR_SECRET to the URL.</p>
-                </body>
-                """,
-                status_code=401
-            )
+            return templates.TemplateResponse("dashboard.html", {
+                "request": request,
+                "error": "Access Denied. Add ?secret=YOUR_SECRET to the URL."
+            }, status_code=401)
     
     # 1. Check if log exists
     if not os.path.exists(USAGE_LOG):
-        logger.info("Dashboard requested but usage_log.csv does not exist yet.")
-        return """
-        <body style="background-color: #111217; color: white; font-family: sans-serif; padding: 50px; text-align: center;">
-            <div style="border: 1px solid #24272e; padding: 40px; border-radius: 8px; display: inline-block;">
-                <h1 style="color: #32d1df;">Empty Dashboard 🌌</h1>
-                <p style="color: #8e8e8e;">No usage data found on this instance.</p>
-                <p style="font-size: 0.8em; color: #555;">Note: History is cleared on every Railway redeploy unless using Volumes.</p>
-                <a href="/detect" style="color: #73bf69; text-decoration: none; border: 1px solid #73bf69; padding: 10px 20px; border-radius: 4px; display: inline-block; margin-top: 20px;">Try a Scan! 🚀</a>
-            </div>
-        </body>
-        """
+        return templates.TemplateResponse("dashboard.html", {
+            "request": request,
+            "is_empty": True
+        })
 
     try:
         # 2. Read and Validate Data
         df = pd.read_csv(USAGE_LOG)
         if df.empty:
-            raise ValueError("CSV is empty")
+            return templates.TemplateResponse("dashboard.html", {
+                "request": request,
+                "is_empty": True
+            })
             
         # Ensure timestamp is numeric
         df['timestamp'] = pd.to_numeric(df['timestamp'], errors='coerce')
@@ -250,7 +217,7 @@ async def dashboard(request: Request, secret: str = ""):
         df['date_label'] = df['datetime'].dt.strftime('%H:%M:%S')
         df = df.sort_values('timestamp')
 
-        # 3. Create Grafana-like Scatter Plot
+        # 3. Create Scatter Plot
         fig = px.scatter(
             df, x="datetime", y="cost_usd", color="method",
             text="request_id",
@@ -282,82 +249,28 @@ async def dashboard(request: Request, secret: str = ""):
             margin=dict(l=40, r=40, t=60, b=40)
         )
 
-        # Build HTML table for "Logs" look
-        table_rows = ""
-        for _, row in df.tail(10).iloc[::-1].iterrows(): # Last 10, newest first
-            table_rows += f"""
-            <tr style="border-bottom: 1px solid #24272e;">
-                <td style="padding: 10px; color: #32d1df;">{row['request_id']}</td>
-                <td style="padding: 10px;">{row['date_label']}</td>
-                <td style="padding: 10px;">{row['filename']}</td>
-                <td style="padding: 10px;">{row['method']}</td>
-                <td style="padding: 10px; color: #73bf69;">${row['cost_usd']:.4f}</td>
-                <td style="padding: 10px;">{row['gpu_seconds']:.2f}s</td>
-            </tr>
-            """
+        plot_html = fig.to_html(full_html=False, include_plotlyjs='cdn')
 
-        html = f"""
-        <html>
-            <head>
-                <meta http-equiv="refresh" content="10">
-                <title>AI Ops Dashboard</title>
-                <style>
-                    body {{ font-family: 'Inter', sans-serif; background-color: #111217; color: #d8d9da; margin: 0; padding: 20px; }}
-                    .header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #24272e; padding-bottom: 10px; margin-bottom: 20px; }}
-                    .card {{ background-color: #181b1f; border: 1px solid #24272e; border-radius: 4px; padding: 20px; margin-bottom: 20px; }}
-                    .stat-box {{ display: flex; gap: 20px; }}
-                    .stat {{ background: #21262d; padding: 10px 20px; border-radius: 4px; border-left: 4px solid #32d1df; }}
-                    .stat-val {{ font-size: 1.5em; font-weight: bold; color: #ffffff; }}
-                    .stat-label {{ font-size: 0.8em; color: #8e8e8e; text-transform: uppercase; }}
-                    table {{ width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.9em; }}
-                    th {{ text-align: left; background: #21262d; padding: 10px; color: #8e8e8e; text-transform: uppercase; font-size: 0.8em; }}
-                </style>
-            </head>
-            <body>
-                <div class="header">
-                    <div style="font-size: 1.2em; font-weight: bold;">AI OPS / <span style="color: #32d1df;">USAGE_TRACKER</span></div>
-                    <div class="stat-box">
-                        <div class="stat">
-                            <div class="stat-label">Total Burn</div>
-                            <div class="stat-val">${df['cost_usd'].sum():.4f}</div>
-                        </div>
-                        <div class="stat" style="border-left-color: #73bf69;">
-                            <div class="stat-label">Requests</div>
-                            <div class="stat-val">{len(df)}</div>
-                        </div>
-                    </div>
-                </div>
+        # Convert DF to list of dicts for Jinja2
+        rows = df.tail(10).iloc[::-1].to_dict(orient="records")
+        
+        total_cost = df['cost_usd'].sum()
+        total_requests = len(df)
 
-                <div class="card">
-                    {fig.to_html(full_html=False, include_plotlyjs='cdn')}
-                </div>
-
-                <div class="card">
-                    <div style="font-weight: bold; margin-bottom: 15px; color: #32d1df;">LIVE REQUEST LOGS</div>
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>ID</th><th>Time</th><th>File</th><th>Method</th><th>Cost</th><th>GPU Time</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {table_rows}
-                        </tbody>
-                    </table>
-                </div>
-            </body>
-        </html>
-        """
-        return HTMLResponse(html)
+        return templates.TemplateResponse("dashboard.html", {
+            "request": request,
+            "is_empty": False,
+            "plot_html": plot_html,
+            "rows": rows,
+            "total_cost": total_cost,
+            "total_requests": total_requests
+        })
     except Exception as e:
         logger.error(f"Dashboard render error: {e}", exc_info=True)
-        return f"""
-        <body style="background-color: #111217; color: white; padding: 50px;">
-            <h2>Dashboard Error ⚠️</h2>
-            <p>Could not load usage data: {str(e)}</p>
-            <p style="color: #8e8e8e;">Try scanning another image to regenerate the log file.</p>
-        </body>
-        """
+        return templates.TemplateResponse("dashboard.html", {
+            "request": request,
+            "error": f"Could not load usage data: {str(e)}"
+        })
 
 # ---- WebSocket endpoint ----
 connected_clients = []
@@ -388,16 +301,16 @@ async def ws_usage(websocket: WebSocket):
 async def detect(
     request: Request, 
     file: UploadFile = File(...),
-    trusted_metadata: Optional[str] = Form(None)
+    trusted_metadata: Optional[str] = Form(None),
+    # Capture-time sidecar fields (sent by mobile app)
+    captured_in_app: Optional[bool] = Form(False),
+    capture_session_id: Optional[str] = Form(None),
+    capture_timestamp_ms: Optional[int] = Form(None),
+    capture_path: Optional[str] = Form(None),
+    capture_signature: Optional[str] = Form(None),
 ):
     """
     Detect AI-generated content in images/videos.
-    
-    Args:
-        file: The media file to analyze (image or video)
-        trusted_metadata: Optional JSON string with device-extracted EXIF data.
-            This "sidecar" bypasses mobile OS privacy stripping.
-            Expected fields: Make, Model, Software, DateTime, width, height, fileSize, etc.
     """
     # Parse trusted metadata sidecar if provided
     sidecar_metadata = None
@@ -407,9 +320,22 @@ async def detect(
             logger.info(f"[SIDECAR] Received trusted metadata: {list(sidecar_metadata.keys())}")
         except json.JSONDecodeError as e:
             logger.warning(f"[SIDECAR] Invalid JSON in trusted_metadata: {e}")
+
+    # Merge explicit capture-time fields into sidecar_metadata (so detector has a single dict)
+    if sidecar_metadata is None:
+        sidecar_metadata = {}
+    if captured_in_app:
+        sidecar_metadata["captured_in_app"] = True
+    if capture_session_id:
+        sidecar_metadata["capture_session_id"] = capture_session_id
+    if capture_timestamp_ms:
+        sidecar_metadata["capture_timestamp_ms"] = int(capture_timestamp_ms)
+    if capture_path:
+        sidecar_metadata["capture_path"] = capture_path
+    if capture_signature:
+        sidecar_metadata["capture_signature"] = capture_signature
     
     # Use Secure Wrapper for primary security checks
-    # (Rate limiting + Type/Size validation + Content Deep Check)
     file_content = await file.read()
     filesize = len(file_content)
     suffix = os.path.splitext(file.filename)[1].lower()
@@ -422,27 +348,23 @@ async def detect(
         start_time = time.time()
         
         # The wrapper handles security logic; we pass detect_ai_media as the worker function
-        # Pass sidecar metadata to detector for prioritized analysis
         result = await security_manager.secure_execute(
             request, file.filename, filesize, temp_path, 
-            lambda path: detect_ai_media(path, trusted_metadata=sidecar_metadata)
+            lambda path: detect_ai_media(path, trusted_metadata=sidecar_metadata, original_filename=file.filename)
         )
         
         duration = time.time() - start_time
         gpu_used = result.get("layers", {}).get("layer2_forensics", {}).get("status") != "skipped"
         
-        # Use actual GPU time for cost calculation (not round-trip time)
         actual_gpu_time_ms = result.get("gpu_time_ms", 0.0)
         actual_gpu_sec = actual_gpu_time_ms / 1000.0
         
         if gpu_used and actual_gpu_sec > 0:
-            # Cost based on actual GPU utilization, not network round-trip
             cost = actual_gpu_sec * GPU_RATE_PER_SEC
             method = "detect_with_gpu"
             gpu_sec, cpu_sec = actual_gpu_sec, duration - actual_gpu_sec
-            logger.info(f"[COST] GPU: {actual_gpu_sec:.3f}s (actual) vs {duration:.3f}s (round-trip) | Cost: ${cost:.6f}")
+            logger.info(f"[COST] GPU: {actual_gpu_sec:.3f}s (actual) | Cost: ${cost:.6f}")
         elif gpu_used:
-            # Fallback: worker didn't return timing, use round-trip (legacy)
             cost = duration * GPU_RATE_PER_SEC
             method = "detect_with_gpu"
             gpu_sec, cpu_sec = duration, 0
@@ -452,9 +374,8 @@ async def detect(
             gpu_sec, cpu_sec = 0, duration
             
         log_usage(file.filename, filesize, method, cost, gpu_seconds=gpu_sec, cpu_seconds=cpu_sec)
-        
-        # Remove internal field before returning response
-        result.pop("gpu_time_ms", None)
+
+        # Keep gpu_time_ms in the API response (useful for clients + debugging/cost dashboards)
         return result
     finally:
         if os.path.exists(temp_path):
@@ -503,7 +424,6 @@ async def remove_watermark(request: Request, file: UploadFile = File(...)):
                 "cost_usd": round(cost, 5), "filename": file.filename,
             }
     except Exception as e:
-        # The wrapper might have already raised an HTTPException, but if not:
         if isinstance(e, HTTPException):
             raise e
         raise HTTPException(status_code=500, detail=str(e))
