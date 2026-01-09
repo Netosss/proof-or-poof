@@ -121,3 +121,4 @@ class ScoringConfig:
         "SUSPICIOUS_AI": 0.50,
         "LIKELY_HUMAN_NOISE": 0.20,
     }
+    
