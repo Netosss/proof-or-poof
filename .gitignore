@@ -9,3 +9,22 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+
+# --- Local datasets / benchmarks (do not commit) ---
+tests/data/
+tests/data/**
+
+# --- Local logs / reports ---
+server.log
+*.log
+usage_log.csv
+tuning_log.txt
+tuning_comprehensive_log.txt
+tuning_results_*.json
+hf_200_false_positives_meta.json
+
+# --- Local environment / editor ---
+.env.*
+.python-version
+.vscode/
+.idea/

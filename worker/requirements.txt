@@ -1,1 +1,8 @@
 runpod
+transformers==4.48.3
+accelerate
+Pillow
+timm
+numpy
+safetensors
+opencv-python-headless
