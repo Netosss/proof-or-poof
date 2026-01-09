@@ -3,6 +3,6 @@ transformers==4.48.3
 accelerate
 Pillow
 timm
-numpy
+numpy<2
 safetensors
 opencv-python-headless
