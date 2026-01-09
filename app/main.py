@@ -335,10 +335,13 @@ async def detect(
     if capture_signature:
         sidecar_metadata["capture_signature"] = capture_signature
     
-    # Use Secure Wrapper for primary security checks
     file_content = await file.read()
     filesize = len(file_content)
     suffix = os.path.splitext(file.filename)[1].lower()
+
+    # [LOGGING] Request Input
+    log_meta_keys = list(sidecar_metadata.keys()) if sidecar_metadata else []
+    logger.info(f"[REQUEST] Processing: {file.filename} | Size: {filesize} bytes | Metadata: {log_meta_keys}")
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
         tmp_file.write(file_content)
