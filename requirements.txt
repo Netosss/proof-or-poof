@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+python-multipart
+python-dotenv
+aiohttp
+requests
+runpod
+pillow
+numpy
+opencv-python-headless
+pandas
+plotly
+jinja2
+c2pa-python
