@@ -34,6 +34,27 @@ def _benchmark_mode_enabled() -> bool:
     """
     return os.getenv("AI_DETECTOR_BENCHMARK", "0").lower() in {"1", "true", "yes"}
 
+def _log_decision(result: dict, source: str) -> dict:
+    """Helper to log the final decision before returning."""
+    try:
+        summary = result.get("summary", "N/A")
+        conf = result.get("confidence_score", 0.0)
+        meta = result.get("metadata", {}) or {}
+        # Handle cases where metadata might be nested differently or missing
+        h_score = meta.get("human_score", 0.0)
+        a_score = meta.get("ai_score", 0.0)
+        
+        # If it's a layer structure (Video), extract from layer1 if metadata is empty
+        if not meta and "layers" in result:
+            l1 = result["layers"].get("layer1_metadata", {})
+            h_score = l1.get("human_score", 0.0)
+            a_score = l1.get("ai_score", 0.0)
+
+        logger.info(f"[DECISION] Verdict: {summary} ({conf:.2f}) | Source: {source} | Scores: H={h_score}, A={a_score}")
+    except Exception as e:
+        logger.error(f"[LOGGING] Error logging decision: {e}")
+    return result
+
 def _verify_capture_signature(trusted_metadata: dict) -> bool:
     """
     Optional hardening: if CAPTURE_HMAC_SECRET is set, require a valid signature before
@@ -102,7 +123,7 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None, origina
             "description": f"Verified AI signature found ({generator})." if is_generative_ai else "Verified original content."
         }
 
-        return {
+        return _log_decision({
             "summary": "Verified AI" if is_generative_ai else "Verified Original",
             "confidence_score": 1.0,
             "layers": {
@@ -119,7 +140,7 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None, origina
                 "signals": ["C2PA cryptographic signature"],
                 "bypass_reason": "c2pa"
             }
-        }
+        }, "C2PA Signature")
 
     # --- IN-APP CAPTURE (Strongest Human Signal) ---
     # Only trust this if:
@@ -130,7 +151,7 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None, origina
         has_sid = bool(trusted_metadata.get("capture_session_id"))
         has_ts = bool(trusted_metadata.get("capture_timestamp_ms") or trusted_metadata.get("capture_timestamp"))
         if has_sid and has_ts and _verify_capture_signature(trusted_metadata):
-            return {
+            return _log_decision({
                 "summary": "Verified Original (In-App Capture)",
                 "confidence_score": 0.99,
                 "layers": {
@@ -169,7 +190,7 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None, origina
                     },
                     "bypass_reason": "captured_in_app",
                 }
-            }
+            }, "In-App Capture")
 
     is_video = file_path.lower().endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm'))
     
@@ -418,7 +439,7 @@ async def detect_ai_media_image_logic(
 
     # 1. VERIFIED ORIGINAL (Early Exit - Save Money)
     if human_score >= ScoringConfig.THRESHOLDS["HUMAN_EXIT_HIGH"]:
-        return {
+        return _log_decision({
             "summary": "Verified Original (Metadata)",
             "confidence_score": 0.99,
             "layers": {
@@ -434,7 +455,7 @@ async def detect_ai_media_image_logic(
             "gpu_time_ms": 0,
             "gpu_bypassed": True,
             "metadata": {**meta_summary, "bypass_reason": "metadata_verified_original"}
-        }
+        }, "Metadata (Verified)")
 
     # 2. LIKELY ORIGINAL (Early Exit - Save Money)
     # Be aggressive if ai_score is very low
@@ -442,7 +463,7 @@ async def detect_ai_media_image_logic(
         (human_score >= ScoringConfig.THRESHOLDS["HUMAN_EXIT_LOW"] and ai_score < ScoringConfig.THRESHOLDS.get("HUMAN_LOW_AI_MAX", 0.10))
         or (ai_score == 0 and human_score >= ScoringConfig.THRESHOLDS.get("HUMAN_LOW_NO_AI_MIN", 0.25))
     ):
-        return {
+        return _log_decision({
             "summary": "Likely Original (Metadata)",
             "confidence_score": 0.9,
             "layers": {
@@ -458,11 +479,11 @@ async def detect_ai_media_image_logic(
             "gpu_time_ms": 0,
             "gpu_bypassed": True,
             "metadata": {**meta_summary, "bypass_reason": "metadata_likely_original"}
-        }
+        }, "Metadata (Likely Original)")
 
     # 3. LIKELY AI (Early Exit - Save Money)
     if ai_score >= ScoringConfig.THRESHOLDS["AI_EXIT_META"]:
-        return {
+        return _log_decision({
             "summary": "Likely AI (Metadata Evidence)",
             "confidence_score": 0.95,
             "layers": {
@@ -478,7 +499,7 @@ async def detect_ai_media_image_logic(
             "gpu_time_ms": 0,
             "gpu_bypassed": True,
             "metadata": {**meta_summary, "bypass_reason": "metadata_likely_ai"}
-        }
+        }, "Metadata (Likely AI)")
 
     # 4. SUSPICIOUS AI (Continue to GPU)
     # We no longer exit early here to let the GPU 'veto' suspicious metadata
@@ -596,4 +617,4 @@ async def detect_ai_media_image_logic(
     if file_hash and not _benchmark_mode_enabled():
         forensic_cache.put(file_hash, final_result)
 
-    return final_result
+    return _log_decision(final_result, "Final Consensus")
