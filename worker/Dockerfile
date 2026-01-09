@@ -13,7 +13,7 @@ ENV TRANSFORMERS_CACHE=/app/cache
 WORKDIR /app
 
 # Copy requirements (Assumes build context is inside 'worker' folder)
-COPY requirements.txt .
+COPY worker/requirements.txt .
 
 # Install dependencies
 RUN pip install --no-cache-dir --upgrade pip && \
@@ -21,13 +21,13 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 # --- BAKE MODELS ---
 # Copy builder script
-COPY builder.py .
+COPY worker/builder.py .
 # Run builder to download models into HF_HOME
 RUN python builder.py && \
     rm builder.py
 
 # Copy the handler
-COPY handler.py .
+COPY worker/handler.py .
 
 # RunPod expects this entry point
 CMD [ "python", "-u", "handler.py" ]
