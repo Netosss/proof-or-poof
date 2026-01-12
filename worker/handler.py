@@ -166,9 +166,13 @@ def handler(job):
             
             # Extract EXIF before conversion
             metadata_bias = 1.0
+            has_exif = False
+            format_name = "JPEG" # Default assuming JPEG
             try:
+                format_name = original_img.format if original_img.format else "JPEG"
                 exif = original_img.getexif()
                 if exif:
+                    has_exif = True
                     software = str(exif.get(305, "")).lower()
                     make = str(exif.get(271, "")).lower()
                     if any(s in software for s in ["photoshop", "lightroom", "capture one", "gimp"]):
@@ -181,7 +185,7 @@ def handler(job):
             # Convert for model
             img = original_img.convert("RGB")
             
-            images_to_process.append((idx, img, orig_w, orig_h, metadata_bias))
+            images_to_process.append((idx, img, orig_w, orig_h, metadata_bias, has_exif, format_name))
             hashes_to_process.append(img_hash)
             
         except Exception as e:
@@ -219,7 +223,7 @@ def handler(job):
         if logits_batch is not None:
             probs_batch = torch.softmax(logits_batch, dim=-1)
             
-            for i, (idx, _, w, h, meta_bias) in enumerate(images_to_process):
+            for i, (idx, _, w, h, meta_bias, has_exif, format_name) in enumerate(images_to_process):
                 probs = probs_batch[i]
                 ai_score = float(probs[ai_label_ids].max())
                 ai_score = max(0.0, min(1.0, ai_score))
@@ -233,6 +237,20 @@ def handler(job):
                     final_score = (ai_score * 0.9) + (fft_norm * 0.1)
                 
                 final_score = max(0.0, min(1.0, final_score * hr_bias * meta_bias))
+
+                # --- STRIPPED-JPEG ADAPTIVE POLICY ---
+                is_jpeg = "JP" in format_name.upper()
+                is_stripped_jpeg = is_jpeg and not has_exif
+                megapixels = (w * h) / 1_000_000
+
+                if is_stripped_jpeg:
+                    if megapixels < 0.5:
+                        # Slice A: Small Stripped JPEG (FP Reducer)
+                        final_score = min(final_score, 0.30)
+                    elif megapixels > 2.0:
+                        # Slice B: Large Stripped JPEG (Passive Guard)
+                        if final_score < 0.15 and fft_norm < 0.10:
+                            final_score = max(final_score, 0.35)
                 
                 res_obj = {
                     "ai_score": final_score,
