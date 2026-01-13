@@ -12,6 +12,7 @@ from PIL.ExifTags import TAGS
 from typing import Optional, Union
 from app.c2pa_reader import get_c2pa_manifest
 from app.runpod_client import run_deep_forensics
+from scripts.gemini_forensics import analyze_image_pro_turbo
 from app.security import security_manager
 
 logger = logging.getLogger(__name__)
@@ -1100,7 +1101,6 @@ async def detect_ai_media_image_logic(
         }
 
     # 4. SUSPICIOUS AI (Early Exit) - AI indicators + zero human signals
-    # If metadata shows AI patterns and NO human camera evidence, flag as suspicious
     if ai_score >= 0.38 and human_score == 0.0:
         logger.info(f"[EARLY EXIT] Skipping GPU scan: AI indicators + no human metadata (ai={ai_score:.2f}, human={human_score:.2f})")
         suspicious_confidence = round(random.uniform(0.80, 0.90), 2)
@@ -1122,13 +1122,82 @@ async def detect_ai_media_image_logic(
             "gpu_time_ms": 0  # $0.00 cost
         }
 
-    # 5. AMBIGUOUS -> GPU Scan
+    # 5. AMBIGUOUS -> Forensic Scan (Gemini or Local Worker)
+    total_pixels = width * height
+    is_stripped = not exif
+    
+    # Use fast_mode for video frames (smaller hash thumbnail for speed)
+    img_hash = get_image_hash(source_for_hash, fast_mode=(frame is not None))
+    cached_result = forensic_cache.get(img_hash)
+    
+    if cached_result is not None:
+        logger.info(f"[CACHE] Hit for image scan")
+        # Ensure we use the cached values
+        forensic_probability = cached_result.get("ai_score", 0.0)
+        actual_gpu_time_ms = 0.0
+        # If it was a Gemini result, it will have this flag
+        is_gemini_used = cached_result.get("is_gemini_used", False)
+        
+        if is_gemini_used:
+            is_ai_likely = forensic_probability > 0.5
+            raw_conf = forensic_probability if is_ai_likely else (1.0 - forensic_probability)
+            final_conf = boost_score(raw_conf, is_ai_likely=is_ai_likely)
+            return {
+                "summary": "Likely AI" if is_ai_likely else "Likely Human",
+                "confidence_score": round(final_conf, 2),
+                "is_gemini_used": True,
+                "is_cached": True,
+                "layers": {
+                    "layer1_metadata": l1_data,
+                    "layer2_forensics": {
+                        "status": "detected" if is_ai_likely else "not_detected",
+                        "probability": forensic_probability,
+                        "signals": ["Analyzed via second layer of AI analysis (Cached)"]
+                    }
+                },
+                "gpu_time_ms": 0
+            }
+    else:
+        # --- STRIPPED-JPEG ADAPTIVE POLICY (Gemini Gateway) ---
+        if total_pixels >= 500_000 and is_stripped:
+            logger.info(f"[GEMINI] Triggering Gemini Pro Turbo for Large Stripped JPEG ({total_pixels/1_000_000:.2f}MP)")
+            
+            gemini_res = analyze_image_pro_turbo(frame or file_path)
+            gemini_score = float(gemini_res.get("confidence", -1.0))
+            
+            if gemini_score >= 0.0:
+                # Cache the Gemini result too!
+                forensic_cache.put(img_hash, {
+                    "ai_score": gemini_score,
+                    "is_gemini_used": True,
+                    "gpu_time_ms": 0
+                })
+                
+                is_ai_likely = gemini_score > 0.5
+                raw_conf = gemini_score if is_ai_likely else (1.0 - gemini_score)
+                final_conf = boost_score(raw_conf, is_ai_likely=is_ai_likely)
+
+                return {
+                    "summary": "Likely AI" if is_ai_likely else "Likely Human",
+                    "confidence_score": round(final_conf, 2),
+                    "is_gemini_used": True,
+                    "layers": {
+                        "layer1_metadata": l1_data,
+                        "layer2_forensics": {
+                            "status": "detected" if is_ai_likely else "not_detected",
+                            "probability": gemini_score,
+                            "signals": ["Analyzed via second layer of AI analysis"]
+                        }
+                    },
+                    "gpu_time_ms": 0
+                }
+
     # Wallet Guard: Prevent multi-minute GPU jobs for huge files
     if not frame and os.path.exists(file_path):
         f_size = os.path.getsize(file_path)
         if f_size > 50 * 1024 * 1024:
             return {
-                "summary": "File too large to scan", 
+                "summary": "File too large to scan",
                 "confidence_score": 0.0, 
                 "layers": {
                     "layer1_metadata": {
@@ -1144,24 +1213,15 @@ async def detect_ai_media_image_logic(
                 }
             }
 
-    # Use fast_mode for video frames (smaller hash thumbnail for speed)
-    img_hash = get_image_hash(source_for_hash, fast_mode=(frame is not None))
-    cached_result = forensic_cache.get(img_hash)
-    
-    # --- GPU Scan ---
+    # --- Local GPU Scan (Fallback or Standard Case) ---
     t_gpu = time.perf_counter()
-    if cached_result is not None:
-        forensic_probability = cached_result.get("ai_score", cached_result) if isinstance(cached_result, dict) else cached_result
-        actual_gpu_time_ms = 0.0  # Cached, no GPU used
-        roundtrip_ms = (time.perf_counter() - t_gpu) * 1000
-        logger.info(f"[TIMING] Layer 2 - GPU scan (CACHED): {roundtrip_ms:.2f}ms")
-    else:
-        forensic_result = await run_deep_forensics(source_for_hash, width, height)
-        forensic_probability = forensic_result.get("ai_score", 0.0)
-        actual_gpu_time_ms = forensic_result.get("gpu_time_ms", 0.0)
-        forensic_cache.put(img_hash, forensic_result)
-        roundtrip_ms = (time.perf_counter() - t_gpu) * 1000
-        logger.info(f"[TIMING] Layer 2 - GPU scan (RunPod): {roundtrip_ms:.2f}ms | Actual GPU: {actual_gpu_time_ms:.2f}ms")
+    # At this point, we know cached_result is None because the cache hit handled above
+    forensic_result = await run_deep_forensics(source_for_hash, width, height)
+    forensic_probability = forensic_result.get("ai_score", 0.0)
+    actual_gpu_time_ms = forensic_result.get("gpu_time_ms", 0.0)
+    forensic_cache.put(img_hash, forensic_result)
+    roundtrip_ms = (time.perf_counter() - t_gpu) * 1000
+    logger.info(f"[TIMING] Layer 2 - GPU scan (RunPod): {roundtrip_ms:.2f}ms | Actual GPU: {actual_gpu_time_ms:.2f}ms")
     
     total_layer_time_ms = (time.perf_counter() - layer_start) * 1000
     logger.info(f"[TIMING] Layer 2 - Total: {total_layer_time_ms:.2f}ms | Result: {forensic_probability:.4f}")
@@ -1185,7 +1245,6 @@ async def detect_ai_media_image_logic(
         "signals": final_signals
     }
     
-    is_ai_likely = forensic_probability > 0.5
     if forensic_probability > 0.92: summary = "Likely AI (High Confidence)"
     elif forensic_probability > 0.75: summary = "Possible AI (Forensic Match)"
     elif forensic_probability > 0.5: summary = "Suspicious (Inconsistent Pixels)"
@@ -1193,6 +1252,7 @@ async def detect_ai_media_image_logic(
     else: summary = "Likely Human"
     
     # Boost the overall confidence score (only for AI-likely results)
+    is_ai_likely = forensic_probability > 0.5
     raw_conf = forensic_probability if is_ai_likely else (1.0 - forensic_probability)
     final_conf = boost_score(raw_conf, is_ai_likely=is_ai_likely)
     
@@ -1203,6 +1263,7 @@ async def detect_ai_media_image_logic(
     return {
         "summary": summary,
         "confidence_score": round(final_conf, 2),
+        "is_cached": cached_result is not None,
         "layers": {
             "layer1_metadata": l1_data, 
             "layer2_forensics": l2_data

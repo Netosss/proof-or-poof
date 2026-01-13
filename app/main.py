@@ -73,9 +73,10 @@ app = FastAPI(title="AI Provenance & Cleansing API", lifespan=lifespan)
 
 USAGE_LOG = "usage_log.csv"
 
-# ---- Pricing Constants (USD per second) ----
+# ---- Pricing Constants (USD per unit) ----
 GPU_RATE_PER_SEC = 0.0019  # RunPod A5000/L4 rate
 CPU_RATE_PER_SEC = 0.0001  # Estimated Railway CPU rate
+GEMINI_FIXED_COST = 0.0024  # Cost per Gemini 3.0 Pro analysis
 
 def log_usage(filename: str, filesize: int, method: str, cost_usd: float, gpu_seconds: float = 0, cpu_seconds: float = 0):
     """Append a row to the usage log with a unique ID and hashed filename."""
@@ -431,11 +432,25 @@ async def detect(
         duration = time.time() - start_time
         gpu_used = result.get("layers", {}).get("layer2_forensics", {}).get("status") != "skipped"
         
+        # Check explicit flags for Gemini and Cache usage
+        is_gemini_used = result.get("is_gemini_used", False)
+        is_cached = result.get("is_cached", False)
+        
         # Use actual GPU time for cost calculation (not round-trip time)
         actual_gpu_time_ms = result.get("gpu_time_ms", 0.0)
         actual_gpu_sec = actual_gpu_time_ms / 1000.0
         
-        if gpu_used and actual_gpu_sec > 0:
+        if is_cached:
+            cost = 0.0
+            method = "cached_result"
+            gpu_sec, cpu_sec = 0, 0
+            logger.info(f"[COST] Cache hit: $0.00")
+        elif is_gemini_used:
+            cost = GEMINI_FIXED_COST
+            method = "detect_with_gemini"
+            gpu_sec, cpu_sec = 0, duration
+            logger.info(f"[COST] Gemini analysis: ${cost:.6f}")
+        elif gpu_used and actual_gpu_sec > 0:
             # Cost based on actual GPU utilization, not network round-trip
             cost = actual_gpu_sec * GPU_RATE_PER_SEC
             method = "detect_with_gpu"
@@ -453,8 +468,10 @@ async def detect(
             
         log_usage(file.filename, filesize, method, cost, gpu_seconds=gpu_sec, cpu_seconds=cpu_sec)
         
-        # Remove internal field before returning response
+        # Remove internal fields before returning response
         result.pop("gpu_time_ms", None)
+        result.pop("is_gemini_used", None)
+        result.pop("is_cached", None)
         return result
     finally:
         if os.path.exists(temp_path):
