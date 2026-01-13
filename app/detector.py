@@ -12,7 +12,7 @@ from PIL.ExifTags import TAGS
 from typing import Optional, Union
 from app.c2pa_reader import get_c2pa_manifest
 from app.runpod_client import run_deep_forensics
-from scripts.gemini_forensics import analyze_image_pro_turbo
+from gemini_client import analyze_image_pro_turbo
 from app.security import security_manager
 
 logger = logging.getLogger(__name__)
