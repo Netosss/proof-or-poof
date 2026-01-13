@@ -205,7 +205,8 @@ def handler(job):
         
         # 2B. CPU Heuristics (FFT) - runs while GPU is busy
         fft_data = []
-        for _, img, w, h, _ in images_to_process:
+        for item in images_to_process:
+            _, img, w, h = item[:4]
             fft_raw = get_cpu_fft_score(img)
             megapixels = (w * h) / 1_000_000
             fft_norm = fft_raw / max(1.0, megapixels)
@@ -223,7 +224,12 @@ def handler(job):
         if logits_batch is not None:
             probs_batch = torch.softmax(logits_batch, dim=-1)
             
-            for i, (idx, _, w, h, meta_bias, has_exif, format_name) in enumerate(images_to_process):
+            for i, item in enumerate(images_to_process):
+                idx, _, w, h = item[:4]
+                meta_bias = item[4] if len(item) > 4 else 1.0
+                has_exif = item[5] if len(item) > 5 else False
+                format_name = item[6] if len(item) > 6 else "JPEG"
+
                 probs = probs_batch[i]
                 ai_score = float(probs[ai_label_ids].max())
                 ai_score = max(0.0, min(1.0, ai_score))
