@@ -13,7 +13,7 @@ from PIL.ExifTags import TAGS
 from typing import Optional, Union
 from app.c2pa_reader import get_c2pa_manifest
 from app.runpod_client import run_deep_forensics
-from gemini_client import analyze_image_pro_turbo
+from gemini_client import analyze_image_smart_route
 from app.security import security_manager
 
 logger = logging.getLogger(__name__)
@@ -781,7 +781,7 @@ def boost_score(score: float, is_ai_likely: bool = True) -> float:
         return max(0.85, score)
     return score  # No boost for human results
 
-async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict:
+async def detect_ai_media(file_path: str, trusted_metadata: dict = None, country_code: str = "US") -> dict:
     """
     Final Optimized Consensus Engine.
     
@@ -790,6 +790,7 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
         trusted_metadata: Optional sidecar metadata from mobile device.
             Bypasses OS privacy stripping. Fields: Make, Model, Software, 
             DateTime, width, height, fileSize, namingEntropy, isOriginalPath, etc.
+        country_code: The x-country-code from request headers.
     """
     total_start = time.perf_counter()
     
@@ -1036,7 +1037,7 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
             "gpu_time_ms": gpu_time_ms
         }
     else:
-        return await detect_ai_media_image_logic(file_path, l1_data, trusted_metadata=trusted_metadata)
+        return await detect_ai_media_image_logic(file_path, l1_data, trusted_metadata=trusted_metadata, country_code=country_code)
 
 # List of tags that indicate actual PHYSICAL human hardware provenance.
 # If these are missing, the image is "Stripped" and goes to Gemini (if large).
@@ -1052,7 +1053,8 @@ async def detect_ai_media_image_logic(
     file_path: Optional[str], 
     l1_data: dict = None, 
     frame: Image.Image = None,
-    trusted_metadata: dict = None
+    trusted_metadata: dict = None,
+    country_code: str = "US"
 ) -> dict:
     """
     Core consensus logic for images and video frames.
@@ -1272,6 +1274,7 @@ async def detect_ai_media_image_logic(
                 "summary": "Likely AI" if is_ai_likely else "Likely Human",
                 "confidence_score": round(final_conf, 2),
                 "is_gemini_used": True,
+                "is_flash": cached_result.get("is_flash", False),
                 "is_cached": True,
                 "layers": {
                     "layer1_metadata": l1_data,
@@ -1286,18 +1289,19 @@ async def detect_ai_media_image_logic(
     else:
         # --- STRIPPED-JPEG ADAPTIVE POLICY (Gemini Gateway) ---
         if total_pixels >= 500_000 and is_stripped:
-            logger.info(f"[GEMINI] Triggering Gemini Pro Turbo for Large Stripped JPEG ({total_pixels/1_000_000:.2f}MP)")
+            logger.info(f"[GEMINI] Triggering Smart Routed Gemini for Large Stripped JPEG ({total_pixels/1_000_000:.2f}MP)")
             
-            gemini_res = analyze_image_pro_turbo(frame or file_path)
-            logger.info(f"[GEMINI] Raw response: {json.dumps(gemini_res)}")
-            
+            gemini_res = analyze_image_smart_route(frame or file_path, country_code=country_code)
             gemini_score = float(gemini_res.get("confidence", -1.0))
+            is_flash = gemini_res.get("is_flash", False)
             
             if gemini_score >= 0.0:
+                logger.info(f"[GEMINI] Success: score={gemini_score:.4f} (Flash={is_flash})")
                 # Cache the Gemini result too!
                 forensic_cache.put(img_hash, {
                     "ai_score": gemini_score,
                     "is_gemini_used": True,
+                    "is_flash": is_flash,
                     "gpu_time_ms": 0
                 })
                 
@@ -1309,6 +1313,7 @@ async def detect_ai_media_image_logic(
                     "summary": "Likely AI" if is_ai_likely else "Likely Human",
                     "confidence_score": round(final_conf, 2),
                     "is_gemini_used": True,
+                    "is_flash": is_flash,
                     "layers": {
                         "layer1_metadata": l1_data,
                         "layer2_forensics": {
@@ -1319,6 +1324,9 @@ async def detect_ai_media_image_logic(
                     },
                     "gpu_time_ms": 0
                 }
+            else:
+                error_msg = gemini_res.get("error", "Unknown timeout or API error")
+                logger.warning(f"[GEMINI] Failed or timed out: {error_msg}. Falling back to GPU scan.")
 
     # Wallet Guard: Prevent multi-minute GPU jobs for huge files
     if not frame and os.path.exists(file_path):
