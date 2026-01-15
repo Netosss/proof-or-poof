@@ -45,7 +45,7 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image]) -> dict:
         config = types.GenerateContentConfig(
             thinking_config=types.ThinkingConfig(thinking_level="LOW"),
             media_resolution="MEDIA_RESOLUTION_MEDIUM",
-            temperature=1.0, 
+            temperature=0.0, 
             response_mime_type="application/json",
             response_schema={
                 "type": "OBJECT",
@@ -63,6 +63,8 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image]) -> dict:
         1. "High Quality" or "Smoothness" is NOT evidence of AI. Do not flag it.
         2. You must find a LOGICAL or STRUCTURAL error to assign a high score.
         3. If no artifacts are found, the score MUST be < 0.1.
+        4. synthid markers are present in the image. -> give a high score.
+        5. If the image was edited with AI, give a high score.
 
         SCORING GUIDE:
         - 0.00 - 0.10: Clean image. No structural melting, no physics errors.
