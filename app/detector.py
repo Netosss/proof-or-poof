@@ -1163,6 +1163,8 @@ async def detect_ai_media_image_logic(
             logger.info(f"[GEMINI] Triggering Gemini Pro Turbo for Large Stripped JPEG ({total_pixels/1_000_000:.2f}MP)")
             
             gemini_res = analyze_image_pro_turbo(frame or file_path)
+            logger.info(f"[GEMINI] Raw response: {json.dumps(gemini_res)}")
+            
             gemini_score = float(gemini_res.get("confidence", -1.0))
             
             if gemini_score >= 0.0:

@@ -479,6 +479,8 @@ async def detect(
         result.pop("gpu_time_ms", None)
         result.pop("is_gemini_used", None)
         result.pop("is_cached", None)
+        
+        logger.info(f"[ROUTE] Final Response for {file.filename}: {json.dumps(result)}")
         return result
     finally:
         if os.path.exists(temp_path):
