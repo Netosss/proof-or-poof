@@ -58,15 +58,32 @@ def get_image_hash(source: Union[str, Image.Image], fast_mode: bool = False) -> 
         return security_manager.get_safe_hash(np.array(thumb).tobytes())
 
 def get_exif_data(file_path: str) -> dict:
-    """Extract EXIF metadata from the image. Explicitly closed via 'with'."""
+    """
+    Extract metadata from the image (EXIF for JPEG/TIFF, 'info' for PNG/WebP).
+    Explicitly closed via 'with'.
+    """
     try:
         with Image.open(file_path) as img:
-            exif = img._getexif() or {}
-            exif_data = {}
-            for tag, value in exif.items():
-                decoded = TAGS.get(tag, tag)
-                exif_data[decoded] = value
-            return exif_data
+            metadata = {}
+            
+            # 1. Standard EXIF (JPEG, TIFF, some WebP)
+            exif = img._getexif()
+            if exif:
+                for tag, value in exif.items():
+                    decoded = TAGS.get(tag, tag)
+                    metadata[decoded] = value
+            
+            # 2. PNG/WebP Metadata (Text chunks, etc.)
+            # These formats often store info in the .info attribute instead of EXIF
+            if hasattr(img, 'info') and img.info:
+                for key, value in img.info.items():
+                    # Avoid binary data bloat, only take string-like metadata
+                    if isinstance(key, str) and isinstance(value, (str, int, float)):
+                        # Don't overwrite EXIF tags if they already exist
+                        if key not in metadata:
+                            metadata[key] = value
+            
+            return metadata
     except Exception:
         return {}
 
@@ -603,9 +620,15 @@ def get_ai_suspicion_score(exif: dict, width: int = 0, height: int = 0, file_siz
     software = str(exif.get("Software", "")).lower()
     make = str(exif.get("Make", "")).lower()
     
+    # PNG/XMP Bridge: AI tools often store signatures in XMP for PNG files
+    if not software and "XML:com.adobe.xmp" in exif:
+        software = str(exif.get("XML:com.adobe.xmp", "")).lower()
+    
     if any(k in software for k in ai_keywords):
         score += 0.40
-        signals.append(f"AI software signature: {software}")
+        # For XMP, we truncate the log to avoid bloat
+        log_software = software[:50] + "..." if len(software) > 50 else software
+        signals.append(f"AI software signature detected: {log_software}")
     elif any(k in make for k in ai_keywords):
         score += 0.40
         signals.append(f"AI manufacturer signature: {make}")
