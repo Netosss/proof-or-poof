@@ -25,7 +25,8 @@ logger = logging.getLogger(__name__)
 from app.detector import detect_ai_media
 from app.schemas import DetectionResponse
 from app.runpod_client import run_video_removal, pending_jobs, webhook_result_buffer, cleanup_stale_jobs
-from app.security import security_manager
+from app.security import security_manager, get_current_user, check_and_deduct_credits
+from fastapi import Depends
 from contextlib import asynccontextmanager
 
 # Webhook authentication secret (set via environment variable)
@@ -78,10 +79,10 @@ GPU_RATE_PER_SEC = 0.0019  # RunPod A5000/L4 rate
 CPU_RATE_PER_SEC = 0.0001  # Estimated Railway CPU rate
 GEMINI_FIXED_COST = 0.0024  # Cost per Gemini 3.0 Pro analysis
 
-def log_usage(filename: str, filesize: int, method: str, cost_usd: float, gpu_seconds: float = 0, cpu_seconds: float = 0):
+def log_usage(filename: str, filesize: int, method: str, cost_usd: float, gpu_seconds: float = 0, cpu_seconds: float = 0, uid: str = "anonymous"):
     """Append a row to the usage log with a unique ID and hashed filename."""
     file_exists = os.path.exists(USAGE_LOG)
-    fieldnames = ["timestamp", "request_id", "filename", "filesize", "method", "cost_usd", "gpu_seconds", "cpu_seconds"]
+    fieldnames = ["timestamp", "request_id", "uid", "filename", "filesize", "method", "cost_usd", "gpu_seconds", "cpu_seconds"]
     
     # Hash filename for privacy
     hashed_filename = hashlib.sha256(filename.encode()).hexdigest()[:8]
@@ -93,6 +94,7 @@ def log_usage(filename: str, filesize: int, method: str, cost_usd: float, gpu_se
         writer.writerow({
             "timestamp": time.time(),
             "request_id": str(uuid.uuid4())[:8], # Short unique ID
+            "uid": uid,
             "filename": f"file_{hashed_filename}",
             "filesize": filesize,
             "method": method,
@@ -389,25 +391,29 @@ async def ws_usage(websocket: WebSocket):
 async def detect(
     request: Request, 
     file: UploadFile = File(...),
-    trusted_metadata: Optional[str] = Form(None)
+    trusted_metadata: Optional[str] = Form(None),
+    uid: str = Depends(get_current_user)
 ):
     """
     Detect AI-generated content in images/videos.
+    Requires Firebase Authentication and 5 credits per scan.
     
     Args:
         file: The media file to analyze (image or video)
         trusted_metadata: Optional JSON string with device-extracted EXIF data.
-            This "sidecar" bypasses mobile OS privacy stripping.
-            Expected fields: Make, Model, Software, DateTime, width, height, fileSize, etc.
+        uid: The Firebase UID extracted from the Auth header.
     """
+    # 1. Deduct Credits First (Atomic)
+    await check_and_deduct_credits(uid, amount=5)
+
     # Parse trusted metadata sidecar if provided
     sidecar_metadata = None
     if trusted_metadata:
         try:
             sidecar_metadata = json.loads(trusted_metadata)
-            logger.info(f"[SIDECAR] Received trusted metadata: {list(sidecar_metadata.keys())}")
+            logger.info(f"[SIDECAR] User {uid} provided trusted metadata: {list(sidecar_metadata.keys())}")
         except json.JSONDecodeError as e:
-            logger.warning(f"[SIDECAR] Invalid JSON in trusted_metadata: {e}")
+            logger.warning(f"[SIDECAR] Invalid JSON in trusted_metadata from {uid}: {e}")
     
     # Use Secure Wrapper for primary security checks
     # (Rate limiting + Type/Size validation + Content Deep Check)
@@ -423,10 +429,11 @@ async def detect(
         start_time = time.time()
         
         # The wrapper handles security logic; we pass detect_ai_media as the worker function
-        # Pass sidecar metadata to detector for prioritized analysis
+        # Pass uid for better rate limiting and logging
         result = await security_manager.secure_execute(
             request, file.filename, filesize, temp_path, 
-            lambda path: detect_ai_media(path, trusted_metadata=sidecar_metadata)
+            lambda path: detect_ai_media(path, trusted_metadata=sidecar_metadata),
+            uid=uid
         )
         
         duration = time.time() - start_time
@@ -466,7 +473,7 @@ async def detect(
             method = "detect_metadata_only"
             gpu_sec, cpu_sec = 0, duration
             
-        log_usage(file.filename, filesize, method, cost, gpu_seconds=gpu_sec, cpu_seconds=cpu_sec)
+        log_usage(file.filename, filesize, method, cost, gpu_seconds=gpu_sec, cpu_seconds=cpu_sec, uid=uid)
         
         # Remove internal fields before returning response
         result.pop("gpu_time_ms", None)
@@ -507,14 +514,14 @@ async def remove_watermark(request: Request, file: UploadFile = File(...)):
         
         if is_video:
             cost = duration * GPU_RATE_PER_SEC
-            log_usage(file.filename, filesize, "remove-watermark-video", cost, gpu_seconds=duration)
+            log_usage(file.filename, filesize, "remove-watermark-video", cost, gpu_seconds=duration, uid="anonymous")
             return {
                 "status": "success", "method": "runpod_gpu",
                 "cost_usd": round(cost, 5), "gpu_seconds": round(duration, 2), "result": result,
             }
         else:
             cost = duration * CPU_RATE_PER_SEC
-            log_usage(file.filename, filesize, "remove-watermark-image", cost, cpu_seconds=duration)
+            log_usage(file.filename, filesize, "remove-watermark-image", cost, cpu_seconds=duration, uid="anonymous")
             return {
                 "status": "success", "method": "local_cheap",
                 "cost_usd": round(cost, 5), "filename": file.filename,

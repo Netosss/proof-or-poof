@@ -12,3 +12,4 @@ numpy
 pandas
 plotly
 google-genai
+firebase-admin

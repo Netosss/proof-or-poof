@@ -3,15 +3,66 @@ import time
 import logging
 import hashlib
 import re
-from typing import Dict, Callable, Any
-from fastapi import HTTPException, Request
+from typing import Dict, Callable, Any, Optional
+from fastapi import HTTPException, Request, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from PIL import Image
 import cv2
+from firebase_admin import auth, firestore
+from app.firebase_config import db
 
 # Set PIL safety limit to prevent decompression bombs (20MP)
 Image.MAX_IMAGE_PIXELS = 20_000_000 
 
 logger = logging.getLogger(__name__)
+
+security_scheme = HTTPBearer()
+
+async def get_current_user(cred: HTTPAuthorizationCredentials = Depends(security_scheme)) -> str:
+    """Verifies the Firebase ID token and returns the UID."""
+    try:
+        decoded_token = auth.verify_id_token(cred.credentials)
+        return decoded_token['uid']
+    except Exception as e:
+        logger.warning(f"Invalid token: {e}")
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+async def check_and_deduct_credits(uid: str, amount: int = 5):
+    """
+    Checks if user has enough credits and deducts them atomically.
+    Raises 402 if insufficient funds.
+    """
+    user_ref = db.collection('users').document(uid)
+
+    @firestore.transactional
+    def deduct_transaction(transaction, user_ref):
+        snapshot = user_ref.get(transaction=transaction)
+        if not snapshot.exists:
+            raise HTTPException(status_code=404, detail="User not found in Firestore")
+        
+        user_data = snapshot.to_dict()
+        current_credits = user_data.get('credits', 0)
+        
+        if current_credits < amount:
+            raise HTTPException(
+                status_code=402, 
+                detail=f"Insufficient credits. Required: {amount}, Available: {current_credits}"
+            )
+        
+        transaction.update(user_ref, {
+            'credits': current_credits - amount
+        })
+        return current_credits - amount
+
+    try:
+        transaction = db.transaction()
+        new_balance = deduct_transaction(transaction, user_ref)
+        logger.info(f"Deducted {amount} credits from user {uid}. New balance: {new_balance}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Credit deduction failed for user {uid}: {e}")
+        raise HTTPException(status_code=500, detail="Credit deduction failed")
 
 class SecurityManager:
     def __init__(self):
@@ -107,13 +158,13 @@ class SecurityManager:
         """Securely hash data for caching to prevent collisions/poisoning."""
         return hashlib.sha256(data).hexdigest()
 
-    async def secure_execute(self, request: Request, filename: str, filesize: int, temp_path: str, func: Callable, *args, **kwargs) -> Any:
+    async def secure_execute(self, request: Request, filename: str, filesize: int, temp_path: str, func: Callable, uid: Optional[str] = None, *args, **kwargs) -> Any:
         """
         A secure wrapper for media processing functions.
         Handles Rate Limiting, Validation, and Log Sanitization.
         """
-        # 1. Rate Limit
-        self.check_rate_limit(request.client.host)
+        # 1. Rate Limit (Prefer UID over IP)
+        self.check_rate_limit(uid or request.client.host)
         
         # 2. Deep Validation
         self.validate_file(filename, filesize, temp_path)
