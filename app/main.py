@@ -77,8 +77,7 @@ USAGE_LOG = "usage_log.csv"
 # ---- Pricing Constants (USD per unit) ----
 GPU_RATE_PER_SEC = 0.0019  # RunPod A5000/L4 rate
 CPU_RATE_PER_SEC = 0.0001  # Estimated Railway CPU rate
-GEMINI_PRO_COST = 0.0016    # Exact cost per Gemini 3.0 Pro standard analysis
-GEMINI_FLASH_COST = 0.0001  # Exact cost per Gemini 1.5 Flash analysis
+GEMINI_FIXED_COST = 0.0024  # Cost per Gemini 3.0 Pro analysis
 
 def log_usage(filename: str, filesize: int, method: str, cost_usd: float, gpu_seconds: float = 0, cpu_seconds: float = 0, uid: str = "anonymous"):
     """Append a row to the usage log with a unique ID and hashed filename."""
@@ -431,12 +430,9 @@ async def detect(
         
         # The wrapper handles security logic; we pass detect_ai_media as the worker function
         # Pass uid for better rate limiting and logging
-        # Extract country code for geo-routing
-        country_code = request.headers.get('x-country-code', 'US')
-        
         result = await security_manager.secure_execute(
             request, file.filename, filesize, temp_path, 
-            lambda path: detect_ai_media(path, trusted_metadata=sidecar_metadata, country_code=country_code),
+            lambda path: detect_ai_media(path, trusted_metadata=sidecar_metadata),
             uid=uid
         )
         
@@ -445,7 +441,6 @@ async def detect(
         
         # Check explicit flags for Gemini and Cache usage
         is_gemini_used = result.get("is_gemini_used", False)
-        is_flash_used = result.get("is_flash", False)
         is_cached = result.get("is_cached", False)
         
         # Use actual GPU time for cost calculation (not round-trip time)
@@ -457,16 +452,11 @@ async def detect(
             method = "cached_result"
             gpu_sec, cpu_sec = 0, 0
             logger.info(f"[COST] Cache hit: $0.00")
-        elif is_flash_used:
-            cost = GEMINI_FLASH_COST
-            method = "detect_with_flash"
-            gpu_sec, cpu_sec = 0, duration
-            logger.info(f"[COST] Gemini Flash analysis: ${cost:.6f}")
         elif is_gemini_used:
-            cost = GEMINI_PRO_COST
-            method = "detect_with_gemini_pro"
+            cost = GEMINI_FIXED_COST
+            method = "detect_with_gemini"
             gpu_sec, cpu_sec = 0, duration
-            logger.info(f"[COST] Gemini Pro analysis: ${cost:.6f}")
+            logger.info(f"[COST] Gemini analysis: ${cost:.6f}")
         elif gpu_used and actual_gpu_sec > 0:
             # Cost based on actual GPU utilization, not network round-trip
             cost = actual_gpu_sec * GPU_RATE_PER_SEC
@@ -488,7 +478,6 @@ async def detect(
         # Remove internal fields before returning response
         result.pop("gpu_time_ms", None)
         result.pop("is_gemini_used", None)
-        result.pop("is_flash", None)
         result.pop("is_cached", None)
         
         logger.info(f"[ROUTE] Final Response for {file.filename}: {json.dumps(result)}")
