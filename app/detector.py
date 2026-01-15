@@ -1115,7 +1115,8 @@ async def detect_ai_media_image_logic(
     logger.info(f"[META] Raw Metadata (Slim): {slim_log}")
     
     # --- Metadata Aggregation & Tiered Analysis ---
-    clean_metadata = f" {json.dumps(exif)} "
+    # We stringify values to handle non-JSON serializable types like IFDRational or bytes
+    clean_metadata = f" {json.dumps({k: str(v) for k, v in exif.items()})} "
     full_dump = clean_metadata
     
     # 1. Raw Packet Scan (First 50KB) - Added to full_dump only

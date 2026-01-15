@@ -67,7 +67,7 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image]) -> dict:
         5. If the image was edited with AI, give a high score.
 
         SCORING GUIDE:
-        - 0.00 - 0.10: Clean image. No structural melting, no physics errors.
+        - 0.01 - 0.10: Clean image. No structural melting, no physics errors.
         - 0.90 - 1.00: Visible glitch (melting hands, gibberish text, asymmetrical pupils).
         """
 
