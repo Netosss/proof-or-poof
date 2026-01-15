@@ -1268,6 +1268,9 @@ async def detect_ai_media_image_logic(
             is_ai_likely = forensic_probability > 0.5
             raw_conf = forensic_probability if is_ai_likely else (1.0 - forensic_probability)
             final_conf = boost_score(raw_conf, is_ai_likely=is_ai_likely)
+            
+            cached_explanation = cached_result.get("explanation", "Analyzed via second layer of AI analysis (Cached)")
+            
             return {
                 "summary": "Likely AI" if is_ai_likely else "Likely Human",
                 "confidence_score": round(final_conf, 2),
@@ -1278,7 +1281,7 @@ async def detect_ai_media_image_logic(
                     "layer2_forensics": {
                         "status": "detected" if is_ai_likely else "not_detected",
                         "probability": forensic_probability,
-                        "signals": ["Analyzed via second layer of AI analysis (Cached)"]
+                        "signals": [cached_explanation]
                     }
                 },
                 "gpu_time_ms": 0
@@ -1292,11 +1295,13 @@ async def detect_ai_media_image_logic(
             logger.info(f"[GEMINI] Raw response: {json.dumps(gemini_res)}")
             
             gemini_score = float(gemini_res.get("confidence", -1.0))
+            gemini_explanation = gemini_res.get("explanation", "Analyzed via second layer of AI analysis")
             
             if gemini_score >= 0.0:
                 # Cache the Gemini result too!
                 forensic_cache.put(img_hash, {
                     "ai_score": gemini_score,
+                    "explanation": gemini_explanation,
                     "is_gemini_used": True,
                     "gpu_time_ms": 0
                 })
@@ -1314,7 +1319,7 @@ async def detect_ai_media_image_logic(
                         "layer2_forensics": {
                             "status": "detected" if is_ai_likely else "not_detected",
                             "probability": gemini_score,
-                            "signals": ["Analyzed via second layer of AI analysis"]
+                            "signals": [gemini_explanation]
                         }
                     },
                     "gpu_time_ms": 0

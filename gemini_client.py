@@ -15,7 +15,7 @@ client = genai.Client(
 
 def analyze_image_pro_turbo(image_source: Union[str, Image.Image]) -> dict:
     """
-    GEMINI 3.0 PRO - TURBO MODE
+    GEMINI 3.0 FLASH - TURBO MODE
     Accepts either a file path (str) or a PIL Image object.
     """
     try:
@@ -51,8 +51,9 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image]) -> dict:
                 "type": "OBJECT",
                 "properties": {                    
                     "confidence": {"type": "NUMBER"},
+                    "explanation": {"type": "STRING"}
                 },
-                "required": ["confidence"]
+                "required": ["confidence", "explanation"]
             }
         )
 
@@ -69,10 +70,14 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image]) -> dict:
         SCORING GUIDE:
         - 0.01 - 0.10: Clean image. No structural melting, no physics errors.
         - 0.90 - 1.00: Visible glitch (melting hands, gibberish text, asymmetrical pupils).
+
+        OUTPUT RULES:
+        - If AI (>0.5): explain in a funny sentence (max 7 words) why it's AI.
+        - If NOT AI: just write "original".
         """
 
         response = client.models.generate_content(
-            model="gemini-3-pro-preview",
+            model="gemini-3-flash-preview",
             contents=[
                 types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
                 prompt
