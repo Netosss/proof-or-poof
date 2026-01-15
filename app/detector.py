@@ -970,6 +970,15 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
     else:
         return await detect_ai_media_image_logic(file_path, l1_data, trusted_metadata=trusted_metadata)
 
+# List of tags that indicate actual human hardware provenance or useful AI signatures.
+# Anything NOT in this list is considered "Web Junk" and ignored for the Gemini trigger.
+PROVENANCE_WHITELIST = {
+    "Make", "Model", "Software", "ExposureTime", "ISOSpeedRatings", 
+    "FNumber", "DateTimeOriginal", "GPSLatitude", "GPSLongitude", "GPSAltitude",
+    "BodySerialNumber", "LensSerialNumber", "LensModel", "Flash",
+    "SubSecTimeOriginal", "SubSecTimeDigitized", "XML:com.adobe.xmp"
+}
+
 async def detect_ai_media_image_logic(
     file_path: Optional[str], 
     l1_data: dict = None, 
@@ -978,12 +987,6 @@ async def detect_ai_media_image_logic(
 ) -> dict:
     """
     Core consensus logic for images and video frames.
-    
-    Args:
-        file_path: Path to image file (None if using frame)
-        l1_data: Layer 1 (C2PA) data
-        frame: PIL Image for video frames
-        trusted_metadata: Optional sidecar from mobile device (bypasses privacy stripping)
     """
     layer_start = time.perf_counter()
     
@@ -1022,29 +1025,34 @@ async def detect_ai_media_image_logic(
             }
     
     # --- Merge Trusted Metadata (Sidecar) ---
-    # Prioritize trusted_metadata over file-extracted EXIF (bypasses mobile privacy stripping)
     if trusted_metadata:
         logger.info(f"[SIDECAR] Using trusted metadata from device")
-        # Override EXIF with sidecar data
-        if "Make" in trusted_metadata:
-            exif["Make"] = trusted_metadata["Make"]
-        if "Model" in trusted_metadata:
-            exif["Model"] = trusted_metadata["Model"]
-        if "Software" in trusted_metadata:
-            exif["Software"] = trusted_metadata["Software"]
-        if "DateTime" in trusted_metadata:
-            exif["DateTimeOriginal"] = trusted_metadata["DateTime"]
-        if "LensModel" in trusted_metadata:
-            exif["LensModel"] = trusted_metadata["LensModel"]
-        # Use sidecar dimensions if provided (more reliable than file dims after compression)
+        for key in ["Make", "Model", "Software", "DateTime", "LensModel"]:
+            if key in trusted_metadata:
+                mapped_key = "DateTimeOriginal" if key == "DateTime" else key
+                exif[mapped_key] = trusted_metadata[key]
+        
         if "width" in trusted_metadata and "height" in trusted_metadata:
-            width = trusted_metadata["width"]
-            height = trusted_metadata["height"]
+            width, height = trusted_metadata["width"], trusted_metadata["height"]
         if "fileSize" in trusted_metadata:
             file_size = trusted_metadata["fileSize"]
             
     exif_time_ms = (time.perf_counter() - t_exif) * 1000
     logger.info(f"[TIMING] EXIF extraction: {exif_time_ms:.2f}ms")
+
+    # --- Log Truncated Metadata for Debugging ---
+    # Slim the log: only first 20 chars of values, exclude huge binary blobs
+    slim_log = {k: (str(v)[:20] + "..." if len(str(v)) > 20 else v) for k, v in exif.items()}
+    logger.info(f"[META] Raw Metadata (Slim): {slim_log}")
+    
+    # --- Metadata Scoring ---
+    t_scoring = time.perf_counter()
+    human_score, human_signals = get_forensic_metadata_score(exif)
+    ai_score, ai_signals = get_ai_suspicion_score(exif, width, height, file_size)
+    scoring_time_ms = (time.perf_counter() - t_scoring) * 1000
+    logger.info(f"[TIMING] Metadata scoring: {scoring_time_ms:.2f}ms (human={human_score:.2f}, ai={ai_score:.2f})")
+    
+    # ... (rest of the logic) ...
     
     # --- Metadata Scoring ---
     t_scoring = time.perf_counter()
@@ -1145,8 +1153,18 @@ async def detect_ai_media_image_logic(
 
     # 5. AMBIGUOUS -> Forensic Scan (Gemini or Local Worker)
     total_pixels = width * height
-    is_stripped = not exif
     
+    # Determine if the image is truly stripped of hardware provenance
+    # We ignore "Web Junk" tags (JFIF, DPI, etc.) and only look for the High Value Whitelist
+    is_stripped = not any(tag in exif for tag in PROVENANCE_WHITELIST)
+    
+    if is_stripped:
+        logger.info(f"[META] Image classified as STRIPPED (No High-Value Provenance Tags found)")
+    else:
+        # Log which provenance tags were actually found
+        found_tags = [tag for tag in PROVENANCE_WHITELIST if tag in exif]
+        logger.info(f"[META] Image has PROVENANCE tags: {found_tags}")
+
     # Use fast_mode for video frames (smaller hash thumbnail for speed)
     img_hash = get_image_hash(source_for_hash, fast_mode=(frame is not None))
     cached_result = forensic_cache.get(img_hash)
