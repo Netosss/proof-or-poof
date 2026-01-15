@@ -909,10 +909,8 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
         
         # Determine summary based on final probability
         is_ai_likely = final_prob > 0.5
-        if final_prob > 0.85: 
+        if final_prob > 0.5: 
             summary = "Likely AI Video"
-        elif final_prob > 0.5: 
-            summary = "Suspicious Video"
         else: 
             summary = "Likely Human Video"
         
@@ -1041,11 +1039,11 @@ async def detect_ai_media_image_logic(
     if human_score >= 0.60:
         logger.info(f"[EARLY EXIT] Skipping GPU scan: High confidence human metadata ({human_score:.2f})")
         return {
-            "summary": "Verified Human (Metadata)",
+            "summary": "Likely Human",
             "confidence_score": 0.99,  # Max 99% without C2PA
             "layers": {
                 "layer1_metadata": {
-                    "status": "verified_human", 
+                    "status": "not_detected", 
                     "provider": exif.get("Make", "Unknown"),
                     "description": "Device metadata verified - real camera footprint."
                 },
@@ -1062,11 +1060,11 @@ async def detect_ai_media_image_logic(
     if human_score >= 0.40 and ai_score < 0.15:
         logger.info(f"[EARLY EXIT] Skipping GPU scan: Likely human metadata ({human_score:.2f}, ai={ai_score:.2f})")
         return {
-            "summary": "Likely Human (Metadata)",
+            "summary": "Likely Human",
             "confidence_score": 0.9,
             "layers": {
                 "layer1_metadata": {
-                    "status": "likely_human", 
+                    "status": "not_detected", 
                     "provider": exif.get("Make", "Unknown"),
                     "description": "Heuristic analysis suggests human origin."
                 },
@@ -1083,7 +1081,7 @@ async def detect_ai_media_image_logic(
     if ai_score >= 0.50:
         logger.info(f"[EARLY EXIT] Skipping GPU scan: High AI suspicion in metadata ({ai_score:.2f})")
         return {
-            "summary": "Likely AI (Metadata Evidence)",
+            "summary": "Likely AI",
             "confidence_score": 0.95,
             "layers": {
                 "layer1_metadata": {
@@ -1105,11 +1103,11 @@ async def detect_ai_media_image_logic(
         logger.info(f"[EARLY EXIT] Skipping GPU scan: AI indicators + no human metadata (ai={ai_score:.2f}, human={human_score:.2f})")
         suspicious_confidence = round(random.uniform(0.80, 0.90), 2)
         return {
-            "summary": "Suspicious (No Camera Metadata)",
+            "summary": "Likely AI",
             "confidence_score": suspicious_confidence,
             "layers": {
                 "layer1_metadata": {
-                    "status": "suspicious", 
+                    "status": "detected", 
                     "provider": None,
                     "description": "No camera metadata found, AI-typical characteristics detected."
                 },
@@ -1242,15 +1240,14 @@ async def detect_ai_media_image_logic(
         logger.info(f"[CONFLICT] Metadata ai_score={ai_score:.2f}, model={original_prob:.4f} → blended={blended_prob:.4f}")
     
     l2_data = {
-        "status": "detected" if forensic_probability > 0.85 else "suspicious" if forensic_probability > 0.5 else "not_detected",
+        "status": "detected" if forensic_probability > 0.5 else "not_detected",
         "probability": round(forensic_probability, 4),  # RAW probability for video aggregation
         "signals": final_signals
     }
     
-    if forensic_probability > 0.92: summary = "Likely AI (High Confidence)"
-    elif forensic_probability > 0.75: summary = "Possible AI (Forensic Match)"
-    elif forensic_probability > 0.5: summary = "Suspicious (Inconsistent Pixels)"
-    elif forensic_probability > 0.2: summary = "Likely Human (Minor Noise)"
+    if forensic_probability > 0.85: summary = "Likely AI"
+    elif forensic_probability > 0.5: summary = "Likely AI"
+    elif forensic_probability > 0.2: summary = "Likely Human"
     else: summary = "Likely Human"
     
     # Boost the overall confidence score (only for AI-likely results)
