@@ -703,11 +703,11 @@ def get_ai_suspicion_score(exif: dict, width: int = 0, height: int = 0, file_siz
 
     # 2. Missing Metadata (statistically unlikely for real cameras)
     if not has_camera_info:
-        score += 0.10
+        score += 0.03
         signals.append("Missing camera hardware provenance")
 
     if "DateTimeOriginal" not in exif:
-        score += 0.05
+        score += 0.02
         signals.append("Missing capture timestamp")
 
     if not exif.get("SubSecTimeOriginal") and not exif.get("SubSecTimeDigitized"):
