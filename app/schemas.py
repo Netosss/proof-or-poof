@@ -19,3 +19,4 @@ class DetectionResponse(BaseModel):
     summary: str
     confidence_score: float
     layers: DetectionLayers
+    new_balance: Optional[int] = None

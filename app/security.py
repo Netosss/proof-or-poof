@@ -4,32 +4,143 @@ import logging
 import hashlib
 import re
 from typing import Dict, Callable, Any, Optional
-from fastapi import HTTPException, Request, Depends
+import aiohttp
+import json
+from fastapi import HTTPException, Request, Depends, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from PIL import Image
 import cv2
 from firebase_admin import auth, firestore
 from app.firebase_config import db
+from upstash_redis import Redis
 
 # Set PIL safety limit to prevent decompression bombs (20MP)
 Image.MAX_IMAGE_PIXELS = 20_000_000 
 
 logger = logging.getLogger(__name__)
 
-security_scheme = HTTPBearer()
+# Initialize Redis using Upstash REST API
+redis_url = os.getenv("UPSTASH_REDIS_HOST") # User said "url is our host env var"
+redis_token = os.getenv("UPSTASH_REDIS_PASSWORD") # User said "token is the password var"
 
-async def get_current_user(cred: HTTPAuthorizationCredentials = Depends(security_scheme)) -> str:
-    """Verifies the Firebase ID token and returns the UID."""
+redis_client = None
+if redis_url and redis_token:
+    try:
+        redis_client = Redis(url=redis_url, token=redis_token)
+        logger.info("Upstash Redis client initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize Upstash Redis client: {e}")
+else:
+    logger.warning("Redis credentials not found. Rate limiting will fallback to memory.")
+
+# Legacy Auth Scheme (Might be removed later)
+security_scheme = HTTPBearer(auto_error=False)
+
+async def get_current_user(cred: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme)) -> Optional[str]:
+    """Verifies the Firebase ID token and returns the UID. Optional for migration."""
+    if not cred:
+        return None
     try:
         decoded_token = auth.verify_id_token(cred.credentials)
         return decoded_token['uid']
     except Exception as e:
         logger.warning(f"Invalid token: {e}")
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+        return None
+
+async def verify_turnstile(token: str) -> bool:
+    """Verifies Cloudflare Turnstile token."""
+    secret = os.getenv("TURNSTILE_SECRET_KEY")
+    if not secret:
+        logger.warning("TURNSTILE_SECRET_KEY not set. Skipping validation (DEV MODE).")
+        return True
+        
+    url = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+    payload = {"secret": secret, "response": token}
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, data=payload) as response:
+                result = await response.json()
+                if not result.get("success"):
+                    logger.warning(f"Turnstile validation failed: {result}")
+                    return False
+                return True
+    except Exception as e:
+        logger.error(f"Turnstile connection error: {e}")
+        # Fail open or closed? Usually closed for security, but open for reliability if CF is down.
+        # Let's fail closed for now as it's a security feature.
+        return False
+
+# ---- Guest Wallet Logic ----
+
+def get_guest_wallet(device_id: str) -> dict:
+    """Retrieves or creates a guest wallet for the device."""
+    doc_ref = db.collection('guest_wallets').document(device_id)
+    doc = doc_ref.get()
+    
+    if doc.exists:
+        return doc.to_dict()
+    else:
+        # Create new wallet with 10 free credits
+        new_wallet = {
+            "credits": 10, 
+            "last_active": firestore.SERVER_TIMESTAMP,
+            "is_banned": False
+        }
+        doc_ref.set(new_wallet)
+        # Return with integer timestamp for immediate use if needed, or just dict
+        # Firestore timestamp might need conversion if used immediately, but for now just returning dict is fine.
+        return new_wallet
+
+def check_ban_status(device_id: str) -> bool:
+    """Checks if the device is banned."""
+    wallet = get_guest_wallet(device_id)
+    return wallet.get("is_banned", False)
+
+def deduct_guest_credits(device_id: str, cost: int = 5) -> int:
+    """
+    Deducts credits from guest wallet atomically.
+    Raises HTTPException(402) if insufficient funds.
+    Returns new balance.
+    """
+    doc_ref = db.collection('guest_wallets').document(device_id)
+    
+    @firestore.transactional
+    def update_in_transaction(transaction, ref):
+        snapshot = ref.get(transaction=transaction)
+        if not snapshot.exists:
+            # Should have been created by get_guest_wallet or logic check
+            # Create it now if missing (edge case)
+            transaction.set(ref, {"credits": 10, "last_active": firestore.SERVER_TIMESTAMP, "is_banned": False})
+            current_credits = 10
+        else:
+            current_credits = snapshot.get("credits")
+            if current_credits is None:
+                current_credits = 0
+        
+        if current_credits < cost:
+            raise HTTPException(
+                status_code=402, 
+                detail="Insufficient credits"
+            )
+            
+        transaction.update(ref, {"credits": current_credits - cost, "last_active": firestore.SERVER_TIMESTAMP})
+        return current_credits - cost
+
+    transaction = db.transaction()
+    try:
+        new_balance = update_in_transaction(transaction, doc_ref)
+        logger.info(f"Deducted {cost} credits from device {device_id}. New balance: {new_balance}")
+        return new_balance
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Guest credit deduction failed for {device_id}: {e}")
+        raise HTTPException(status_code=500, detail="Wallet transaction failed")
 
 async def check_and_deduct_credits(uid: str, amount: int = 5):
     """
-    Checks if user has enough credits and deducts them atomically.
+    Legacy: Checks if user has enough credits and deducts them atomically.
     Raises 402 if insufficient funds.
     """
     user_ref = db.collection('users').document(uid)
@@ -66,29 +177,51 @@ async def check_and_deduct_credits(uid: str, amount: int = 5):
 
 class SecurityManager:
     def __init__(self):
-        # Rate limiting storage: {ip: [timestamps]}
+        # Memory fallback (optional, if Redis fails)
         self.rate_limits: Dict[str, list] = {}
         self.MAX_IMAGE_SIZE = 20 * 1024 * 1024  # 20MB
         self.MAX_VIDEO_SIZE = 200 * 1024 * 1024 # 200MB
         self.RATE_LIMIT_WINDOW = 60 # seconds
-        self.MAX_REQUESTS_PER_WINDOW = 15 # requests per minute
+        self.MAX_REQUESTS_PER_WINDOW = 10 # 10 requests per minute (Guest Policy)
 
     def check_rate_limit(self, identifier: str):
+        """Rate limiting using Redis (preferred) or Memory (fallback)."""
+        if redis_client:
+            self._check_rate_limit_redis(identifier)
+        else:
+            self._check_rate_limit_memory(identifier)
+
+    def _check_rate_limit_redis(self, identifier: str):
+        key = f"rate_limit:{identifier}"
+        try:
+            # Atomic increment
+            current_count = redis_client.incr(key)
+            if current_count == 1:
+                redis_client.expire(key, self.RATE_LIMIT_WINDOW)
+            
+            if current_count > self.MAX_REQUESTS_PER_WINDOW:
+                logger.warning(f"Redis Rate limit exceeded for {identifier}")
+                raise HTTPException(status_code=429, detail="Too many requests. Please try again in a minute.")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Redis rate limit error: {e}. Falling back to memory.")
+            self._check_rate_limit_memory(identifier)
+
+    def _check_rate_limit_memory(self, identifier: str):
         """Simple memory-based rate limiting per IP/Identifier with periodic cleanup."""
         now = time.time()
         
-        # Periodic cleanup of the entire storage every 1000 requests (to prevent memory leaks)
         if len(self.rate_limits) > 1000:
             self._cleanup_all_limits(now)
 
         if identifier not in self.rate_limits:
             self.rate_limits[identifier] = []
         
-        # Clean old timestamps for this identifier
         self.rate_limits[identifier] = [t for t in self.rate_limits[identifier] if now - t < self.RATE_LIMIT_WINDOW]
         
         if len(self.rate_limits[identifier]) >= self.MAX_REQUESTS_PER_WINDOW:
-            logger.warning(f"Rate limit exceeded for {identifier}")
+            logger.warning(f"Memory Rate limit exceeded for {identifier}")
             raise HTTPException(status_code=429, detail="Too many requests. Please try again in a minute.")
         
         self.rate_limits[identifier].append(now)
@@ -163,8 +296,11 @@ class SecurityManager:
         A secure wrapper for media processing functions.
         Handles Rate Limiting, Validation, and Log Sanitization.
         """
-        # 1. Rate Limit (Prefer UID over IP)
-        self.check_rate_limit(uid or request.client.host)
+        # 1. Rate Limit (Prefer UID over IP, or Device ID if passed in kwargs or inferred)
+        # For guest flow, uid might be the Device ID or None.
+        # If uid is None, use IP.
+        identifier = uid or request.client.host
+        self.check_rate_limit(identifier)
         
         # 2. Deep Validation
         self.validate_file(filename, filesize, temp_path)

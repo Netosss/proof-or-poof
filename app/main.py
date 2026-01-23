@@ -8,12 +8,13 @@ import hashlib
 import json
 from typing import Optional
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket, Request
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 import pandas as pd
 import plotly.express as px
 import asyncio
+from pydantic import BaseModel
 
 # Load environment variables at the very beginning
 load_dotenv()
@@ -25,7 +26,15 @@ logger = logging.getLogger(__name__)
 from app.detector import detect_ai_media
 from app.schemas import DetectionResponse
 from app.runpod_client import run_video_removal, pending_jobs, webhook_result_buffer, cleanup_stale_jobs
-from app.security import security_manager, get_current_user, check_and_deduct_credits
+from app.security import (
+    security_manager, 
+    check_and_deduct_credits, 
+    verify_turnstile, 
+    check_ban_status, 
+    deduct_guest_credits,
+    get_guest_wallet,
+    db
+)
 from fastapi import Depends
 from contextlib import asynccontextmanager
 
@@ -34,6 +43,9 @@ RUNPOD_WEBHOOK_SECRET = os.getenv("RUNPOD_WEBHOOK_SECRET", "")
 
 # Dashboard authentication (optional but recommended)
 DASHBOARD_SECRET = os.getenv("DASHBOARD_SECRET", "")
+
+# Recharge Webhook Secret
+RECHARGE_SECRET_KEY = os.getenv("RECHARGE_SECRET_KEY", "")
 
 # Background cleanup task
 cleanup_task = None
@@ -392,28 +404,41 @@ async def detect(
     request: Request, 
     file: UploadFile = File(...),
     trusted_metadata: Optional[str] = Form(None),
-    uid: str = Depends(get_current_user)
+    device_id: str = Header(..., alias="X-Device-ID"),
+    turnstile_token: str = Header(..., alias="X-Turnstile-Token")
 ):
     """
     Detect AI-generated content in images/videos.
-    Requires Firebase Authentication and 5 credits per scan.
+    Guest Wallet Flow: Validates Turnstile, checks bans, and deducts credits from device wallet.
     
     Args:
         file: The media file to analyze (image or video)
         trusted_metadata: Optional JSON string with device-extracted EXIF data.
-        uid: The Firebase UID extracted from the Auth header.
+        device_id: The Guest Device ID (FingerprintJS)
+        turnstile_token: Cloudflare Turnstile token
     """
-    # 1. Deduct Credits First (Atomic)
-    await check_and_deduct_credits(uid, amount=5)
+    
+    # 1. Security & Wallet Check
+    # Verify Turnstile
+    is_human = await verify_turnstile(turnstile_token)
+    if not is_human:
+        raise HTTPException(status_code=403, detail="Turnstile validation failed")
+
+    # Check Ban Status
+    if check_ban_status(device_id):
+        raise HTTPException(status_code=403, detail="Device is banned")
+
+    # Deduct Credits (Atomic) - Raises 402 if insufficient
+    new_balance = deduct_guest_credits(device_id, cost=5)
 
     # Parse trusted metadata sidecar if provided
     sidecar_metadata = None
     if trusted_metadata:
         try:
             sidecar_metadata = json.loads(trusted_metadata)
-            logger.info(f"[SIDECAR] User {uid} provided trusted metadata: {list(sidecar_metadata.keys())}")
+            logger.info(f"[SIDECAR] Device {device_id} provided trusted metadata: {list(sidecar_metadata.keys())}")
         except json.JSONDecodeError as e:
-            logger.warning(f"[SIDECAR] Invalid JSON in trusted_metadata from {uid}: {e}")
+            logger.warning(f"[SIDECAR] Invalid JSON in trusted_metadata from {device_id}: {e}")
     
     # Use Secure Wrapper for primary security checks
     # (Rate limiting + Type/Size validation + Content Deep Check)
@@ -429,11 +454,11 @@ async def detect(
         start_time = time.time()
         
         # The wrapper handles security logic; we pass detect_ai_media as the worker function
-        # Pass uid for better rate limiting and logging
+        # Pass device_id for rate limiting
         result = await security_manager.secure_execute(
             request, file.filename, filesize, temp_path, 
             lambda path: detect_ai_media(path, trusted_metadata=sidecar_metadata),
-            uid=uid
+            uid=device_id
         )
         
         duration = time.time() - start_time
@@ -473,18 +498,76 @@ async def detect(
             method = "detect_metadata_only"
             gpu_sec, cpu_sec = 0, duration
             
-        log_usage(file.filename, filesize, method, cost, gpu_seconds=gpu_sec, cpu_seconds=cpu_sec, uid=uid)
+        log_usage(file.filename, filesize, method, cost, gpu_seconds=gpu_sec, cpu_seconds=cpu_sec, uid=device_id)
         
         # Remove internal fields before returning response
         result.pop("gpu_time_ms", None)
         result.pop("is_gemini_used", None)
         result.pop("is_cached", None)
         
+        # Attach new balance
+        result["new_balance"] = new_balance
+
         logger.info(f"[ROUTE] Final Response for {file.filename}: {json.dumps(result)}")
         return result
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
+
+# ---- Guest Balance Endpoint ----
+@app.get("/api/user/balance")
+async def get_balance(device_id: str = Header(..., alias="X-Device-ID")):
+    """
+    Get current credit balance for a guest device.
+    Auto-creates wallet with 10 credits if it doesn't exist.
+    """
+    wallet = get_guest_wallet(device_id)
+    return {"balance": wallet.get("credits", 0)}
+
+# ---- Recharge Webhook ----
+class RechargeRequest(BaseModel):
+    device_id: str
+    amount: int
+    secret_key: str
+
+@app.post("/api/credits/add")
+async def add_credits(payload: RechargeRequest):
+    """
+    Internal webhook to add credits after Ad Watch or Payment.
+    """
+    if not RECHARGE_SECRET_KEY or payload.secret_key != RECHARGE_SECRET_KEY:
+        logger.warning(f"Invalid recharge attempt for {payload.device_id}")
+        raise HTTPException(status_code=403, detail="Invalid secret key")
+    
+    try:
+        doc_ref = db.collection('guest_wallets').document(payload.device_id)
+        
+        @firestore.transactional
+        def recharge_transaction(transaction, ref):
+            snapshot = ref.get(transaction=transaction)
+            if not snapshot.exists:
+                # Create if not exists
+                transaction.set(ref, {
+                    "credits": 10 + payload.amount, 
+                    "last_active": firestore.SERVER_TIMESTAMP,
+                    "is_banned": False
+                })
+                return 10 + payload.amount
+            else:
+                current = snapshot.get("credits")
+                transaction.update(ref, {
+                    "credits": current + payload.amount,
+                    "last_active": firestore.SERVER_TIMESTAMP
+                })
+                return current + payload.amount
+
+        transaction = db.transaction()
+        new_balance = recharge_transaction(transaction, doc_ref)
+        logger.info(f"Recharged {payload.amount} credits for {payload.device_id}. New balance: {new_balance}")
+        return {"status": "success", "new_balance": new_balance}
+    except Exception as e:
+        logger.error(f"Recharge failed: {e}")
+        raise HTTPException(status_code=500, detail="Recharge failed")
 
 # ---- Watermark removal ----
 @app.post("/remove-watermark")

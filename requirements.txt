@@ -13,3 +13,4 @@ pandas
 plotly
 google-genai
 firebase-admin
+upstash-redis
