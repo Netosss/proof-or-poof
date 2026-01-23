@@ -72,8 +72,8 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image]) -> dict:
         - 0.90 - 1.00: Visible glitch (melting hands, gibberish text, asymmetrical pupils).
 
         OUTPUT RULES:
-        - If AI (>0.5): explain in a funny sentence (max 7 words) why it's AI.
-        - If NOT AI: just write "original".
+        - If AI (>0.5): explain in a professional understandable sentence (max 7 words) why it's AI.
+        - If NOT AI: just write "No visual anomalies detected".
         """
 
         response = client.models.generate_content(
