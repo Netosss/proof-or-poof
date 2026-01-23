@@ -463,7 +463,6 @@ async def detect(
         )
         
         duration = time.time() - start_time
-        gpu_used = result.get("layers", {}).get("layer2_forensics", {}).get("status") != "skipped"
         
         # Check explicit flags for Gemini and Cache usage
         is_gemini_used = result.get("is_gemini_used", False)
@@ -483,17 +482,12 @@ async def detect(
             method = "detect_with_gemini"
             gpu_sec, cpu_sec = 0, duration
             logger.info(f"[COST] Gemini analysis: ${cost:.6f}")
-        elif gpu_used and actual_gpu_sec > 0:
+        elif actual_gpu_sec > 0:
             # Cost based on actual GPU utilization, not network round-trip
             cost = actual_gpu_sec * GPU_RATE_PER_SEC
             method = "detect_with_gpu"
             gpu_sec, cpu_sec = actual_gpu_sec, duration - actual_gpu_sec
             logger.info(f"[COST] GPU: {actual_gpu_sec:.3f}s (actual) vs {duration:.3f}s (round-trip) | Cost: ${cost:.6f}")
-        elif gpu_used:
-            # Fallback: worker didn't return timing, use round-trip (legacy)
-            cost = duration * GPU_RATE_PER_SEC
-            method = "detect_with_gpu"
-            gpu_sec, cpu_sec = duration, 0
         else:
             cost = duration * CPU_RATE_PER_SEC
             method = "detect_metadata_only"
