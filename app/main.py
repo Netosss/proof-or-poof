@@ -8,7 +8,8 @@ import hashlib
 import json
 from typing import Optional
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket, Request, Header
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket, Request, Header, Query
+from firebase_admin import firestore
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 import pandas as pd
@@ -527,47 +528,60 @@ async def get_balance(device_id: str = Header(..., alias="X-Device-ID")):
 # ---- Recharge Webhook ----
 class RechargeRequest(BaseModel):
     device_id: str
-    amount: int
+    amount: int = 5
     secret_key: str
 
-@app.post("/api/credits/add")
-async def add_credits(payload: RechargeRequest):
-    """
-    Internal webhook to add credits after Ad Watch or Payment.
-    """
-    if not RECHARGE_SECRET_KEY or payload.secret_key != RECHARGE_SECRET_KEY:
-        logger.warning(f"Invalid recharge attempt for {payload.device_id}")
+def perform_recharge(device_id: str, amount: int, secret_key: str):
+    # Security Check
+    if not RECHARGE_SECRET_KEY or secret_key != RECHARGE_SECRET_KEY:
+        logger.warning(f"⚠️ Invalid recharge attempt for {device_id}")
         raise HTTPException(status_code=403, detail="Invalid secret key")
-    
+
     try:
-        doc_ref = db.collection('guest_wallets').document(payload.device_id)
-        
+        doc_ref = db.collection('guest_wallets').document(device_id)
+
         @firestore.transactional
         def recharge_transaction(transaction, ref):
             snapshot = ref.get(transaction=transaction)
             if not snapshot.exists:
-                # Create if not exists
+                # If user doesn't exist yet, give them Welcome Bonus (10) + Reward (amount)
                 transaction.set(ref, {
-                    "credits": 10 + payload.amount, 
+                    "credits": 10 + amount,
                     "last_active": firestore.SERVER_TIMESTAMP,
                     "is_banned": False
                 })
-                return 10 + payload.amount
+                return 10 + amount
             else:
-                current = snapshot.get("credits")
+                current = snapshot.get("credits") or 0
                 transaction.update(ref, {
-                    "credits": current + payload.amount,
+                    "credits": current + amount,
                     "last_active": firestore.SERVER_TIMESTAMP
                 })
-                return current + payload.amount
+                return current + amount
 
         transaction = db.transaction()
         new_balance = recharge_transaction(transaction, doc_ref)
-        logger.info(f"Recharged {payload.amount} credits for {payload.device_id}. New balance: {new_balance}")
+        
+        logger.info(f"💰 Recharged {amount} credits for {device_id}. New balance: {new_balance}")
         return {"status": "success", "new_balance": new_balance}
+
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Recharge failed: {e}")
+        logger.error(f"🔥 Recharge failed: {e}")
         raise HTTPException(status_code=500, detail="Recharge failed")
+
+@app.post("/api/credits/add")
+async def add_credits_post(payload: RechargeRequest):
+    return perform_recharge(payload.device_id, payload.amount, payload.secret_key)
+
+@app.get("/api/credits/webhook")
+async def add_credits_get(
+    user_id: str = Query(..., alias="device_id"), # Supports ?user_id= or ?device_id=
+    amount: int = 5,
+    key: str = Query(..., alias="secret_key")
+):
+    return perform_recharge(user_id, amount, key)
 
 # ---- Watermark removal ----
 @app.post("/remove-watermark")
