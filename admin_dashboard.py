@@ -2,11 +2,39 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import os
+import json
+import firebase_admin
+from firebase_admin import credentials, firestore
 from dotenv import load_dotenv
-from app.firebase_config import db
 
 # Load environment variables
 load_dotenv()
+
+# --- FIREBASE SETUP FOR STREAMLIT CLOUD ---
+# Do not import from app.firebase_config because it expects local files.
+# Instead, we initialize directly from Streamlit Secrets.
+
+if not firebase_admin._apps:
+    # Check if we are on Streamlit Cloud (secrets exist)
+    if "FIREBASE_JSON" in st.secrets:
+        try:
+            # Parse the JSON string from secrets
+            key_dict = json.loads(st.secrets["FIREBASE_JSON"])
+            cred = credentials.Certificate(key_dict)
+            firebase_admin.initialize_app(cred)
+        except Exception as e:
+            st.error(f"Failed to initialize Firebase from secrets: {e}")
+            st.stop()
+    else:
+        # Fallback for local testing (if you have local creds setup elsewhere)
+        # or show a warning if no secrets found.
+        st.warning("No FIREBASE_JSON found in Streamlit secrets. Trying default initialization.")
+        try:
+            firebase_admin.initialize_app()
+        except Exception:
+            pass
+
+db = firestore.client()
 
 # 1. Page Config
 st.set_page_config(page_title="FauxLens Finance", layout="wide")
