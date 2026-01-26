@@ -1,7 +1,6 @@
 import os
 import tempfile
 import logging
-import csv
 import time
 import uuid
 import hashlib
@@ -10,12 +9,9 @@ from typing import Optional
 import hmac
 from app.finance_logger import log_transaction
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket, Request, Header, Query
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header, Query
 from firebase_admin import firestore
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
-import pandas as pd
-import plotly.express as px
 import asyncio
 from pydantic import BaseModel
 
@@ -43,9 +39,6 @@ from contextlib import asynccontextmanager
 
 # Webhook authentication secret (set via environment variable)
 RUNPOD_WEBHOOK_SECRET = os.getenv("RUNPOD_WEBHOOK_SECRET", "")
-
-# Dashboard authentication (optional but recommended)
-DASHBOARD_SECRET = os.getenv("DASHBOARD_SECRET", "")
 
 # Recharge Webhook Secret
 RECHARGE_SECRET_KEY = os.getenv("RECHARGE_SECRET_KEY", "")
@@ -84,40 +77,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AI Provenance & Cleansing API", lifespan=lifespan)
 
-# ---- RunPod Webhook Storage ----
-# This is imported from runpod_client and shared
-
-USAGE_LOG = "usage_log.csv"
-
 # ---- Pricing Constants (USD per unit) ----
 GPU_RATE_PER_SEC = 0.0019  # RunPod A5000/L4 rate
 CPU_RATE_PER_SEC = 0.0001  # Estimated Railway CPU rate
 GEMINI_FIXED_COST = 0.0024  # Cost per Gemini 3.0 Pro analysis
 AD_REVENUE_PER_REWARD = 0.015  # Avg eCPM for verified view
-
-def log_usage(filename: str, filesize: int, method: str, cost_usd: float, gpu_seconds: float = 0, cpu_seconds: float = 0, uid: str = "anonymous"):
-    """Append a row to the usage log with a unique ID and hashed filename."""
-    file_exists = os.path.exists(USAGE_LOG)
-    fieldnames = ["timestamp", "request_id", "uid", "filename", "filesize", "method", "cost_usd", "gpu_seconds", "cpu_seconds"]
-    
-    # Hash filename for privacy
-    hashed_filename = hashlib.sha256(filename.encode()).hexdigest()[:8]
-    
-    with open(USAGE_LOG, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow({
-            "timestamp": time.time(),
-            "request_id": str(uuid.uuid4())[:8], # Short unique ID
-            "uid": uid,
-            "filename": f"file_{hashed_filename}",
-            "filesize": filesize,
-            "method": method,
-            "cost_usd": cost_usd,
-            "gpu_seconds": gpu_seconds,
-            "cpu_seconds": cpu_seconds
-        })
 
 # ---- CORS ----
 app.add_middleware(
@@ -222,186 +186,6 @@ async def runpod_webhook(request: Request):
         logger.error(f"[WEBHOOK] Error processing callback: {e}")
         return {"status": "error", "message": str(e)}
 
-# ---- Dashboard endpoint ----
-@app.get("/dashboard", response_class=HTMLResponse)
-async def dashboard(request: Request, secret: str = ""):
-    # ---- Authentication (optional) ----
-    if DASHBOARD_SECRET:
-        # Check query param or header
-        provided_secret = secret or request.headers.get("X-Dashboard-Secret", "")
-        if provided_secret != DASHBOARD_SECRET:
-            return HTMLResponse(
-                content="""
-                <body style="background-color: #111217; color: white; font-family: sans-serif; padding: 50px; text-align: center;">
-                    <h1 style="color: #ff6b6b;">🔒 Access Denied</h1>
-                    <p>Dashboard requires authentication. Add ?secret=YOUR_SECRET to the URL.</p>
-                </body>
-                """,
-                status_code=401
-            )
-    
-    # 1. Check if log exists
-    if not os.path.exists(USAGE_LOG):
-        logger.info("Dashboard requested but usage_log.csv does not exist yet.")
-        return """
-        <body style="background-color: #111217; color: white; font-family: sans-serif; padding: 50px; text-align: center;">
-            <div style="border: 1px solid #24272e; padding: 40px; border-radius: 8px; display: inline-block;">
-                <h1 style="color: #32d1df;">Empty Dashboard 🌌</h1>
-                <p style="color: #8e8e8e;">No usage data found on this instance.</p>
-                <p style="font-size: 0.8em; color: #555;">Note: History is cleared on every Railway redeploy unless using Volumes.</p>
-                <a href="/detect" style="color: #73bf69; text-decoration: none; border: 1px solid #73bf69; padding: 10px 20px; border-radius: 4px; display: inline-block; margin-top: 20px;">Try a Scan! 🚀</a>
-            </div>
-        </body>
-        """
-
-    try:
-        # 2. Read and Validate Data
-        df = pd.read_csv(USAGE_LOG)
-        if df.empty:
-            raise ValueError("CSV is empty")
-            
-        # Ensure timestamp is numeric
-        df['timestamp'] = pd.to_numeric(df['timestamp'], errors='coerce')
-        df = df.dropna(subset=['timestamp'])
-        
-        # Pre-processing
-        df['datetime'] = pd.to_datetime(df['timestamp'], unit='s')
-        df['date_label'] = df['datetime'].dt.strftime('%H:%M:%S')
-        df = df.sort_values('timestamp')
-
-        # 3. Create Grafana-like Scatter Plot
-        fig = px.scatter(
-            df, x="datetime", y="cost_usd", color="method",
-            text="request_id",
-            hover_data={
-                "datetime": "|%Y-%m-%d %H:%M:%S",
-                "cost_usd": ":$.4f",
-                "filename": True,
-                "filesize": True,
-                "gpu_seconds": ":.2f",
-                "cpu_seconds": ":.2f"
-            },
-            title="Operational Spending (USD)",
-            template="plotly_dark"
-        )
-
-        fig.update_traces(
-            marker=dict(size=14, line=dict(width=2, color='white')),
-            textposition='top center',
-            mode='markers+text'
-        )
-        
-        fig.update_layout(
-            paper_bgcolor="#111217",
-            plot_bgcolor="#111217",
-            font_color="#d8d9da",
-            xaxis=dict(gridcolor="#24272e", title="Time"),
-            yaxis=dict(gridcolor="#24272e", title="Cost", tickformat="$.4f"),
-            legend=dict(bgcolor="rgba(0,0,0,0)", bordercolor="#24272e", borderwidth=1),
-            margin=dict(l=40, r=40, t=60, b=40)
-        )
-
-        # Build HTML table for "Logs" look
-        table_rows = ""
-        for _, row in df.tail(10).iloc[::-1].iterrows(): # Last 10, newest first
-            table_rows += f"""
-            <tr style="border-bottom: 1px solid #24272e;">
-                <td style="padding: 10px; color: #32d1df;">{row['request_id']}</td>
-                <td style="padding: 10px;">{row['date_label']}</td>
-                <td style="padding: 10px;">{row['filename']}</td>
-                <td style="padding: 10px;">{row['method']}</td>
-                <td style="padding: 10px; color: #73bf69;">${row['cost_usd']:.4f}</td>
-                <td style="padding: 10px;">{row['gpu_seconds']:.2f}s</td>
-            </tr>
-            """
-
-        html = f"""
-        <html>
-            <head>
-                <meta http-equiv="refresh" content="10">
-                <title>AI Ops Dashboard</title>
-                <style>
-                    body {{ font-family: 'Inter', sans-serif; background-color: #111217; color: #d8d9da; margin: 0; padding: 20px; }}
-                    .header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #24272e; padding-bottom: 10px; margin-bottom: 20px; }}
-                    .card {{ background-color: #181b1f; border: 1px solid #24272e; border-radius: 4px; padding: 20px; margin-bottom: 20px; }}
-                    .stat-box {{ display: flex; gap: 20px; }}
-                    .stat {{ background: #21262d; padding: 10px 20px; border-radius: 4px; border-left: 4px solid #32d1df; }}
-                    .stat-val {{ font-size: 1.5em; font-weight: bold; color: #ffffff; }}
-                    .stat-label {{ font-size: 0.8em; color: #8e8e8e; text-transform: uppercase; }}
-                    table {{ width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.9em; }}
-                    th {{ text-align: left; background: #21262d; padding: 10px; color: #8e8e8e; text-transform: uppercase; font-size: 0.8em; }}
-                </style>
-            </head>
-            <body>
-                <div class="header">
-                    <div style="font-size: 1.2em; font-weight: bold;">AI OPS / <span style="color: #32d1df;">USAGE_TRACKER</span></div>
-                    <div class="stat-box">
-                        <div class="stat">
-                            <div class="stat-label">Total Burn</div>
-                            <div class="stat-val">${df['cost_usd'].sum():.4f}</div>
-                        </div>
-                        <div class="stat" style="border-left-color: #73bf69;">
-                            <div class="stat-label">Requests</div>
-                            <div class="stat-val">{len(df)}</div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="card">
-                    {fig.to_html(full_html=False, include_plotlyjs='cdn')}
-                </div>
-
-                <div class="card">
-                    <div style="font-weight: bold; margin-bottom: 15px; color: #32d1df;">LIVE REQUEST LOGS</div>
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>ID</th><th>Time</th><th>File</th><th>Method</th><th>Cost</th><th>GPU Time</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {table_rows}
-                        </tbody>
-                    </table>
-                </div>
-            </body>
-        </html>
-        """
-        return HTMLResponse(html)
-    except Exception as e:
-        logger.error(f"Dashboard render error: {e}", exc_info=True)
-        return f"""
-        <body style="background-color: #111217; color: white; padding: 50px;">
-            <h2>Dashboard Error ⚠️</h2>
-            <p>Could not load usage data: {str(e)}</p>
-            <p style="color: #8e8e8e;">Try scanning another image to regenerate the log file.</p>
-        </body>
-        """
-
-# ---- WebSocket endpoint ----
-connected_clients = []
-
-@app.websocket("/ws/usage")
-async def ws_usage(websocket: WebSocket):
-    await websocket.accept()
-    connected_clients.append(websocket)
-    try:
-        while True:
-            await asyncio.sleep(5)
-            if os.path.exists(USAGE_LOG):
-                df = pd.read_csv(USAGE_LOG)
-                data = df.to_dict(orient="records")
-                for client in connected_clients:
-                    try:
-                        await client.send_json(data)
-                    except:
-                        pass
-    except:
-        pass
-    finally:
-        if websocket in connected_clients:
-            connected_clients.remove(websocket)
-
 # ---- Detect endpoint ----
 @app.post("/detect", response_model=DetectionResponse)
 async def detect(
@@ -500,9 +284,6 @@ async def detect(
             method = "detect_metadata_only"
             gpu_sec, cpu_sec = 0, duration
             log_transaction("CPU", -cost, {"file": file.filename, "device_id": device_id, "duration": duration})
-            
-        log_usage(file.filename, filesize, method, cost, gpu_seconds=gpu_sec, cpu_seconds=cpu_sec, uid=device_id)
-        
         # Remove internal fields before returning response
         result.pop("gpu_time_ms", None)
         result.pop("is_gemini_used", None)
@@ -616,7 +397,6 @@ async def remove_watermark(request: Request, file: UploadFile = File(...)):
         
         if is_video:
             cost = duration * GPU_RATE_PER_SEC
-            log_usage(file.filename, filesize, "remove-watermark-video", cost, gpu_seconds=duration, uid="anonymous")
             log_transaction("GPU", -cost, {"task": "remove_watermark", "file": file.filename})
             return {
                 "status": "success", "method": "runpod_gpu",
@@ -624,7 +404,6 @@ async def remove_watermark(request: Request, file: UploadFile = File(...)):
             }
         else:
             cost = duration * CPU_RATE_PER_SEC
-            log_usage(file.filename, filesize, "remove-watermark-image", cost, cpu_seconds=duration, uid="anonymous")
             log_transaction("CPU", -cost, {"task": "remove_watermark", "file": file.filename})
             return {
                 "status": "success", "method": "local_cheap",
