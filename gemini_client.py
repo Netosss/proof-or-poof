@@ -85,7 +85,17 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image]) -> dict:
             config=config
         )
 
-        return json.loads(response.text)
+        result = json.loads(response.text)
+
+        # Add usage metadata for cost tracking
+        if hasattr(response, "usage_metadata"):
+            result["usage"] = {
+                "prompt_tokens": response.usage_metadata.prompt_token_count,
+                "completion_tokens": response.usage_metadata.candidates_token_count,
+                "total_tokens": response.usage_metadata.total_token_count
+            }
+
+        return result
 
     except Exception as e:
         print(f"Gemini Error: {e}")

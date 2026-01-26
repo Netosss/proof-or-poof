@@ -7,6 +7,8 @@ import uuid
 import hashlib
 import json
 from typing import Optional
+import hmac
+from app.finance_logger import log_transaction
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket, Request, Header, Query
 from firebase_admin import firestore
@@ -91,6 +93,7 @@ USAGE_LOG = "usage_log.csv"
 GPU_RATE_PER_SEC = 0.0019  # RunPod A5000/L4 rate
 CPU_RATE_PER_SEC = 0.0001  # Estimated Railway CPU rate
 GEMINI_FIXED_COST = 0.0024  # Cost per Gemini 3.0 Pro analysis
+AD_REVENUE_PER_REWARD = 0.015  # Avg eCPM for verified view
 
 def log_usage(filename: str, filesize: int, method: str, cost_usd: float, gpu_seconds: float = 0, cpu_seconds: float = 0, uid: str = "anonymous"):
     """Append a row to the usage log with a unique ID and hashed filename."""
@@ -477,21 +480,26 @@ async def detect(
             method = "cached_result"
             gpu_sec, cpu_sec = 0, 0
             logger.info(f"[COST] Cache hit: $0.00")
+            log_transaction("CACHE", 0.0, {"file": file.filename, "device_id": device_id})
         elif is_gemini_used:
             cost = GEMINI_FIXED_COST
             method = "detect_with_gemini"
             gpu_sec, cpu_sec = 0, duration
             logger.info(f"[COST] Gemini analysis: ${cost:.6f}")
+            gemini_usage = result.get("usage", {})
+            log_transaction("GEMINI", -cost, {"file": file.filename, "device_id": device_id, "usage": gemini_usage})
         elif actual_gpu_sec > 0:
             # Cost based on actual GPU utilization, not network round-trip
             cost = actual_gpu_sec * GPU_RATE_PER_SEC
             method = "detect_with_gpu"
             gpu_sec, cpu_sec = actual_gpu_sec, duration - actual_gpu_sec
             logger.info(f"[COST] GPU: {actual_gpu_sec:.3f}s (actual) vs {duration:.3f}s (round-trip) | Cost: ${cost:.6f}")
+            log_transaction("GPU", -cost, {"file": file.filename, "device_id": device_id, "duration": actual_gpu_sec})
         else:
             cost = duration * CPU_RATE_PER_SEC
             method = "detect_metadata_only"
             gpu_sec, cpu_sec = 0, duration
+            log_transaction("CPU", -cost, {"file": file.filename, "device_id": device_id, "duration": duration})
             
         log_usage(file.filename, filesize, method, cost, gpu_seconds=gpu_sec, cpu_seconds=cpu_sec, uid=device_id)
         
@@ -557,6 +565,7 @@ def perform_recharge(device_id: str, amount: int, secret_key: str):
         new_balance = recharge_transaction(transaction, doc_ref)
         
         logger.info(f"💰 Recharged {amount} credits for {device_id}. New balance: {new_balance}")
+        log_transaction("AD_REWARD", AD_REVENUE_PER_REWARD, {"device_id": device_id, "credits": amount})
         return {"status": "success", "new_balance": new_balance}
 
     except HTTPException:
@@ -608,6 +617,7 @@ async def remove_watermark(request: Request, file: UploadFile = File(...)):
         if is_video:
             cost = duration * GPU_RATE_PER_SEC
             log_usage(file.filename, filesize, "remove-watermark-video", cost, gpu_seconds=duration, uid="anonymous")
+            log_transaction("GPU", -cost, {"task": "remove_watermark", "file": file.filename})
             return {
                 "status": "success", "method": "runpod_gpu",
                 "cost_usd": round(cost, 5), "gpu_seconds": round(duration, 2), "result": result,
@@ -615,6 +625,7 @@ async def remove_watermark(request: Request, file: UploadFile = File(...)):
         else:
             cost = duration * CPU_RATE_PER_SEC
             log_usage(file.filename, filesize, "remove-watermark-image", cost, cpu_seconds=duration, uid="anonymous")
+            log_transaction("CPU", -cost, {"task": "remove_watermark", "file": file.filename})
             return {
                 "status": "success", "method": "local_cheap",
                 "cost_usd": round(cost, 5), "filename": file.filename,
@@ -627,3 +638,43 @@ async def remove_watermark(request: Request, file: UploadFile = File(...)):
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
+
+# ---- Lemon Squeezy Webhook ----
+LEMONSQUEEZY_WEBHOOK_SECRET = os.getenv("LEMONSQUEEZY_WEBHOOK_SECRET")
+
+@app.post("/webhooks/lemonsqueezy")
+async def lemonsqueezy_webhook(request: Request, x_signature: str = Header(None, alias="X-Signature")):
+    if not LEMONSQUEEZY_WEBHOOK_SECRET:
+        return {"status": "ignored", "reason": "No secret set"}
+
+    payload_bytes = await request.body()
+    
+    # Verify Signature
+    expected_signature = hmac.new(
+        LEMONSQUEEZY_WEBHOOK_SECRET.encode(),
+        payload_bytes,
+        hashlib.sha256
+    ).hexdigest()
+    
+    if not x_signature or not hmac.compare_digest(x_signature, expected_signature):
+        raise HTTPException(status_code=401, detail="Invalid signature")
+
+    payload = json.loads(payload_bytes)
+    event_name = payload.get("meta", {}).get("event_name")
+    
+    if event_name == "order_created":
+        data = payload.get("data", {})
+        attributes = data.get("attributes", {})
+        
+        # Financials
+        total_cents = attributes.get("total", 0)
+        total_usd = total_cents / 100.0
+        
+        # Metadata
+        custom_data = payload.get("meta", {}).get("custom_data", {})
+        user_id = custom_data.get("user_id", "unknown")
+        
+        log_transaction("LEMONSQUEEZY", total_usd, {"user_id": user_id, "order_id": data.get("id")})
+        logger.info(f"💰 [LEMONSQUEEZY] Processed order {data.get('id')}: ${total_usd}")
+        
+    return {"status": "ok"}
