@@ -13,7 +13,7 @@ from PIL.ExifTags import TAGS
 from typing import Optional, Union
 from app.c2pa_reader import get_c2pa_manifest
 from app.runpod_client import run_deep_forensics
-from gemini_client import analyze_image_pro_turbo
+from gemini_client import analyze_image_pro_turbo, analyze_batch_images_pro_turbo
 from app.security import security_manager
 
 logger = logging.getLogger(__name__)
@@ -914,106 +914,27 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
         
         logger.info(f"[VIDEO] Extracted {len(frames)} frames (rejected {quality_rejected} low-quality)")
         
-        # SINGLE BATCH REQUEST to RunPod (3 frames = ~same GPU time as 1)
-        from app.runpod_client import run_batch_forensics
-        batch_result = await run_batch_forensics(frames)
+        # SINGLE BATCH REQUEST to Gemini (Layer 3.3)
+        # Use analyze_batch_images_pro_turbo which returns aggregated median result
+        # Run in thread pool to avoid blocking async event loop
+        gemini_result = await loop.run_in_executor(
+            None, analyze_batch_images_pro_turbo, frames
+        )
         
-        if batch_result.get("error"):
-            error_msg = batch_result['error']
-            logger.warning(f"[VIDEO] Batch error: {error_msg}")
-            # Return proper schema even on error
-            return {
-                "summary": "Analysis Failed",
-                "confidence_score": 0.0,
-                "evidence_chain": [
-                    {
-                        "layer": "System",
-                        "status": "warning",
-                        "label": "Video Error",
-                        "detail": f"Frame analysis failed: {error_msg}"
-                    }
-                ]
-            }
+        confidence = gemini_result.get("confidence", 0.0)
+        explanation = gemini_result.get("explanation", "Analysis completed.")
+        gpu_time_ms = 0 # No RunPod GPU used
         
-        results = batch_result.get("results", [])
-        gpu_time_ms = batch_result.get("gpu_time_ms", 0.0)
-        
-        if not results:
-            return {
-                "summary": "Analysis Failed",
-                "confidence_score": 0.0,
-                "evidence_chain": [
-                    {
-                        "layer": "System",
-                        "status": "warning",
-                        "label": "Video Error",
-                        "detail": "No frame results returned."
-                    }
-                ]
-            }
-        
-        # Extract AI scores from batch results
-        frame_probs = [r.get("ai_score", 0.0) for r in results if isinstance(r, dict) and "ai_score" in r]
-        if not frame_probs:
-            return {
-                "summary": "Analysis Failed",
-                "confidence_score": 0.0,
-                "evidence_chain": [
-                    {
-                        "layer": "System",
-                        "status": "warning",
-                        "label": "Video Error",
-                        "detail": "Invalid frame results format."
-                    }
-                ]
-            }
-        
-        num_frames_analyzed = len(frame_probs)
-        
-        # Simple aggregation: MEDIAN (robust to outliers)
-        median_prob = float(np.median(frame_probs))
-        mean_prob = float(np.mean(frame_probs))
-        max_prob = float(np.max(frame_probs))
-        
-        logger.info(f"[VIDEO] Tri-frame results: {[f'{p:.3f}' for p in frame_probs]} | "
-                   f"Median: {median_prob:.3f}, Mean: {mean_prob:.3f}, Max: {max_prob:.3f}")
-        
-        # Use median as final score (safest for 3 frames)
-        final_prob = median_prob
-        
-        # If any frame is strongly AI (>0.85), trust it
-        if max_prob > 0.85:
-            final_prob = max_prob
-            logger.info(f"[VIDEO] Strong AI frame detected ({max_prob:.3f}), using max")
-        
-        # Determine summary based on final probability
-        is_ai_likely = final_prob > 0.5
-        if final_prob > 0.5: 
-            summary = "Likely AI-Generated"
-        else: 
-            summary = "Likely Authentic"
-        
-        # Apply boost to confidence score (only for AI-likely results)
-        raw_conf = final_prob if is_ai_likely else 1.0 - final_prob
-        final_conf = boost_score(raw_conf, is_ai_likely=is_ai_likely)
-        
-        # Cap at 0.99 for probabilistic results
-        if final_conf > 0.99:
-            final_conf = 0.99
+        logger.info(f"[VIDEO] Gemini Batch Result: confidence={confidence}, explanation='{explanation}'")
 
-        # Build detailed signals
-        analysis_signals = [
-            f"Tri-frame batch analysis ({num_frames_analyzed} frames)",
-            f"Frame scores: {[f'{p:.2f}' for p in frame_probs]}",
-            f"Aggregation: median={median_prob:.2f}, max={max_prob:.2f}"
-        ]
-        if meta_signals:
-            analysis_signals.extend(meta_signals[:2])  # Add top 2 metadata signals
-        
+        is_ai_likely = confidence > 0.5
+        summary = "Likely AI-Generated" if is_ai_likely else "Likely Authentic"
+
         return {
             "summary": summary,
-            "confidence_score": round(final_conf, 2),
+            "confidence_score": confidence,
             "gpu_time_ms": gpu_time_ms,
+            "is_gemini_used": True,
             "evidence_chain": [
                 {
                     "layer": "Layer 1: Metadata Check",
@@ -1022,10 +943,10 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
                     "detail": "No definitive camera metadata found."
                 },
                 {
-                    "layer": "Layer 3: Deep Forensics",
+                    "layer": "Layer 3: Visual Context",
                     "status": "flagged" if is_ai_likely else "passed",
-                    "label": "Visual Analysis",
-                    "detail": "Noise patterns consistent with generative AI." if is_ai_likely else "No visual anomalies detected."
+                    "label": "Visual Inspection",
+                    "detail": explanation
                 }
             ]
         }
