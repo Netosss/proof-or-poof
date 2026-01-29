@@ -145,8 +145,11 @@ def get_exif_data(file_path: str) -> dict:
             # These formats often store info in the .info attribute instead of EXIF
             if hasattr(img, 'info') and img.info:
                 for key, value in img.info.items():
+                    # Handle ICC Profile specially
+                    if key == "icc_profile":
+                        metadata["icc_profile"] = "present"
                     # Avoid binary data bloat, only take string-like metadata
-                    if isinstance(key, str) and isinstance(value, (str, int, float)):
+                    elif isinstance(key, str) and isinstance(value, (str, int, float)):
                         # Don't overwrite EXIF tags if they already exist
                         if key not in metadata:
                             metadata[key] = value
@@ -402,27 +405,32 @@ def get_video_metadata_score(metadata: dict, filename: str = "", file_path: str 
         human_score += 0.10
         signals.append(f"Device-native FPS: {fps:.4f}")
     
-    # 3. Known camera brands in encoder/handler
-    camera_brands = ["iphone", "samsung", "google", "pixel", "gopro", "dji", 
-                     "sony", "canon", "nikon", "panasonic", "fujifilm", "xiaomi", "huawei", "oneplus"]
-    for brand in camera_brands:
-        if brand in encoder or brand in format_handler or brand in make or brand in model:
-            human_score += 0.20
-            signals.append(f"Camera brand detected: {brand}")
-            break
-    
+    # 3. Device/Camera metadata present
+    if make or model:
+        human_score += 0.25
+        signals.append("Device manufacturer/model metadata present")
+
     # 4. GPS/Location data (strong human signal)
-    gps_found = False
-    gps_markers = ["location", "gps", "coordinates", "com.apple.quicktime.location"]
-    for marker in gps_markers:
-        for key in tags_lower:
-            if marker in key:
-                human_score += 0.30
-                signals.append("GPS/Location data present")
-                gps_found = True
+    # The "Human Hardware" Location Whitelist
+    # We use partial matching (e.g. "latitud" matches "GPSLatitude" and "Latitude")
+    location_markers = [
+        "gps",          # Covers EXIF (GPSLatitude) and XMP
+        "location",     # Covers Apple (com.apple.quicktime.location)
+        "coordinates",  # Covers generic parsers
+        "xyz",          # CRITICAL: Covers Android Video standard (©xyz)
+        "latitud",      # Covers bare "Latitude" tags (common in JSON dumps)
+        "longitud"      # Covers bare "Longitude" tags
+    ]
+    
+    # The Logic
+    for key, value in tags_lower.items():
+        if any(term in key for term in location_markers):
+            # Check for valid data (not empty/zero)
+            val_str = str(value).strip()
+            if value and val_str not in ["0", "0.0", "+0.0000+000.0000/", "None", "[]"]:
+                human_score += 0.35
+                signals.append(f"GPS/Location data present: {key}")
                 break
-        if gps_found:
-            break
     
     # 5. Creation time with timezone (phones add this)
     creation_time = tags_lower.get("creation_time", "")
@@ -476,6 +484,38 @@ def get_video_metadata_score(metadata: dict, filename: str = "", file_path: str 
         if duration < 15 and bit_rate > 15_000_000:  # >15 Mbps for short video
             ai_score += 0.05
             signals.append(f"High bitrate short video ({bit_rate//1000}kbps)")
+
+    # === NEW: HDR / COLOR PROFILE CHECK (Strong Human Signal) ===
+    # Real cameras (iPhone 12+, High-end Android) often shoot HDR/BT.2020
+    # AI generators are almost exclusively SDR/BT.709 (Standard)
+    if video_stream:
+        color_primaries = video_stream.get("color_primaries", "unknown")
+        color_transfer = video_stream.get("color_transfer", "unknown")
+        
+        # 1. BT.2020 (Wide Color Gamut) - Very strong human signal
+        if "bt2020" in color_primaries:
+            human_score += 0.45
+            signals.append(f"Wide Color Gamut detected ({color_primaries})")
+            
+        # 2. HDR Transfer Functions (HLG or PQ)
+        # "arib-std-b67" = HLG (iPhone HDR)
+        # "smpte2084" = PQ (Samsung/Cinema HDR)
+        if "arib-std-b67" in color_transfer or "smpte2084" in color_transfer:
+            human_score += 0.45
+            signals.append(f"HDR Transfer Function detected ({color_transfer})")
+
+    # === NEW: CONTAINER BRAND CHECK ===
+    major_brand = tags_lower.get("major_brand", "").lower()
+    
+    # "qt  " with spaces is Apple's signature
+    if "qt  " in major_brand or "qt" == major_brand.strip():
+        human_score += 0.18
+        signals.append("Apple QuickTime Container (major_brand)")
+        
+    # "mp42" is common on Android/Sony cameras
+    if "mp42" in major_brand:
+        human_score += 0.14
+        signals.append("Android/Camera Container (major_brand: mp42)")
     
     # === AI SIGNALS ===
     
@@ -670,6 +710,24 @@ def get_forensic_metadata_score(exif: dict) -> tuple:
     if exif.get("Compression") in [6, 1]: 
         score += 0.05
         signals.append("Standard camera compression")
+
+    # === TIER 8: COLOR PROFILES (Strong Human Signal) ===
+    # Real phones/cameras often use "Uncalibrated" (65535) + ICC Profile (e.g. Display P3)
+    # AI generators typically default to standard sRGB (1) with no profile.
+    
+    color_space = exif.get("ColorSpace")
+    
+    # 1. Check for "Uncalibrated" / Wide Gamut Signal
+    # Value 65535 often means "Look at the ICC Profile" (common in Apple Display P3)
+    if color_space == 65535:
+        score += 0.20
+        signals.append("Wide Gamut / Uncalibrated Color Space (Human Typical)")
+
+    # 2. Check for ICC Profile presence (Pillow specific)
+    # Most raw AI generations do not embed complex ICC profiles to save space.
+    if "icc_profile" in exif:
+         score += 0.15
+         signals.append("ICC Color Profile detected")
 
     return round(score, 2), signals
 
@@ -1199,7 +1257,7 @@ async def detect_ai_media_image_logic(
             }
     else:
         # --- STRIPPED-JPEG ADAPTIVE POLICY (Gemini Gateway) ---
-        if total_pixels >= 500_000 and is_stripped:
+        if total_pixels >= 260_000 and is_stripped:
             logger.info(f"[GEMINI] Triggering Gemini Pro Turbo for Large Stripped JPEG ({total_pixels/1_000_000:.2f}MP)")
             
             gemini_res = analyze_image_pro_turbo(frame or file_path)
