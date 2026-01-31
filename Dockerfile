@@ -26,8 +26,8 @@ RUN pip install --no-cache-dir --upgrade pip && \
 ENV TORCH_HOME=/root/.cache/torch
 # Create the directory
 RUN mkdir -p $TORCH_HOME/hub/checkpoints/
-# Copy explicitly from local models/ directory to the container cache
-COPY models/big-lama.pt $TORCH_HOME/hub/checkpoints/big-lama.pt
+# Download model directly during build (Fixes deployment missing file issue)
+RUN curl -L -o $TORCH_HOME/hub/checkpoints/big-lama.pt https://github.com/enesmsahin/simple-lama-inpainting/releases/download/v0.1.0/big-lama.pt
 
 # Copy the application code
 COPY . .
