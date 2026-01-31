@@ -1,19 +1,19 @@
 import os
 import tempfile
 import logging
-import csv
 import time
 import uuid
 import hashlib
 import json
 from typing import Optional
+import hmac
+from app.finance_logger import log_transaction
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket, Request
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header, Query
+from firebase_admin import firestore
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
-import pandas as pd
-import plotly.express as px
 import asyncio
+from pydantic import BaseModel
 
 # Load environment variables at the very beginning
 load_dotenv()
@@ -25,14 +25,23 @@ logger = logging.getLogger(__name__)
 from app.detector import detect_ai_media
 from app.schemas import DetectionResponse
 from app.runpod_client import run_video_removal, pending_jobs, webhook_result_buffer, cleanup_stale_jobs
-from app.security import security_manager
+from app.security import (
+    security_manager, 
+    check_and_deduct_credits, 
+    verify_turnstile, 
+    check_ban_status, 
+    deduct_guest_credits,
+    get_guest_wallet,
+    db
+)
+from fastapi import Depends
 from contextlib import asynccontextmanager
 
 # Webhook authentication secret (set via environment variable)
 RUNPOD_WEBHOOK_SECRET = os.getenv("RUNPOD_WEBHOOK_SECRET", "")
 
-# Dashboard authentication (optional but recommended)
-DASHBOARD_SECRET = os.getenv("DASHBOARD_SECRET", "")
+# Recharge Webhook Secret
+RECHARGE_SECRET_KEY = os.getenv("RECHARGE_SECRET_KEY", "")
 
 # Background cleanup task
 cleanup_task = None
@@ -68,37 +77,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AI Provenance & Cleansing API", lifespan=lifespan)
 
-# ---- RunPod Webhook Storage ----
-# This is imported from runpod_client and shared
-
-USAGE_LOG = "usage_log.csv"
-
-# ---- Pricing Constants (USD per second) ----
+# ---- Pricing Constants (USD per unit) ----
 GPU_RATE_PER_SEC = 0.0019  # RunPod A5000/L4 rate
 CPU_RATE_PER_SEC = 0.0001  # Estimated Railway CPU rate
-
-def log_usage(filename: str, filesize: int, method: str, cost_usd: float, gpu_seconds: float = 0, cpu_seconds: float = 0):
-    """Append a row to the usage log with a unique ID and hashed filename."""
-    file_exists = os.path.exists(USAGE_LOG)
-    fieldnames = ["timestamp", "request_id", "filename", "filesize", "method", "cost_usd", "gpu_seconds", "cpu_seconds"]
-    
-    # Hash filename for privacy
-    hashed_filename = hashlib.sha256(filename.encode()).hexdigest()[:8]
-    
-    with open(USAGE_LOG, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow({
-            "timestamp": time.time(),
-            "request_id": str(uuid.uuid4())[:8], # Short unique ID
-            "filename": f"file_{hashed_filename}",
-            "filesize": filesize,
-            "method": method,
-            "cost_usd": cost_usd,
-            "gpu_seconds": gpu_seconds,
-            "cpu_seconds": cpu_seconds
-        })
+GEMINI_FIXED_COST = 0.0024  # Cost per Gemini 3.0 Pro analysis
+AD_REVENUE_PER_REWARD = 0.015  # Avg eCPM for verified view
 
 # ---- CORS ----
 app.add_middleware(
@@ -203,210 +186,47 @@ async def runpod_webhook(request: Request):
         logger.error(f"[WEBHOOK] Error processing callback: {e}")
         return {"status": "error", "message": str(e)}
 
-# ---- Dashboard endpoint ----
-@app.get("/dashboard", response_class=HTMLResponse)
-async def dashboard(request: Request, secret: str = ""):
-    # ---- Authentication (optional) ----
-    if DASHBOARD_SECRET:
-        # Check query param or header
-        provided_secret = secret or request.headers.get("X-Dashboard-Secret", "")
-        if provided_secret != DASHBOARD_SECRET:
-            return HTMLResponse(
-                content="""
-                <body style="background-color: #111217; color: white; font-family: sans-serif; padding: 50px; text-align: center;">
-                    <h1 style="color: #ff6b6b;">🔒 Access Denied</h1>
-                    <p>Dashboard requires authentication. Add ?secret=YOUR_SECRET to the URL.</p>
-                </body>
-                """,
-                status_code=401
-            )
-    
-    # 1. Check if log exists
-    if not os.path.exists(USAGE_LOG):
-        logger.info("Dashboard requested but usage_log.csv does not exist yet.")
-        return """
-        <body style="background-color: #111217; color: white; font-family: sans-serif; padding: 50px; text-align: center;">
-            <div style="border: 1px solid #24272e; padding: 40px; border-radius: 8px; display: inline-block;">
-                <h1 style="color: #32d1df;">Empty Dashboard 🌌</h1>
-                <p style="color: #8e8e8e;">No usage data found on this instance.</p>
-                <p style="font-size: 0.8em; color: #555;">Note: History is cleared on every Railway redeploy unless using Volumes.</p>
-                <a href="/detect" style="color: #73bf69; text-decoration: none; border: 1px solid #73bf69; padding: 10px 20px; border-radius: 4px; display: inline-block; margin-top: 20px;">Try a Scan! 🚀</a>
-            </div>
-        </body>
-        """
-
-    try:
-        # 2. Read and Validate Data
-        df = pd.read_csv(USAGE_LOG)
-        if df.empty:
-            raise ValueError("CSV is empty")
-            
-        # Ensure timestamp is numeric
-        df['timestamp'] = pd.to_numeric(df['timestamp'], errors='coerce')
-        df = df.dropna(subset=['timestamp'])
-        
-        # Pre-processing
-        df['datetime'] = pd.to_datetime(df['timestamp'], unit='s')
-        df['date_label'] = df['datetime'].dt.strftime('%H:%M:%S')
-        df = df.sort_values('timestamp')
-
-        # 3. Create Grafana-like Scatter Plot
-        fig = px.scatter(
-            df, x="datetime", y="cost_usd", color="method",
-            text="request_id",
-            hover_data={
-                "datetime": "|%Y-%m-%d %H:%M:%S",
-                "cost_usd": ":$.4f",
-                "filename": True,
-                "filesize": True,
-                "gpu_seconds": ":.2f",
-                "cpu_seconds": ":.2f"
-            },
-            title="Operational Spending (USD)",
-            template="plotly_dark"
-        )
-
-        fig.update_traces(
-            marker=dict(size=14, line=dict(width=2, color='white')),
-            textposition='top center',
-            mode='markers+text'
-        )
-        
-        fig.update_layout(
-            paper_bgcolor="#111217",
-            plot_bgcolor="#111217",
-            font_color="#d8d9da",
-            xaxis=dict(gridcolor="#24272e", title="Time"),
-            yaxis=dict(gridcolor="#24272e", title="Cost", tickformat="$.4f"),
-            legend=dict(bgcolor="rgba(0,0,0,0)", bordercolor="#24272e", borderwidth=1),
-            margin=dict(l=40, r=40, t=60, b=40)
-        )
-
-        # Build HTML table for "Logs" look
-        table_rows = ""
-        for _, row in df.tail(10).iloc[::-1].iterrows(): # Last 10, newest first
-            table_rows += f"""
-            <tr style="border-bottom: 1px solid #24272e;">
-                <td style="padding: 10px; color: #32d1df;">{row['request_id']}</td>
-                <td style="padding: 10px;">{row['date_label']}</td>
-                <td style="padding: 10px;">{row['filename']}</td>
-                <td style="padding: 10px;">{row['method']}</td>
-                <td style="padding: 10px; color: #73bf69;">${row['cost_usd']:.4f}</td>
-                <td style="padding: 10px;">{row['gpu_seconds']:.2f}s</td>
-            </tr>
-            """
-
-        html = f"""
-        <html>
-            <head>
-                <meta http-equiv="refresh" content="10">
-                <title>AI Ops Dashboard</title>
-                <style>
-                    body {{ font-family: 'Inter', sans-serif; background-color: #111217; color: #d8d9da; margin: 0; padding: 20px; }}
-                    .header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #24272e; padding-bottom: 10px; margin-bottom: 20px; }}
-                    .card {{ background-color: #181b1f; border: 1px solid #24272e; border-radius: 4px; padding: 20px; margin-bottom: 20px; }}
-                    .stat-box {{ display: flex; gap: 20px; }}
-                    .stat {{ background: #21262d; padding: 10px 20px; border-radius: 4px; border-left: 4px solid #32d1df; }}
-                    .stat-val {{ font-size: 1.5em; font-weight: bold; color: #ffffff; }}
-                    .stat-label {{ font-size: 0.8em; color: #8e8e8e; text-transform: uppercase; }}
-                    table {{ width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.9em; }}
-                    th {{ text-align: left; background: #21262d; padding: 10px; color: #8e8e8e; text-transform: uppercase; font-size: 0.8em; }}
-                </style>
-            </head>
-            <body>
-                <div class="header">
-                    <div style="font-size: 1.2em; font-weight: bold;">AI OPS / <span style="color: #32d1df;">USAGE_TRACKER</span></div>
-                    <div class="stat-box">
-                        <div class="stat">
-                            <div class="stat-label">Total Burn</div>
-                            <div class="stat-val">${df['cost_usd'].sum():.4f}</div>
-                        </div>
-                        <div class="stat" style="border-left-color: #73bf69;">
-                            <div class="stat-label">Requests</div>
-                            <div class="stat-val">{len(df)}</div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="card">
-                    {fig.to_html(full_html=False, include_plotlyjs='cdn')}
-                </div>
-
-                <div class="card">
-                    <div style="font-weight: bold; margin-bottom: 15px; color: #32d1df;">LIVE REQUEST LOGS</div>
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>ID</th><th>Time</th><th>File</th><th>Method</th><th>Cost</th><th>GPU Time</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {table_rows}
-                        </tbody>
-                    </table>
-                </div>
-            </body>
-        </html>
-        """
-        return HTMLResponse(html)
-    except Exception as e:
-        logger.error(f"Dashboard render error: {e}", exc_info=True)
-        return f"""
-        <body style="background-color: #111217; color: white; padding: 50px;">
-            <h2>Dashboard Error ⚠️</h2>
-            <p>Could not load usage data: {str(e)}</p>
-            <p style="color: #8e8e8e;">Try scanning another image to regenerate the log file.</p>
-        </body>
-        """
-
-# ---- WebSocket endpoint ----
-connected_clients = []
-
-@app.websocket("/ws/usage")
-async def ws_usage(websocket: WebSocket):
-    await websocket.accept()
-    connected_clients.append(websocket)
-    try:
-        while True:
-            await asyncio.sleep(5)
-            if os.path.exists(USAGE_LOG):
-                df = pd.read_csv(USAGE_LOG)
-                data = df.to_dict(orient="records")
-                for client in connected_clients:
-                    try:
-                        await client.send_json(data)
-                    except:
-                        pass
-    except:
-        pass
-    finally:
-        if websocket in connected_clients:
-            connected_clients.remove(websocket)
-
 # ---- Detect endpoint ----
 @app.post("/detect", response_model=DetectionResponse)
 async def detect(
     request: Request, 
     file: UploadFile = File(...),
-    trusted_metadata: Optional[str] = Form(None)
+    trusted_metadata: Optional[str] = Form(None),
+    device_id: str = Header(..., alias="X-Device-ID"),
+    turnstile_token: str = Header(..., alias="X-Turnstile-Token")
 ):
     """
     Detect AI-generated content in images/videos.
+    Guest Wallet Flow: Validates Turnstile, checks bans, and deducts credits from device wallet.
     
     Args:
         file: The media file to analyze (image or video)
         trusted_metadata: Optional JSON string with device-extracted EXIF data.
-            This "sidecar" bypasses mobile OS privacy stripping.
-            Expected fields: Make, Model, Software, DateTime, width, height, fileSize, etc.
+        device_id: The Guest Device ID (FingerprintJS)
+        turnstile_token: Cloudflare Turnstile token
     """
+    
+    # 1. Security & Wallet Check
+    # Verify Turnstile
+    is_human = await verify_turnstile(turnstile_token)
+    if not is_human:
+        raise HTTPException(status_code=403, detail="Turnstile validation failed")
+
+    # Check Ban Status
+    if check_ban_status(device_id):
+        raise HTTPException(status_code=403, detail="Device is banned")
+
+    # Deduct Credits (Atomic) - Raises 402 if insufficient
+    new_balance = deduct_guest_credits(device_id, cost=5)
+
     # Parse trusted metadata sidecar if provided
     sidecar_metadata = None
     if trusted_metadata:
         try:
             sidecar_metadata = json.loads(trusted_metadata)
-            logger.info(f"[SIDECAR] Received trusted metadata: {list(sidecar_metadata.keys())}")
+            logger.info(f"[SIDECAR] Device {device_id} provided trusted metadata: {list(sidecar_metadata.keys())}")
         except json.JSONDecodeError as e:
-            logger.warning(f"[SIDECAR] Invalid JSON in trusted_metadata: {e}")
+            logger.warning(f"[SIDECAR] Invalid JSON in trusted_metadata from {device_id}: {e}")
     
     # Use Secure Wrapper for primary security checks
     # (Rate limiting + Type/Size validation + Content Deep Check)
@@ -422,43 +242,130 @@ async def detect(
         start_time = time.time()
         
         # The wrapper handles security logic; we pass detect_ai_media as the worker function
-        # Pass sidecar metadata to detector for prioritized analysis
+        # Pass device_id for rate limiting
         result = await security_manager.secure_execute(
             request, file.filename, filesize, temp_path, 
-            lambda path: detect_ai_media(path, trusted_metadata=sidecar_metadata)
+            lambda path: detect_ai_media(path, trusted_metadata=sidecar_metadata),
+            uid=device_id
         )
         
         duration = time.time() - start_time
-        gpu_used = result.get("layers", {}).get("layer2_forensics", {}).get("status") != "skipped"
+        
+        # Check explicit flags for Gemini and Cache usage
+        is_gemini_used = result.get("is_gemini_used", False)
+        is_cached = result.get("is_cached", False)
         
         # Use actual GPU time for cost calculation (not round-trip time)
         actual_gpu_time_ms = result.get("gpu_time_ms", 0.0)
         actual_gpu_sec = actual_gpu_time_ms / 1000.0
         
-        if gpu_used and actual_gpu_sec > 0:
+        if is_cached:
+            cost = 0.0
+            method = "cached_result"
+            gpu_sec, cpu_sec = 0, 0
+            logger.info(f"[COST] Cache hit: $0.00")
+            log_transaction("CACHE", 0.0, {"file": file.filename, "device_id": device_id})
+        elif is_gemini_used:
+            cost = GEMINI_FIXED_COST
+            method = "detect_with_gemini"
+            gpu_sec, cpu_sec = 0, duration
+            logger.info(f"[COST] Gemini analysis: ${cost:.6f}")
+            gemini_usage = result.get("usage", {})
+            log_transaction("GEMINI", -cost, {"file": file.filename, "device_id": device_id, "usage": gemini_usage})
+        elif actual_gpu_sec > 0:
             # Cost based on actual GPU utilization, not network round-trip
             cost = actual_gpu_sec * GPU_RATE_PER_SEC
             method = "detect_with_gpu"
             gpu_sec, cpu_sec = actual_gpu_sec, duration - actual_gpu_sec
             logger.info(f"[COST] GPU: {actual_gpu_sec:.3f}s (actual) vs {duration:.3f}s (round-trip) | Cost: ${cost:.6f}")
-        elif gpu_used:
-            # Fallback: worker didn't return timing, use round-trip (legacy)
-            cost = duration * GPU_RATE_PER_SEC
-            method = "detect_with_gpu"
-            gpu_sec, cpu_sec = duration, 0
+            log_transaction("GPU", -cost, {"file": file.filename, "device_id": device_id, "duration": actual_gpu_sec})
         else:
             cost = duration * CPU_RATE_PER_SEC
             method = "detect_metadata_only"
             gpu_sec, cpu_sec = 0, duration
-            
-        log_usage(file.filename, filesize, method, cost, gpu_seconds=gpu_sec, cpu_seconds=cpu_sec)
-        
-        # Remove internal field before returning response
+            log_transaction("CPU", -cost, {"file": file.filename, "device_id": device_id, "duration": duration})
+        # Remove internal fields before returning response
         result.pop("gpu_time_ms", None)
+        result.pop("is_gemini_used", None)
+        result.pop("is_cached", None)
+        
+        # Attach new balance
+        result["new_balance"] = new_balance
+
+        logger.info(f"[ROUTE] Final Response for {file.filename}: {json.dumps(result)}")
         return result
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
+
+# ---- Guest Balance Endpoint ----
+@app.get("/api/user/balance")
+async def get_balance(device_id: str = Header(..., alias="X-Device-ID")):
+    """
+    Get current credit balance for a guest device.
+    Auto-creates wallet with 10 credits if it doesn't exist.
+    """
+    wallet = get_guest_wallet(device_id)
+    return {"balance": wallet.get("credits", 0)}
+
+# ---- Recharge Webhook ----
+class RechargeRequest(BaseModel):
+    device_id: str
+    amount: int = 5
+    secret_key: str
+
+def perform_recharge(device_id: str, amount: int, secret_key: str):
+    # Security Check
+    if not RECHARGE_SECRET_KEY or secret_key != RECHARGE_SECRET_KEY:
+        logger.warning(f"⚠️ Invalid recharge attempt for {device_id}")
+        raise HTTPException(status_code=403, detail="Invalid secret key")
+
+    try:
+        doc_ref = db.collection('guest_wallets').document(device_id)
+
+        @firestore.transactional
+        def recharge_transaction(transaction, ref):
+            snapshot = ref.get(transaction=transaction)
+            if not snapshot.exists:
+                # If user doesn't exist yet, give them Welcome Bonus (10) + Reward (amount)
+                transaction.set(ref, {
+                    "credits": 10 + amount,
+                    "last_active": firestore.SERVER_TIMESTAMP,
+                    "is_banned": False
+                })
+                return 10 + amount
+            else:
+                current = snapshot.get("credits") or 0
+                transaction.update(ref, {
+                    "credits": current + amount,
+                    "last_active": firestore.SERVER_TIMESTAMP
+                })
+                return current + amount
+
+        transaction = db.transaction()
+        new_balance = recharge_transaction(transaction, doc_ref)
+        
+        logger.info(f"💰 Recharged {amount} credits for {device_id}. New balance: {new_balance}")
+        log_transaction("AD_REWARD", AD_REVENUE_PER_REWARD, {"device_id": device_id, "credits": amount})
+        return {"status": "success", "new_balance": new_balance}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"🔥 Recharge failed: {e}")
+        raise HTTPException(status_code=500, detail="Recharge failed")
+
+@app.post("/api/credits/add")
+async def add_credits_post(payload: RechargeRequest):
+    return perform_recharge(payload.device_id, payload.amount, payload.secret_key)
+
+@app.get("/api/credits/webhook")
+async def add_credits_get(
+    user_id: str = Query(..., alias="device_id"), # Supports ?user_id= or ?device_id=
+    amount: int = 5,
+    key: str = Query(..., alias="secret_key")
+):
+    return perform_recharge(user_id, amount, key)
 
 # ---- Watermark removal ----
 @app.post("/remove-watermark")
@@ -490,14 +397,14 @@ async def remove_watermark(request: Request, file: UploadFile = File(...)):
         
         if is_video:
             cost = duration * GPU_RATE_PER_SEC
-            log_usage(file.filename, filesize, "remove-watermark-video", cost, gpu_seconds=duration)
+            log_transaction("GPU", -cost, {"task": "remove_watermark", "file": file.filename})
             return {
                 "status": "success", "method": "runpod_gpu",
                 "cost_usd": round(cost, 5), "gpu_seconds": round(duration, 2), "result": result,
             }
         else:
             cost = duration * CPU_RATE_PER_SEC
-            log_usage(file.filename, filesize, "remove-watermark-image", cost, cpu_seconds=duration)
+            log_transaction("CPU", -cost, {"task": "remove_watermark", "file": file.filename})
             return {
                 "status": "success", "method": "local_cheap",
                 "cost_usd": round(cost, 5), "filename": file.filename,
@@ -510,3 +417,43 @@ async def remove_watermark(request: Request, file: UploadFile = File(...)):
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
+
+# ---- Lemon Squeezy Webhook ----
+LEMONSQUEEZY_WEBHOOK_SECRET = os.getenv("LEMONSQUEEZY_WEBHOOK_SECRET")
+
+@app.post("/webhooks/lemonsqueezy")
+async def lemonsqueezy_webhook(request: Request, x_signature: str = Header(None, alias="X-Signature")):
+    if not LEMONSQUEEZY_WEBHOOK_SECRET:
+        return {"status": "ignored", "reason": "No secret set"}
+
+    payload_bytes = await request.body()
+    
+    # Verify Signature
+    expected_signature = hmac.new(
+        LEMONSQUEEZY_WEBHOOK_SECRET.encode(),
+        payload_bytes,
+        hashlib.sha256
+    ).hexdigest()
+    
+    if not x_signature or not hmac.compare_digest(x_signature, expected_signature):
+        raise HTTPException(status_code=401, detail="Invalid signature")
+
+    payload = json.loads(payload_bytes)
+    event_name = payload.get("meta", {}).get("event_name")
+    
+    if event_name == "order_created":
+        data = payload.get("data", {})
+        attributes = data.get("attributes", {})
+        
+        # Financials
+        total_cents = attributes.get("total", 0)
+        total_usd = total_cents / 100.0
+        
+        # Metadata
+        custom_data = payload.get("meta", {}).get("custom_data", {})
+        user_id = custom_data.get("user_id", "unknown")
+        
+        log_transaction("LEMONSQUEEZY", total_usd, {"user_id": user_id, "order_id": data.get("id")})
+        logger.info(f"💰 [LEMONSQUEEZY] Processed order {data.get('id')}: ${total_usd}")
+        
+    return {"status": "ok"}

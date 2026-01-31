@@ -1,0 +1,26 @@
+# Virtual Environment
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Analysis results and logs
+scripts/
+results.jsonl
+dry_run_results.jsonl
+*.log
+gold_config_report.txt
+analysis_run.log
+stress_test.log
+
+# macOS
+.DS_Store
+
+# Tooling and Temporary Files
+agent-tools/
+.cursor/
+node_modules/
+
