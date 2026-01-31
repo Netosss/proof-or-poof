@@ -17,3 +17,6 @@ upstash-redis
 streamlit>=1.40.0
 altair>=5.0
 protobuf>=4.25.0
+torch
+simple-lama-inpainting
+pillow-heif

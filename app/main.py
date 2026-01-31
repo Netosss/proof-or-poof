@@ -36,6 +36,10 @@ from app.security import (
 )
 from fastapi import Depends
 from contextlib import asynccontextmanager
+from fastapi.responses import Response
+
+# Faux Lens Remover
+from app.remover import FauxLensRemover
 
 # Webhook authentication secret (set via environment variable)
 RUNPOD_WEBHOOK_SECRET = os.getenv("RUNPOD_WEBHOOK_SECRET", "")
@@ -65,6 +69,16 @@ async def lifespan(app: FastAPI):
     # Startup: start background cleanup
     cleanup_task = asyncio.create_task(periodic_cleanup())
     logger.info("[STARTUP] Background cleanup task started")
+
+    # Initialize FauxLensRemover
+    try:
+        app.state.remover = FauxLensRemover()
+        logger.info("[STARTUP] FauxLensRemover initialized")
+    except Exception as e:
+        logger.error(f"[STARTUP] Failed to initialize FauxLensRemover: {e}")
+        # We don't raise here so the app can still start, but inpaint endpoint will fail
+        app.state.remover = None
+
     yield
     # Shutdown: cancel cleanup task
     if cleanup_task:
@@ -367,56 +381,38 @@ async def add_credits_get(
 ):
     return perform_recharge(user_id, amount, key)
 
-# ---- Watermark removal ----
-@app.post("/remove-watermark")
-async def remove_watermark(request: Request, file: UploadFile = File(...)):
-    file_content = await file.read()
-    filesize = len(file_content)
-    suffix = os.path.splitext(file.filename)[1].lower()
-    content_type = file.content_type or ""
-    is_video = content_type.startswith("video/") or suffix in {".mp4", ".mov", ".avi"}
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
-        tmp_file.write(file_content)
-        temp_path = tmp_file.name
+# ---- Inpaint Endpoint (Sync/CPU Optimized) ----
+@app.post("/inpaint/image")
+def inpaint_image(
+    image: UploadFile = File(...), 
+    mask: UploadFile = File(...)
+):
+    """
+    Remove objects from an image using the LaMA model (CPU optimized).
+    This endpoint is synchronous (def) to leverage FastAPI's threadpool for blocking operations.
+    """
+    if not hasattr(app.state, "remover") or app.state.remover is None:
+        raise HTTPException(status_code=503, detail="Inpainting service unavailable")
 
     try:
-        start_time = time.time()
+        # 1. READ (Synchronously)
+        # Using .file.read() blocks the thread but is safe in a standard 'def' endpoint
+        image_bytes = image.file.read()
+        mask_bytes = mask.file.read()
         
-        async def removal_worker(path):
-            if is_video:
-                return await run_video_removal(path)
-            else:
-                return {"status": "success", "method": "local_cheap", "filename": file.filename}
-
-        result = await security_manager.secure_execute(
-            request, file.filename, filesize, temp_path, removal_worker
-        )
+        # 2. PROCESS
+        # The CPU-heavy task runs here in the threadpool without blocking the main event loop
+        result = app.state.remover.process_image(image_bytes, mask_bytes)
         
-        duration = time.time() - start_time
+        # 3. RETURN
+        return Response(content=result, media_type="image/png")
         
-        if is_video:
-            cost = duration * GPU_RATE_PER_SEC
-            log_transaction("GPU", -cost, {"task": "remove_watermark", "file": file.filename})
-            return {
-                "status": "success", "method": "runpod_gpu",
-                "cost_usd": round(cost, 5), "gpu_seconds": round(duration, 2), "result": result,
-            }
-        else:
-            cost = duration * CPU_RATE_PER_SEC
-            log_transaction("CPU", -cost, {"task": "remove_watermark", "file": file.filename})
-            return {
-                "status": "success", "method": "local_cheap",
-                "cost_usd": round(cost, 5), "filename": file.filename,
-            }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        # The wrapper might have already raised an HTTPException, but if not:
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        logger.error(f"Inpainting failed: {e}")
+        raise HTTPException(status_code=500, detail="Internal processing error")
+
 
 # ---- Lemon Squeezy Webhook ----
 LEMONSQUEEZY_WEBHOOK_SECRET = os.getenv("LEMONSQUEEZY_WEBHOOK_SECRET")
