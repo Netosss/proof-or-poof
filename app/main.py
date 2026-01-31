@@ -391,26 +391,43 @@ def inpaint_image(
     Remove objects from an image using the LaMA model (CPU optimized).
     This endpoint is synchronous (def) to leverage FastAPI's threadpool for blocking operations.
     """
+    request_id = str(uuid.uuid4())
+    logger.info(f"[INPAINT] Request {request_id} started. Image: {image.filename}")
+
     if not hasattr(app.state, "remover") or app.state.remover is None:
+        logger.error(f"[INPAINT] Service unavailable for request {request_id}")
         raise HTTPException(status_code=503, detail="Inpainting service unavailable")
 
     try:
+        start_time = time.time()
+        
         # 1. READ (Synchronously)
+        read_start = time.time()
         # Using .file.read() blocks the thread but is safe in a standard 'def' endpoint
         image_bytes = image.file.read()
         mask_bytes = mask.file.read()
+        read_duration = time.time() - read_start
+        
+        image_size_mb = len(image_bytes) / (1024 * 1024)
+        logger.info(f"[INPAINT] Request {request_id}: Files read in {read_duration:.3f}s. Image size: {image_size_mb:.2f}MB")
         
         # 2. PROCESS
+        process_start = time.time()
         # The CPU-heavy task runs here in the threadpool without blocking the main event loop
         result = app.state.remover.process_image(image_bytes, mask_bytes)
+        process_duration = time.time() - process_start
+        
+        total_duration = time.time() - start_time
+        logger.info(f"[INPAINT] Request {request_id} COMPLETED in {total_duration:.3f}s (Processing: {process_duration:.3f}s)")
         
         # 3. RETURN
         return Response(content=result, media_type="image/png")
         
     except ValueError as e:
+        logger.warning(f"[INPAINT] Request {request_id} Validation Error: {e}")
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"Inpainting failed: {e}")
+        logger.error(f"[INPAINT] Request {request_id} FAILED: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal processing error")
 
 
