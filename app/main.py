@@ -385,14 +385,26 @@ async def add_credits_get(
 @app.post("/inpaint/image")
 def inpaint_image(
     image: UploadFile = File(...), 
-    mask: UploadFile = File(...)
+    mask: UploadFile = File(...),
+    device_id: str = Header(..., alias="X-Device-ID")
 ):
     """
     Remove objects from an image using the LaMA model (CPU optimized).
     This endpoint is synchronous (def) to leverage FastAPI's threadpool for blocking operations.
     """
     request_id = str(uuid.uuid4())
-    logger.info(f"[INPAINT] Request {request_id} started. Image: {image.filename}")
+    logger.info(f"[INPAINT] Request {request_id} started. Image: {image.filename}, Device: {device_id}")
+
+    # 1. Security & Wallet Check
+    if check_ban_status(device_id):
+        raise HTTPException(status_code=403, detail="Device is banned")
+
+    # Deduct 2 Credits (Atomic) - Raises 402 if insufficient
+    try:
+        new_balance = deduct_guest_credits(device_id, cost=2)
+    except HTTPException as e:
+        logger.warning(f"[INPAINT] Request {request_id} Insufficient funds for {device_id}")
+        raise e
 
     if not hasattr(app.state, "remover") or app.state.remover is None:
         logger.error(f"[INPAINT] Service unavailable for request {request_id}")
@@ -421,7 +433,9 @@ def inpaint_image(
         logger.info(f"[INPAINT] Request {request_id} COMPLETED in {total_duration:.3f}s (Processing: {process_duration:.3f}s)")
         
         # 3. RETURN
-        return Response(content=result, media_type="image/png")
+        # Add X-User-Balance header
+        headers = {"X-User-Balance": str(new_balance)}
+        return Response(content=result, media_type="image/png", headers=headers)
         
     except ValueError as e:
         logger.warning(f"[INPAINT] Request {request_id} Validation Error: {e}")
