@@ -135,9 +135,11 @@ class FauxLensRemover:
         # The library handles the "whole image" context automatically.
         log_memory("Before Inference")
         logger.info(f"Starting inference on image size: {image.size} | Mode: {image.mode}")
+        logger.info(f"Mask Stats: Size={mask.size} | Mode={mask.mode} | Extrema={mask.getextrema()}")
         
         try:
             result = self.model(image, mask)
+            logger.info(f"Inference Success. Output Size: {result.size}")
         except Exception as e:
             log_memory("Inference Failed")
             logger.error(f"Inference failed with error: {e}")
