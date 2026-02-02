@@ -67,6 +67,12 @@ class FauxLensRemover:
         Loads the model into memory on startup (Warm Start).
         """
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        
+        # [THE FIX] Limit threads to stop the 90s hangs and fix inconsistency
+        if self.device == "cpu":
+            torch.set_num_threads(4)
+            logger.info("🔧 CPU Optimization: Limited PyTorch to 4 threads")
+
         logger.info(f"🚀 FauxLensRemover initializing on device: {self.device}")
         
         try:
