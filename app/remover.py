@@ -68,10 +68,15 @@ class FauxLensRemover:
         """
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
-        # [THE FIX] Limit threads to stop the 90s hangs and fix inconsistency
+        # [THE COMPLETE FIX]
         if self.device == "cpu":
+            # 1. Limit math threads to 4 (Sweet spot for 1280px)
             torch.set_num_threads(4)
-            logger.info("🔧 CPU Optimization: Limited PyTorch to 4 threads")
+            
+            # 2. Limit graph threads to 1 (Prevents the '48 threads' overhead)
+            torch.set_num_interop_threads(1) 
+            
+            logger.info("🔧 CPU Optimization: Applied 4/1 Thread Limit")
 
         logger.info(f"🚀 FauxLensRemover initializing on device: {self.device}")
         
