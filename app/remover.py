@@ -134,6 +134,11 @@ class FauxLensRemover:
         # --- STAGE 4: INFERENCE ---
         # The library handles the "whole image" context automatically.
         log_memory("Before Inference")
+        
+        # [NEW] SMOKING GUN LOGS
+        logger.info(f"🕵️ DIAGNOSTICS: PyTorch Threads: {torch.get_num_threads()} | Interop Threads: {torch.get_num_interop_threads()}")
+        logger.info(f"🕵️ DIAGNOSTICS: Flush Denormals Supported? {torch.backends.cpu.get_cpu_capability()}")
+
         logger.info(f"Starting inference on image size: {image.size} | Mode: {image.mode}")
         logger.info(f"Mask Stats: Size={mask.size} | Mode={mask.mode} | Extrema={mask.getextrema()}")
         
