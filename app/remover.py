@@ -6,8 +6,23 @@ import pillow_heif
 from PIL import Image, ImageOps
 from simple_lama_inpainting import SimpleLama
 
+import psutil
+
 # Configure logging
 logger = logging.getLogger(__name__)
+
+def log_memory(stage: str):
+    """Log current memory usage."""
+    process = psutil.Process(os.getpid())
+    mem_info = process.memory_info()
+    sys_mem = psutil.virtual_memory()
+    
+    logger.info(
+        f"[MEMORY] {stage} | "
+        f"PID: {os.getpid()} | "
+        f"Process RSS: {mem_info.rss / 1024 / 1024:.2f} MB | "
+        f"System Available: {sys_mem.available / 1024 / 1024:.2f} MB / {sys_mem.total / 1024 / 1024:.2f} MB"
+    )
 
 # 1. Register HEIC opener
 pillow_heif.register_heif_opener()
@@ -118,7 +133,17 @@ class FauxLensRemover:
 
         # --- STAGE 4: INFERENCE ---
         # The library handles the "whole image" context automatically.
-        result = self.model(image, mask)
+        log_memory("Before Inference")
+        logger.info(f"Starting inference on image size: {image.size} | Mode: {image.mode}")
+        
+        try:
+            result = self.model(image, mask)
+        except Exception as e:
+            log_memory("Inference Failed")
+            logger.error(f"Inference failed with error: {e}")
+            raise e
+            
+        log_memory("After Inference")
 
         # --- STAGE 5: OUTPUT ---
         output_buffer = io.BytesIO()
