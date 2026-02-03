@@ -36,5 +36,5 @@ COPY . .
 # Ensure the app package is recognized
 RUN touch app/__init__.py
 
-# ✅ Railway uses the PORT environment variable
-CMD sh -c "uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"
+# ✅ Updated Start Command: Opens 2 lanes (Workers) for traffic
+CMD sh -c "uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --workers 2"
