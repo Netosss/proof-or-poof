@@ -35,6 +35,7 @@ from app.security import (
     db
 )
 from fastapi import Depends
+from fastapi.concurrency import run_in_threadpool
 from contextlib import asynccontextmanager
 from fastapi.responses import Response
 
@@ -383,19 +384,25 @@ async def add_credits_get(
 
 # ---- Inpaint Endpoint (Sync/CPU Optimized) ----
 @app.post("/inpaint/image")
-def inpaint_image(
+async def inpaint_image(
     image: UploadFile = File(...), 
     mask: UploadFile = File(...),
-    device_id: str = Header(..., alias="X-Device-ID")
+    device_id: str = Header(..., alias="X-Device-ID"),
+    turnstile_token: str = Header(..., alias="X-Turnstile-Token")
 ):
     """
     Remove objects from an image using the LaMA model (CPU optimized).
-    This endpoint is synchronous (def) to leverage FastAPI's threadpool for blocking operations.
+    This endpoint is async to verify Turnstile, and offloads heavy work to threadpool.
     """
     request_id = str(uuid.uuid4())
     logger.info(f"[INPAINT] Request {request_id} started. Image: {image.filename}, Device: {device_id}")
 
     # 1. Security & Wallet Check
+    # Verify Turnstile (Async)
+    is_human = await verify_turnstile(turnstile_token)
+    if not is_human:
+        raise HTTPException(status_code=403, detail="Turnstile validation failed")
+
     if check_ban_status(device_id):
         raise HTTPException(status_code=403, detail="Device is banned")
 
@@ -413,20 +420,19 @@ def inpaint_image(
     try:
         start_time = time.time()
         
-        # 1. READ (Synchronously)
+        # 1. READ (Async friendly)
         read_start = time.time()
-        # Using .file.read() blocks the thread but is safe in a standard 'def' endpoint
-        image_bytes = image.file.read()
-        mask_bytes = mask.file.read()
+        image_bytes = await image.read()
+        mask_bytes = await mask.read()
         read_duration = time.time() - read_start
         
         image_size_mb = len(image_bytes) / (1024 * 1024)
         logger.info(f"[INPAINT] Request {request_id}: Files read in {read_duration:.3f}s. Image size: {image_size_mb:.2f}MB")
         
-        # 2. PROCESS
+        # 2. PROCESS (Offload CPU work to threadpool)
         process_start = time.time()
-        # The CPU-heavy task runs here in the threadpool without blocking the main event loop
-        result = app.state.remover.process_image(image_bytes, mask_bytes)
+        # Run CPU-heavy task in threadpool so we don't block the async event loop
+        result = await run_in_threadpool(app.state.remover.process_image, image_bytes, mask_bytes)
         process_duration = time.time() - process_start
         
         total_duration = time.time() - start_time
