@@ -406,12 +406,45 @@ async def inpaint_image(
     if check_ban_status(device_id):
         raise HTTPException(status_code=403, detail="Device is banned")
 
-    # Deduct 2 Credits (Atomic) - Raises 402 if insufficient
-    try:
-        new_balance = deduct_guest_credits(device_id, cost=2)
-    except HTTPException as e:
-        logger.warning(f"[INPAINT] Request {request_id} Insufficient funds for {device_id}")
-        raise e
+    # [NEW] Free Retry Logic (Hash-Based)
+    # Check if this exact image was just paid for.
+    is_free_retry = False
+    image_bytes = await image.read()
+    image.file.seek(0) # Reset file pointer for later use
+    
+    img_hash = hashlib.sha256(image_bytes).hexdigest()
+    # Cache key: paid_image:{device_id}:{img_hash}
+    cache_key = f"paid_image:{device_id}:{img_hash}"
+    
+    # We need to access redis directly. Using security_manager logic style.
+    # Ideally import redis_client from app.security
+    from app.security import redis_client
+
+    if redis_client:
+        if redis_client.get(cache_key):
+            is_free_retry = True
+            logger.info(f"[INPAINT] Free retry for {device_id} on image {img_hash[:8]}")
+            # Delete key to consume the free retry (One free retry per payment)
+            redis_client.delete(cache_key)
+    
+    new_balance = -1 # Placeholder
+
+    if not is_free_retry:
+        # Deduct 2 Credits (Atomic) - Raises 402 if insufficient
+        try:
+            new_balance = deduct_guest_credits(device_id, cost=2)
+            
+            # Set flag for next time
+            if redis_client:
+                # Expire in 10 minutes (plenty of time to retry)
+                redis_client.set(cache_key, "1", ex=600) 
+        except HTTPException as e:
+            logger.warning(f"[INPAINT] Request {request_id} Insufficient funds for {device_id}")
+            raise e
+    else:
+        # Just get current balance for header
+        wallet = get_guest_wallet(device_id)
+        new_balance = wallet.get("credits", 0)
 
     if not hasattr(app.state, "remover") or app.state.remover is None:
         logger.error(f"[INPAINT] Service unavailable for request {request_id}")
@@ -422,7 +455,7 @@ async def inpaint_image(
         
         # 1. READ (Async friendly)
         read_start = time.time()
-        image_bytes = await image.read()
+        # image_bytes already read above for hashing
         mask_bytes = await mask.read()
         read_duration = time.time() - read_start
         
