@@ -1257,8 +1257,14 @@ async def detect_ai_media_image_logic(
             }
     else:
         # --- STRIPPED-JPEG ADAPTIVE POLICY (Gemini Gateway) ---
-        if total_pixels >= 260_000 and is_stripped:
-            logger.info(f"[GEMINI] Triggering Gemini Pro Turbo for Large Stripped JPEG ({total_pixels/1_000_000:.2f}MP)")
+        # Trigger Gemini if:
+        # 1. Image is Stripped (no metadata) OR
+        # 2. Metadata shows "uncertain" AI signals (0.3 < tiered_score < 0.8) - Double Check
+        # AND Image is large enough (>= 50k pixels, approx 224x224)
+        should_use_gemini = total_pixels >= 50_000 and (is_stripped or (0.3 < tiered_score < 0.8))
+        
+        if should_use_gemini:
+            logger.info(f"[GEMINI] Triggering Gemini Pro Turbo (Pixels: {total_pixels}, Stripped: {is_stripped}, Score: {tiered_score:.2f})")
             
             gemini_res = analyze_image_pro_turbo(frame or file_path)
             logger.info(f"[GEMINI] Raw response: {json.dumps(gemini_res)}")
