@@ -5,7 +5,7 @@ import logging
 import pillow_heif
 from PIL import Image, ImageOps
 from simple_lama_inpainting import SimpleLama
-
+import gc  # Added for explicit garbage collection
 import psutil
 
 # Configure logging
@@ -94,13 +94,6 @@ class FauxLensRemover:
     def process_image(self, image_bytes: bytes, mask_bytes: bytes) -> bytes:
         """
         Process the image to remove the area defined by the mask.
-        
-        Args:
-            image_bytes: Raw bytes of the original image (JPG/PNG/HEIC).
-            mask_bytes: Raw bytes of the mask image (White = Remove).
-            
-        Returns:
-            bytes: The processed image in PNG format.
         """
         # --- STAGE 1: LOAD & FIX FORMATS ---
         try:
@@ -119,22 +112,33 @@ class FauxLensRemover:
         if mask.mode != "L": 
             mask = mask.convert("L")
 
-        # --- STAGE 2: SMART RESIZE (The "500k" Answer) ---
-        # Strategy: If image is HUGE (>2048px), shrink it to prevent crash/timeout.
-        # If it's small, keep it original quality.
+        # --- STAGE 2: SMART RESIZE & BUCKETING (The Memory Fix) ---
         MAX_SIZE = 2048 
+        BUCKET_STEP = 64  # Round dimensions to nearest 64px to prevent JIT cache explosion
+
+        w, h = image.size
+        scale = 1.0
+
+        if max(w, h) > MAX_SIZE:
+            scale = MAX_SIZE / max(w, h)
         
-        if max(image.size) > MAX_SIZE:
-            # Calculate new size maintaining aspect ratio
-            scale = MAX_SIZE / max(image.size)
-            new_size = (int(image.width * scale), int(image.height * scale))
-            
-            logger.info(f"Resizing huge image from {image.size} to {new_size}")
-            
+        # Calculate new dimensions with bucketing
+        # 1. Apply scale
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        
+        # 2. Snap to grid (Bucket Step)
+        # We ensure at least one bucket step size (never 0)
+        new_w = max(BUCKET_STEP, (new_w // BUCKET_STEP) * BUCKET_STEP)
+        new_h = max(BUCKET_STEP, (new_h // BUCKET_STEP) * BUCKET_STEP)
+        
+        # Only resize if dimensions actually changed
+        if (new_w, new_h) != (w, h):
+            logger.info(f"Resizing image from {(w, h)} to bucketed size {(new_w, new_h)}")
             # High-quality downscale (LANCZOS)
-            image = image.resize(new_size, Image.Resampling.LANCZOS)
+            image = image.resize((new_w, new_h), Image.Resampling.LANCZOS)
             # Mask must match exactly!
-            mask = mask.resize(new_size, Image.Resampling.NEAREST)
+            mask = mask.resize((new_w, new_h), Image.Resampling.NEAREST)
 
         # --- STAGE 3: SAFETY CHECK ---
         # Edge Case: User uploads a mask that doesn't match the image size
@@ -143,18 +147,15 @@ class FauxLensRemover:
              mask = mask.resize(image.size, Image.Resampling.NEAREST)
 
         # --- STAGE 4: INFERENCE ---
-        # The library handles the "whole image" context automatically.
         log_memory("Before Inference")
         
-        # [NEW] SMOKING GUN LOGS
-        logger.info(f"🕵️ DIAGNOSTICS: PyTorch Threads: {torch.get_num_threads()} | Interop Threads: {torch.get_num_interop_threads()}")
-        logger.info(f"🕵️ DIAGNOSTICS: Flush Denormals Supported? {torch.backends.cpu.get_cpu_capability()}")
-
         logger.info(f"Starting inference on image size: {image.size} | Mode: {image.mode}")
-        logger.info(f"Mask Stats: Size={mask.size} | Mode={mask.mode} | Extrema={mask.getextrema()}")
         
         try:
-            result = self.model(image, mask)
+            # [FIX] Wrap in torch.no_grad() to prevent graph storage leak
+            with torch.no_grad():
+                result = self.model(image, mask)
+            
             logger.info(f"Inference Success. Output Size: {result.size}")
         except Exception as e:
             log_memory("Inference Failed")
@@ -168,5 +169,12 @@ class FauxLensRemover:
         # Save as PNG (Lossless) so we don't add JPEG artifacts to the fixed area
         result.save(output_buffer, format="PNG")
         output_buffer.seek(0)
+        
+        # --- STAGE 6: CLEANUP (The Memory Fix) ---
+        # Explicitly delete large objects and force garbage collection
+        del image
+        del mask
+        del result
+        gc.collect()
         
         return output_buffer.getvalue()

@@ -14,6 +14,7 @@ from firebase_admin import firestore
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 from pydantic import BaseModel
+import psutil
 
 # Load environment variables at the very beginning
 load_dotenv()
@@ -50,6 +51,19 @@ RECHARGE_SECRET_KEY = os.getenv("RECHARGE_SECRET_KEY", "")
 
 # Background cleanup task
 cleanup_task = None
+
+def log_memory(stage: str):
+    """Log current memory usage."""
+    process = psutil.Process(os.getpid())
+    mem_info = process.memory_info()
+    sys_mem = psutil.virtual_memory()
+    
+    logger.info(
+        f"[MEMORY] {stage} | "
+        f"PID: {os.getpid()} | "
+        f"Process RSS: {mem_info.rss / 1024 / 1024:.2f} MB | "
+        f"System Available: {sys_mem.available / 1024 / 1024:.2f} MB / {sys_mem.total / 1024 / 1024:.2f} MB"
+    )
 
 async def periodic_cleanup():
     """Background task to clean up stale pending jobs every 30 seconds."""
@@ -249,6 +263,8 @@ async def detect(
     filesize = len(file_content)
     suffix = os.path.splitext(file.filename)[1].lower()
 
+    log_memory(f"Pre-Detect: {file.filename}")
+
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
         tmp_file.write(file_content)
         temp_path = tmp_file.name
@@ -265,6 +281,8 @@ async def detect(
         )
         
         duration = time.time() - start_time
+        
+        log_memory(f"Post-Detect: {file.filename}")
         
         # Check explicit flags for Gemini and Cache usage
         is_gemini_used = result.get("is_gemini_used", False)
@@ -459,6 +477,8 @@ async def inpaint_image(
         mask_bytes = await mask.read()
         read_duration = time.time() - read_start
         
+        log_memory(f"Pre-Inpaint: {image.filename}")
+        
         image_size_mb = len(image_bytes) / (1024 * 1024)
         logger.info(f"[INPAINT] Request {request_id}: Files read in {read_duration:.3f}s. Image size: {image_size_mb:.2f}MB")
         
@@ -470,6 +490,8 @@ async def inpaint_image(
         
         total_duration = time.time() - start_time
         logger.info(f"[INPAINT] Request {request_id} COMPLETED in {total_duration:.3f}s (Processing: {process_duration:.3f}s)")
+        
+        log_memory(f"Post-Inpaint: {image.filename}")
         
         # 3. RETURN
         # Add X-User-Balance header

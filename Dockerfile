@@ -4,14 +4,19 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 
+# [FIX] Use jemalloc to reduce memory fragmentation
+ENV LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
+
 WORKDIR /app
 
-# Install system dependencies (OpenCV + FFprobe for video metadata)
+# Install system dependencies
+# [FIX] Added libjemalloc2 for memory optimization
 RUN apt-get update && apt-get install -y \
     libgl1 \
     libglib2.0-0 \
     curl \
     ffmpeg \
+    libjemalloc2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install
@@ -36,5 +41,5 @@ COPY . .
 # Ensure the app package is recognized
 RUN touch app/__init__.py
 
-# ✅ Updated Start Command: Opens 2 lanes (Workers) for traffic
-CMD sh -c "uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --workers 2"
+# [FIX] Changed to workers 1 to prevent double-loading the AI model into RAM
+CMD sh -c "uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --workers 1"
