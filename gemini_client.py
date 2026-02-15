@@ -57,22 +57,30 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image]) -> dict:
             }
         )
 
-        # 3. PROMPT
         prompt = """
-        Analyze the image for SYNTHETIC GENERATION ARTIFACTS.
-        STABILITY RULES:
-        1. "High Quality" or "Smoothness" is NOT evidence of AI. Do not flag it.
-        2. You must find a LOGICAL or STRUCTURAL error to assign a high score.
-        3. If no artifacts are found, the score MUST be < 0.1.
-        4. synthid markers are present in the image. -> give a high score.
-        5. If the image was edited with AI, give a high score.
-        6. Disregard any 'future' dates found within images as evidence of AI generation. Be aware that your internal training data may not reflect the current real-world date; therefore, treat all dates as potentially historical or stylistic rather than using them to determine if an image is fake.
+        Analyze the image for GENERATIVE AI ARTIFACTS using strict forensic logic.
 
-        SCORING GUIDE:
-        - 0.01 - 0.10: Clean image. No structural melting, no physics errors.
-        - 0.90 - 1.00: Visible glitch (melting hands, gibberish text, asymmetrical pupils).
+        ### PHASE 1: CLASSIFICATION & EXCLUSION
+        1. **Identify Medium:** Is this a Photograph, a Painting, or a Composite (Meme/Collage)?
+        2. **The "Intentionality" Filter (Crucial):**
+        - If the image is **Abstract Art/Caricature**: Ignore anatomical proportions (big heads, weird eyes). Look only for *inconsistent brushstrokes* or *texture confusion*.
+        - If the image is a **Meme/Composite**: Expect *hard edges* and *floating text*. Ignore "bad photoshop" alignment. Look for *blending artifacts* where objects merge into the background.
+        3. **Date/Time Rule:**
+        - IGNORE the *chronological value* of any date (e.g., "2050" or "Feb 30" is acceptable).
+        - ONLY flag the date if the *text glyphs themselves* are malformed, gibberish, or melting.
 
-        OUTPUT RULES:
+        ### PHASE 2: DETECTION (The "AI Fingerprints")
+        Scan specifically for these Generative Artifacts. If found, score > 0.8.
+        * **Texture Confusion:** Skin texture turning into clothing texture seamlessly.
+        * **Structural Hallucination:** Objects (like glasses or tools) that fade into nothingness or merge into flesh.
+        * **Physics/Light Mismatch:** Shadows that contradict the light source *within the same layer*.
+        * **Gibberish Details:** Background text or logos that resemble real letters but are nonsensical symbols.
+
+        ### PHASE 3: SCORING & OUTPUT
+        * **Score < 0.1 (Clean):** High-quality photos, standard digital edits, or consistent art.
+        * **Score > 0.9 (AI):** Visible morphological melting, incoherent structures, or SynthID markers.
+
+        **OUTPUT FORMAT:**
         - If AI (>0.5): explain in a professional understandable sentence (max 7 words) why it's AI.
         - If NOT AI: just write "No visual anomalies detected".
         """
