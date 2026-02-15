@@ -66,6 +66,7 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image]) -> dict:
         3. If no artifacts are found, the score MUST be < 0.1.
         4. synthid markers are present in the image. -> give a high score.
         5. If the image was edited with AI, give a high score.
+        6. Disregard any 'future' dates found within images as evidence of AI generation. Be aware that your internal training data may not reflect the current real-world date; therefore, treat all dates as potentially historical or stylistic rather than using them to determine if an image is fake.
 
         SCORING GUIDE:
         - 0.01 - 0.10: Clean image. No structural melting, no physics errors.
