@@ -56,7 +56,7 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image]) -> dict:
                 "required": ["confidence", "explanation"]
             }
         )
-        
+
         prompt = """
         ### TASK: FORENSIC AI DETECTION
         Analyze the image for generative artifacts using STYLE-ADAPTIVE LOGIC.
@@ -83,7 +83,7 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image]) -> dict:
         - If the image contains **Overlay Text** (impact font, speech bubbles): This creates "hard edges" that look like edits. **IGNORE** these edges. They are human edits, not AI artifacts.
         - **DATE RULE:** Ignore the *content* of dates/timestamps. Only flag them if the *letters themselves* are malformed/melting.
 
-        ### OUTPUT DECISION
+        ### OUTPUT DECISION - up to 10 words max.
         - **Score < 0.1:** No anomalies found in the relevant logic mode.
         - **Score > 0.9:** Clear artifact found (e.g., "Pattern meltdown in anime background" or "Hand merging in photo").
         """
