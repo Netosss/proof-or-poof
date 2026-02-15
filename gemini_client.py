@@ -56,33 +56,36 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image]) -> dict:
                 "required": ["confidence", "explanation"]
             }
         )
-
+        
         prompt = """
-        Analyze the image for GENERATIVE AI ARTIFACTS using strict forensic logic.
+        ### TASK: FORENSIC AI DETECTION
+        Analyze the image for generative artifacts using STYLE-ADAPTIVE LOGIC.
 
-        ### PHASE 1: CLASSIFICATION & EXCLUSION
-        1. **Identify Medium:** Is this a Photograph, a Painting, or a Composite (Meme/Collage)?
-        2. **The "Intentionality" Filter (Crucial):**
-        - If the image is **Abstract Art/Caricature**: Ignore anatomical proportions (big heads, weird eyes). Look only for *inconsistent brushstrokes* or *texture confusion*.
-        - If the image is a **Meme/Composite**: Expect *hard edges* and *floating text*. Ignore "bad photoshop" alignment. Look for *blending artifacts* where objects merge into the background.
-        3. **Date/Time Rule:**
-        - IGNORE the *chronological value* of any date (e.g., "2050" or "Feb 30" is acceptable).
-        - ONLY flag the date if the *text glyphs themselves* are malformed, gibberish, or melting.
+        ### PHASE 1: CLASSIFY STYLE
+        First, categorize the image into one of two modes:
+        A. **PHOTOREALISTIC** (Camera shot, real person, landscape).
+        B. **STYLISTIC** (Painting, Anime, Sketch, 3D Render, Meme, Vector Art).
 
-        ### PHASE 2: DETECTION (The "AI Fingerprints")
-        Scan specifically for these Generative Artifacts. If found, score > 0.8.
-        * **Texture Confusion:** Skin texture turning into clothing texture seamlessly.
-        * **Structural Hallucination:** Objects (like glasses or tools) that fade into nothingness or merge into flesh.
-        * **Physics/Light Mismatch:** Shadows that contradict the light source *within the same layer*.
-        * **Gibberish Details:** Background text or logos that resemble real letters but are nonsensical symbols.
+        ### PHASE 2: APPLY SPECIFIC DETECTION RULES
+        **If Mode A (Photorealistic) -> Use "PHYSICS & ANATOMY" Logic:**
+        - **Look for:** Melting skin texture, merging limbs, pupils that aren't round, light coming from two different directions.
+        - **Strictness:** High. Any anatomical failure is a red flag.
 
-        ### PHASE 3: SCORING & OUTPUT
-        * **Score < 0.1 (Clean):** High-quality photos, standard digital edits, or consistent art.
-        * **Score > 0.9 (AI):** Visible morphological melting, incoherent structures, or SynthID markers.
+        **If Mode B (Stylistic) -> Use "COHERENCE & PATTERN" Logic:**
+        - **IGNORE:** Anatomy (big eyes are normal), physics (floating islands are normal), and "brushstroke" messiness.
+        - **LOOK FOR (The "AI Art" Glitches):**
+        1. **Pattern Meltdowns:** Detailed patterns (like lace, scales, or background crowds) that start structured but turn into random scribbles/noise.
+        2. **Inconsistent Detailing:** One eye is highly detailed with lashes, the other is a blurred smudge.
+        3. **Object Ontology:** Objects that morph into other things (e.g., a sword handle that turns into a cape).
+        4. **Text/Glyphs:** Any background text that looks like alien hieroglyphs or gibberish.
+        
+        ### PHASE 3: THE "MEME SAVER"
+        - If the image contains **Overlay Text** (impact font, speech bubbles): This creates "hard edges" that look like edits. **IGNORE** these edges. They are human edits, not AI artifacts.
+        - **DATE RULE:** Ignore the *content* of dates/timestamps. Only flag them if the *letters themselves* are malformed/melting.
 
-        **OUTPUT FORMAT:**
-        - If AI (>0.5): explain in a professional understandable sentence (max 7 words) why it's AI.
-        - If NOT AI: just write "No visual anomalies detected".
+        ### OUTPUT DECISION
+        - **Score < 0.1:** No anomalies found in the relevant logic mode.
+        - **Score > 0.9:** Clear artifact found (e.g., "Pattern meltdown in anime background" or "Hand merging in photo").
         """
 
         response = client.models.generate_content(
