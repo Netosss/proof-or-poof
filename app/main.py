@@ -5,8 +5,9 @@ import time
 import uuid
 import hashlib
 import json
-from typing import Optional
+from typing import Optional, Union
 import hmac
+import aiohttp
 from app.finance_logger import log_transaction
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header, Query
@@ -215,24 +216,57 @@ async def runpod_webhook(request: Request):
         logger.error(f"[WEBHOOK] Error processing callback: {e}")
         return {"status": "error", "message": str(e)}
 
+
+async def download_image(url: str, max_size: int = 50 * 1024 * 1024) -> tuple[bytes, str]:
+    """Helper to download image from URL."""
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url) as response:
+                if response.status != 200:
+                    raise HTTPException(status_code=400, detail=f"Failed to fetch image from URL: Status {response.status}")
+                
+                content = await response.read()
+                if len(content) > max_size:
+                    raise HTTPException(status_code=400, detail="Image too large (max 50MB)")
+                
+                # Determine filename/extension
+                content_type = response.headers.get("Content-Type", "")
+                suffix = ".jpg" # Default
+                if "png" in content_type: suffix = ".png"
+                elif "jpeg" in content_type or "jpg" in content_type: suffix = ".jpg"
+                elif "webp" in content_type: suffix = ".webp"
+                elif "heic" in content_type: suffix = ".heic"
+                elif "mp4" in content_type: suffix = ".mp4"
+                elif "quicktime" in content_type or "mov" in content_type: suffix = ".mov"
+                
+                # Try to guess from url if content-type is generic
+                if not content_type or "application" in content_type or "octet-stream" in content_type:
+                    lower_url = url.lower()
+                    if lower_url.endswith(".png"): suffix = ".png"
+                    elif lower_url.endswith(".webp"): suffix = ".webp"
+                    elif lower_url.endswith(".mp4"): suffix = ".mp4"
+                    elif lower_url.endswith(".mov"): suffix = ".mov"
+                
+                return content, f"downloaded_media{suffix}"
+        except aiohttp.ClientError as e:
+            raise HTTPException(status_code=400, detail=f"Error fetching image: {str(e)}")
+
 # ---- Detect endpoint ----
 @app.post("/detect", response_model=DetectionResponse)
 async def detect(
     request: Request, 
-    file: UploadFile = File(...),
-    trusted_metadata: Optional[str] = Form(None),
     device_id: str = Header(..., alias="X-Device-ID"),
     turnstile_token: str = Header(..., alias="X-Turnstile-Token")
 ):
     """
     Detect AI-generated content in images/videos.
-    Guest Wallet Flow: Validates Turnstile, checks bans, and deducts credits from device wallet.
     
-    Args:
-        file: The media file to analyze (image or video)
-        trusted_metadata: Optional JSON string with device-extracted EXIF data.
-        device_id: The Guest Device ID (FingerprintJS)
-        turnstile_token: Cloudflare Turnstile token
+    Accepts:
+    1. Multipart/form-data with 'file' field (and optional 'trusted_metadata')
+    2. Multipart/form-data with 'url' field (and optional 'trusted_metadata')
+    3. JSON payload: { "url": "https://..." }
+    
+    Guest Wallet Flow: Validates Turnstile, checks bans, and deducts credits from device wallet.
     """
     
     # 1. Security & Wallet Check
@@ -248,22 +282,70 @@ async def detect(
     # Deduct Credits (Atomic) - Raises 402 if insufficient
     new_balance = deduct_guest_credits(device_id, cost=5)
 
-    # Parse trusted metadata sidecar if provided
+    # 2. Extract Content (File or URL)
+    file_content = None
+    filename = "unknown"
     sidecar_metadata = None
-    if trusted_metadata:
-        try:
-            sidecar_metadata = json.loads(trusted_metadata)
-            logger.info(f"[SIDECAR] Device {device_id} provided trusted metadata: {list(sidecar_metadata.keys())}")
-        except json.JSONDecodeError as e:
-            logger.warning(f"[SIDECAR] Invalid JSON in trusted_metadata from {device_id}: {e}")
     
+    content_type = request.headers.get("content-type", "")
+    
+    if "application/json" in content_type:
+        try:
+            payload = await request.json()
+            url = payload.get("url")
+            if not url:
+                raise HTTPException(status_code=400, detail="Missing 'url' in JSON body")
+            file_content, filename = await download_image(url)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+            
+    elif "multipart/form-data" in content_type:
+        form = await request.form()
+        file_obj = form.get("file")
+        url_obj = form.get("url")
+        trusted_metadata_obj = form.get("trusted_metadata")
+        
+        # Parse trusted metadata sidecar if provided
+        if trusted_metadata_obj and isinstance(trusted_metadata_obj, str):
+            try:
+                sidecar_metadata = json.loads(trusted_metadata_obj)
+                logger.info(f"[SIDECAR] Device {device_id} provided trusted metadata: {list(sidecar_metadata.keys())}")
+            except json.JSONDecodeError as e:
+                logger.warning(f"[SIDECAR] Invalid JSON in trusted_metadata from {device_id}: {e}")
+        
+        if file_obj:
+            # Handle standard file upload
+            if not isinstance(file_obj, UploadFile):
+                 # Should theoretically not happen with correct multipart parsing, but safety check
+                 if isinstance(file_obj, str): # Could happen if client sends string in file field?
+                     raise HTTPException(status_code=400, detail="Invalid file upload format")
+            
+            # Use Starlette's UploadFile methods
+            file_content = await file_obj.read()
+            filename = file_obj.filename or "uploaded_file"
+            
+        elif url_obj:
+             if isinstance(url_obj, str):
+                file_content, filename = await download_image(url_obj)
+             else:
+                raise HTTPException(status_code=400, detail="Invalid url field")
+        else:
+            raise HTTPException(status_code=400, detail="Must provide 'file' or 'url' in form data")
+            
+    else:
+        raise HTTPException(status_code=415, detail="Unsupported Media Type. Use multipart/form-data or application/json")
+
+    # 3. Process Content
     # Use Secure Wrapper for primary security checks
     # (Rate limiting + Type/Size validation + Content Deep Check)
-    file_content = await file.read()
     filesize = len(file_content)
-    suffix = os.path.splitext(file.filename)[1].lower()
+    suffix = os.path.splitext(filename)[1].lower()
+    
+    if not suffix:
+        # Fallback if no suffix found
+        suffix = ".jpg"
 
-    log_memory(f"Pre-Detect: {file.filename}")
+    log_memory(f"Pre-Detect: {filename}")
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
         tmp_file.write(file_content)
@@ -275,14 +357,14 @@ async def detect(
         # The wrapper handles security logic; we pass detect_ai_media as the worker function
         # Pass device_id for rate limiting
         result = await security_manager.secure_execute(
-            request, file.filename, filesize, temp_path, 
+            request, filename, filesize, temp_path, 
             lambda path: detect_ai_media(path, trusted_metadata=sidecar_metadata),
             uid=device_id
         )
         
         duration = time.time() - start_time
         
-        log_memory(f"Post-Detect: {file.filename}")
+        log_memory(f"Post-Detect: {filename}")
         
         # Check explicit flags for Gemini and Cache usage
         is_gemini_used = result.get("is_gemini_used", False)
@@ -297,26 +379,26 @@ async def detect(
             method = "cached_result"
             gpu_sec, cpu_sec = 0, 0
             logger.info(f"[COST] Cache hit: $0.00")
-            log_transaction("CACHE", 0.0, {"file": file.filename, "device_id": device_id})
+            log_transaction("CACHE", 0.0, {"file": filename, "device_id": device_id})
         elif is_gemini_used:
             cost = GEMINI_FIXED_COST
             method = "detect_with_gemini"
             gpu_sec, cpu_sec = 0, duration
             logger.info(f"[COST] Gemini analysis: ${cost:.6f}")
             gemini_usage = result.get("usage", {})
-            log_transaction("GEMINI", -cost, {"file": file.filename, "device_id": device_id, "usage": gemini_usage})
+            log_transaction("GEMINI", -cost, {"file": filename, "device_id": device_id, "usage": gemini_usage})
         elif actual_gpu_sec > 0:
             # Cost based on actual GPU utilization, not network round-trip
             cost = actual_gpu_sec * GPU_RATE_PER_SEC
             method = "detect_with_gpu"
             gpu_sec, cpu_sec = actual_gpu_sec, duration - actual_gpu_sec
             logger.info(f"[COST] GPU: {actual_gpu_sec:.3f}s (actual) vs {duration:.3f}s (round-trip) | Cost: ${cost:.6f}")
-            log_transaction("GPU", -cost, {"file": file.filename, "device_id": device_id, "duration": actual_gpu_sec})
+            log_transaction("GPU", -cost, {"file": filename, "device_id": device_id, "duration": actual_gpu_sec})
         else:
             cost = duration * CPU_RATE_PER_SEC
             method = "detect_metadata_only"
             gpu_sec, cpu_sec = 0, duration
-            log_transaction("CPU", -cost, {"file": file.filename, "device_id": device_id, "duration": duration})
+            log_transaction("CPU", -cost, {"file": filename, "device_id": device_id, "duration": duration})
         # Remove internal fields before returning response
         result.pop("gpu_time_ms", None)
         result.pop("is_gemini_used", None)
@@ -325,7 +407,7 @@ async def detect(
         # Attach new balance
         result["new_balance"] = new_balance
 
-        logger.info(f"[ROUTE] Final Response for {file.filename}: {json.dumps(result)}")
+        logger.info(f"[ROUTE] Final Response for {filename}: {json.dumps(result)}")
         return result
     finally:
         if os.path.exists(temp_path):
