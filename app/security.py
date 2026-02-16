@@ -241,7 +241,7 @@ class SecurityManager:
         ext = os.path.splitext(filename)[1].lower()
         
         # 1. Size & Extension Check
-        if ext in ['.jpg', '.jpeg', '.png', '.webp']:
+        if ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']:
             if filesize > self.MAX_IMAGE_SIZE:
                 raise HTTPException(status_code=413, detail=f"Image too large. Max {self.MAX_IMAGE_SIZE//1024//1024}MB allowed.")
         elif ext in ['.mp4', '.mov', '.avi', '.mkv', '.webm']:
@@ -253,7 +253,7 @@ class SecurityManager:
         # 2. Deep Content Validation (Magic Bytes)
         if file_path:
             try:
-                if ext in ['.jpg', '.jpeg', '.png', '.webp']:
+                if ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']:
                     with Image.open(file_path) as img:
                         img.verify() # Verify structure
                         # Re-open to check format consistency
@@ -261,7 +261,7 @@ class SecurityManager:
                             actual_format = img2.format.lower()
                             if actual_format == 'jpeg': actual_format = 'jpg'
                             # Relaxed check: as long as it's a valid image format we support
-                            if actual_format not in ['jpg', 'jpeg', 'png', 'webp']:
+                            if actual_format not in ['jpg', 'jpeg', 'png', 'webp', 'gif']:
                                 raise Exception(f"Format mismatch: {actual_format}")
                 else:
                     # Video validation: Try to read first frame

@@ -235,6 +235,7 @@ async def download_image(url: str, max_size: int = 50 * 1024 * 1024) -> tuple[by
                 if "png" in content_type: suffix = ".png"
                 elif "jpeg" in content_type or "jpg" in content_type: suffix = ".jpg"
                 elif "webp" in content_type: suffix = ".webp"
+                elif "gif" in content_type: suffix = ".gif"
                 elif "heic" in content_type: suffix = ".heic"
                 elif "mp4" in content_type: suffix = ".mp4"
                 elif "quicktime" in content_type or "mov" in content_type: suffix = ".mov"
@@ -244,6 +245,7 @@ async def download_image(url: str, max_size: int = 50 * 1024 * 1024) -> tuple[by
                     lower_url = url.lower()
                     if lower_url.endswith(".png"): suffix = ".png"
                     elif lower_url.endswith(".webp"): suffix = ".webp"
+                    elif lower_url.endswith(".gif"): suffix = ".gif"
                     elif lower_url.endswith(".mp4"): suffix = ".mp4"
                     elif lower_url.endswith(".mov"): suffix = ".mov"
                 

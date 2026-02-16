@@ -899,7 +899,7 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
             ]
         }
 
-    is_video = file_path.lower().endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm'))
+    is_video = file_path.lower().endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm', '.gif'))
     
     if is_video:
         safe_path = security_manager.sanitize_log_message(file_path)
