@@ -58,44 +58,27 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image]) -> dict:
         )
 
         prompt = """
-        ### TASK: FORENSIC AI IMAGE AUDIT
-        You are a skeptical Forensic Image Analyst. Your goal is to detect *high-fidelity* synthetic generation (Midjourney v6, DALL-E 3, Flux) while avoiding false positives on simple memes.
+You are an expert AI Detection System. Analyze the image for synthetic generation.
 
-        ### PHASE 1: TECHNICAL & META SCAN (Priority - "Shoot to Kill")
-        1. **SynthID/Watermarks:** Scan corners and edges for digital watermarks (e.g., Google SynthID, DALL-E color squares, "Made with AI" metadata).
-        -> **IF FOUND:** Score = 1.0. STOP. Output: "Positive Match: [Name of Marker] detected."
+### CORE INSTRUCTIONS (Trust Your Intuition, But Follow These Rules):
+1.  **CONTEXT MATTERS:**
+    * **Art/Memes:** Be lenient. Do NOT flag stylized anatomy or "bad photoshop" edges as AI.
+    * **Photos:** Be strict. Look for "plastic/waxy" skin, merging objects, and dream-like physics, and any physical errors (in any object in the image).
 
-        ### PHASE 2: CONTEXTUAL CLASSIFICATION
-        Determine the image category to apply the correct forensic standard.
+2.  **THE "TEXT" TRAP:**
+    * If you see text (any language), **READ IT**. If the letters form **gibberish/non-words** (e.g., "הצסיהת") or the sentence is incorrect logically, it is AI. 
+    * **Ignore Dates:** The year is irrelevant. Do not use "future dates" as a signal.
 
-        **CATEGORY A: PHOTOREALISTIC (Real Life Context)**
-        *Trigger:* Image appears to be a camera photo of real people, events, or places.
-        * **PRIMARY SCANS (The "New" AI Tells):**
-            * **The "AI Glaze":** Look for hyper-smooth, "waxy" skin textures that lack natural pores, imperfections, or subsurface scattering. If everyone looks like they have professional makeup or plastic skin, FLAG IT.
-            * **Background Hallucinations:** Focus *away* from the main subject. Are background faces blurred into nondescript blobs? Do background objects (chairs, fences) fade into nothingness or merge?
-            * **Lighting Physics:** Check shadows. Does the shadow direction match the light source? Are there "impossible" lights reflecting in eyes?
-            * **Material Confusion:** Look at hairlines and clothing. Does hair "melt" into the skin? Does the texture of a shirt merge with the neck?
-
-        **CATEGORY B: ILLUSTRATIVE / ARTISTIC**
-        *Trigger:* Painting, Anime, 3D Render, Vector Art.
-        * **SCAN FOR:**
-            * **Pattern Meltdown:** Complex patterns (lace, crowds, rain) that turn into random noise/scribbles.
-            * **Incoherent Blending:** Distinct objects merging (e.g., a sword handle melting into a hand).
-        * **IGNORE:** Physics, anatomy, and "weird" styles. These are artistic choices.
-
-        ### PHASE 3: FALSE POSITIVE SAFETY NET (Do Not Flag)
-        1. **The "Meme" Rule:** IGNORE "floating text," "white caption bars," or "hard-cut" collages (e.g., a face pasted on a body). These are HUMAN edits. Only analyze the *content* of the face/body itself.
-        2. **The "Date" Rule:** IGNORE the *chronological value* of dates (e.g., "2050" is fine). ONLY flag if the text glyphs are malformed/melting.
-
-        ### SCORING & OUTPUT
-        * **Score > 0.85 (AI Detected):** High confidence of generative origin based on texture, physics, or metadata.
-        * **Score < 0.15 (Clean):** Natural camera noise, consistent physics, human logic.
-
-        **FINAL OUTPUT FORMAT (Strict):**
-        - **If AI (>0.5):** [Explain in max 7 words, e.g., "Plastic skin texture and background melt"]
-        - **If NOT AI:** "No visual anomalies detected"
-        """
-
+3.  **THE "WATERMARK" CHECK:**
+    * Scan corners for **SynthID**, **DALL-E color strips**, or **"CR"** icons. If found -> AUTOMATIC AI.
+### OUTPUT DECISION (Strict Format):
+* **If AI (>0.5):**
+    * **Reason:** [Max 7 words, e.g., "Menu text contains gibberish words", "Background hand merges into chips"].
+    * **Confidence Score:** [0.6 - 1.0]
+* **If NOT AI:**
+    * **Reason:** "No visual anomalies detected."
+    * **Confidence Score:** [0.0 - 0.4]
+"""
         response = client.models.generate_content(
             model="gemini-3-flash-preview",
             contents=[
