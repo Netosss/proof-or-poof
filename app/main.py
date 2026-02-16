@@ -404,7 +404,7 @@ async def detect(
         # Remove internal fields before returning response
         result.pop("gpu_time_ms", None)
         result.pop("is_gemini_used", None)
-        result.pop("is_cached", None)
+        result.pop("is_cached", None) 
         
         # Attach new balance
         result["new_balance"] = new_balance

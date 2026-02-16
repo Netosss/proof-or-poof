@@ -14,7 +14,8 @@ from typing import Optional, Union
 from app.c2pa_reader import get_c2pa_manifest
 from app.runpod_client import run_deep_forensics
 from gemini_client import analyze_image_pro_turbo, analyze_batch_images_pro_turbo
-from app.security import security_manager
+from app.security import security_manager, redis_client
+import hashlib
 
 logger = logging.getLogger(__name__)
 
@@ -45,26 +46,103 @@ TIER_2_TECH_TERMS = [
 # TIER 3: THE "RISK TAKER" GENERAL SEARCH (Low Precision)
 TIER_3_REGEX = r"(?i)\b(ai|gpt|bot|gen)\b"
 
-# LRU Cache implementation for forensic results
-class LRUCache:
-    def __init__(self, capacity: int = 1000):
-        self.cache = OrderedDict()
-        self.capacity = capacity
+def get_smart_file_hash(file_path: str) -> str:
+    """
+    Smart hashing for large video files.
+    Reads Start+Middle+End chunks to create a unique signature without reading 200MB.
+    """
+    if not os.path.exists(file_path):
+        return "missing_file"
+        
+    file_size = os.path.getsize(file_path)
+    
+    # Threshold: 10MB. If smaller, just hash the whole thing (fast enough).
+    if file_size < 10 * 1024 * 1024:
+        with open(file_path, 'rb') as f:
+            data = f.read()
+            h = security_manager.get_safe_hash(data)
+            logger.info(f"[HASH] Full file hash for {file_path} ({file_size} bytes): {h}")
+            return h
+            
+    # For large files: Sample 512KB chunks
+    chunk_size = 512 * 1024 
+    h = hashlib.sha256()
+    
+    with open(file_path, 'rb') as f:
+        # 1. Header (Metadata/Moov)
+        chunk1 = f.read(chunk_size)
+        h.update(chunk1)
+        
+        # 2. Middle (Content)
+        f.seek(file_size // 2)
+        chunk2 = f.read(chunk_size)
+        h.update(chunk2)
+        
+        # 3. Footer (End bytes)
+        f.seek(max(0, file_size - chunk_size), os.SEEK_SET)
+        chunk3 = f.read(chunk_size)
+        h.update(chunk3)
+        
+    # Mix in file size to prevent collisions
+    h.update(str(file_size).encode())
+    res = h.hexdigest()
+    logger.info(f"[HASH] Smart hash for {file_path} ({file_size} bytes): {res}")
+    return res
 
-    def get(self, key):
-        if key not in self.cache:
+
+# In-memory fallback cache with TTL
+local_cache = {}
+MAX_LOCAL_CACHE_SIZE = 100
+LOCAL_CACHE_TTL = 3600  # 1 hour
+
+def get_cached_result(key: str):
+    """Retrieve result from Redis (preferred) or Local Memory (fallback)."""
+    if redis_client:
+        try:
+            data = redis_client.get(f"forensic:{key}")
+            if data:
+                logger.info(f"[CACHE] Redis HIT for key: {key}")
+                return json.loads(data)
+            else:
+                logger.info(f"[CACHE] Redis MISS for key: {key}")
+                return None
+        except Exception as e:
+            logger.warning(f"Redis get failed: {e}")
             return None
-        self.cache.move_to_end(key)
-        return self.cache[key]
+    else:
+        # Fallback to local memory with TTL
+        entry = local_cache.get(key)
+        if entry:
+            val, timestamp = entry
+            if time.time() - timestamp < LOCAL_CACHE_TTL:
+                logger.info(f"[CACHE] Local Memory HIT for key: {key}")
+                return val
+            else:
+                logger.info(f"[CACHE] Local Memory EXPIRED for key: {key}")
+                del local_cache[key]
+                return None
+        else:
+             logger.info(f"[CACHE] Local Memory MISS for key: {key}")
+        return None
 
-    def put(self, key, value):
-        if key in self.cache:
-            self.cache.move_to_end(key)
-        self.cache[key] = value
-        if len(self.cache) > self.capacity:
-            self.cache.popitem(last=False)
-
-forensic_cache = LRUCache(capacity=1000)
+def set_cached_result(key: str, value: dict):
+    """Store result in Redis (24h TTL) or Local Memory (fallback)."""
+    if redis_client:
+        try:
+            # Cache for 24 hours (86400 seconds)
+            redis_client.set(f"forensic:{key}", json.dumps(value), ex=86400)
+        except Exception as e:
+            logger.warning(f"Redis set failed: {e}")
+    else:
+        # Fallback to local memory
+        if len(local_cache) >= MAX_LOCAL_CACHE_SIZE:
+            # Simple eviction: remove a random item or oldest (if ordered)
+            # Python 3.7+ dicts preserve insertion order, so this pops the oldest
+            try:
+                local_cache.pop(next(iter(local_cache))) 
+            except StopIteration:
+                pass
+        local_cache[key] = (value, time.time())
 
 def get_tiered_signature_score(full_dump: str, clean_dump: str) -> tuple:
     """
@@ -906,6 +984,14 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
         filename = os.path.basename(file_path)
         logger.info(f"Detecting AI in video: {safe_path}")
         
+        # --- VIDEO CACHE CHECK (Smart Hash) ---
+        video_hash = get_smart_file_hash(file_path)
+        cached_video_result = get_cached_result(video_hash)
+        
+        if cached_video_result:
+            logger.info(f"[CACHE] Hit for VIDEO scan: {video_hash[:8]}...")
+            return cached_video_result
+
         # --- VIDEO METADATA EARLY EXIT ---
         t_video_meta = time.perf_counter()
         video_metadata = await get_video_metadata(file_path)
@@ -919,7 +1005,7 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
         # Early exit: Strong human metadata (camera/phone recording)
         if early_exit == "human":
             logger.info(f"[VIDEO] Early exit: Verified Human via metadata (h={human_score:.2f}, ai={ai_meta_score:.2f})")
-            return {
+            res = {
                 "summary": "No AI Detected",
                 "confidence_score": 0.99,  # Max 99% without C2PA
                 "evidence_chain": [
@@ -931,11 +1017,16 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
                     }
                 ]
             }
+            # Cache the early exit result
+            cached_version = res.copy()
+            cached_version["is_cached"] = True
+            set_cached_result(video_hash, cached_version)
+            return res
         
         # Early exit: Strong AI metadata (known AI generator)
         if early_exit == "ai":
             logger.info(f"[VIDEO] Early exit: AI Generator detected via metadata (h={human_score:.2f}, ai={ai_meta_score:.2f})")
-            return {
+            res = {
                 "summary": "AI-Generated",
                 "confidence_score": 0.99,  # Max 99% without C2PA
                 "evidence_chain": [
@@ -947,6 +1038,11 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
                     }
                 ]
             }
+            # Cache the early exit result
+            cached_version = res.copy()
+            cached_version["is_cached"] = True
+            set_cached_result(video_hash, cached_version)
+            return res
         
         # No early exit - proceed to frame analysis (Tri-Frame Batch Strategy)
         logger.info(f"[VIDEO] No early exit, proceeding to tri-frame batch analysis...")
@@ -991,7 +1087,7 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
         # Invert confidence for human results so 0.05 AI score becomes 0.95 Human Confidence
         final_conf = confidence if is_ai_likely else (1.0 - confidence)
 
-        return {
+        final_video_result = {
             "summary": summary,
             "confidence_score": final_conf,
             "gpu_time_ms": gpu_time_ms,
@@ -1011,6 +1107,13 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
                 }
             ]
         }
+        
+        # Store in Cache (Cached version sets is_cached=True)
+        cached_version = final_video_result.copy()
+        cached_version["is_cached"] = True
+        set_cached_result(video_hash, cached_version)
+        
+        return final_video_result
     else:
         return await detect_ai_media_image_logic(file_path, l1_data, trusted_metadata=trusted_metadata)
 
@@ -1220,7 +1323,7 @@ async def detect_ai_media_image_logic(
 
     # Use fast_mode for video frames (smaller hash thumbnail for speed)
     img_hash = get_image_hash(source_for_hash, fast_mode=(frame is not None))
-    cached_result = forensic_cache.get(img_hash)
+    cached_result = get_cached_result(img_hash)
     
     if cached_result is not None:
         logger.info(f"[CACHE] Hit for image scan")
@@ -1277,7 +1380,7 @@ async def detect_ai_media_image_logic(
             
             if gemini_score >= 0.0:
                 # Cache the Gemini result too!
-                forensic_cache.put(img_hash, {
+                set_cached_result(img_hash, {
                     "ai_score": gemini_score,
                     "explanation": gemini_explanation,
                     "is_gemini_used": True,
@@ -1332,7 +1435,7 @@ async def detect_ai_media_image_logic(
     forensic_result = await run_deep_forensics(source_for_hash, width, height)
     forensic_probability = forensic_result.get("ai_score", 0.0)
     actual_gpu_time_ms = forensic_result.get("gpu_time_ms", 0.0)
-    forensic_cache.put(img_hash, forensic_result)
+    set_cached_result(img_hash, forensic_result)
     roundtrip_ms = (time.perf_counter() - t_gpu) * 1000
     logger.info(f"[TIMING] Layer 2 - GPU scan (RunPod): {roundtrip_ms:.2f}ms | Actual GPU: {actual_gpu_time_ms:.2f}ms")
     
