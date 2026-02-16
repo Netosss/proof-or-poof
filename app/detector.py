@@ -987,10 +987,13 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
 
         is_ai_likely = confidence > 0.5
         summary = "Likely AI-Generated" if is_ai_likely else "Likely Authentic"
+        
+        # Invert confidence for human results so 0.05 AI score becomes 0.95 Human Confidence
+        final_conf = confidence if is_ai_likely else (1.0 - confidence)
 
         return {
             "summary": summary,
-            "confidence_score": confidence,
+            "confidence_score": final_conf,
             "gpu_time_ms": gpu_time_ms,
             "is_gemini_used": True,
             "evidence_chain": [
