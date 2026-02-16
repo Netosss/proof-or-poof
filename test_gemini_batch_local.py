@@ -6,31 +6,19 @@ from gemini_client import analyze_image_pro_turbo
 # Load environment variables
 load_dotenv()
 
-# Define ALL images to test (Both Sets)
+# Define the downloaded image to test
 image_paths = [
-    # Set 1
-    "/Users/netanel.ossi/Downloads/129502.jpg",
-    "/Users/netanel.ossi/Downloads/129705.jpg",
-    "/Users/netanel.ossi/Downloads/129127.jpg",
-    "/Users/netanel.ossi/Downloads/130207.jpg",
-    "/Users/netanel.ossi/Downloads/130206.jpg",
-    "/Users/netanel.ossi/Downloads/130208.jpg",
-    "/Users/netanel.ossi/Downloads/ai.jpeg",
-    # Set 2
-    "/Users/netanel.ossi/Downloads/132215.jpg",
-    "/Users/netanel.ossi/Downloads/132206.png",
-    "/Users/netanel.ossi/Downloads/132321.jpg",
-    "/Users/netanel.ossi/Downloads/132186.jpg"
+    "downloaded_test_image.jpg"
 ]
 
-print("Starting FULL batch analysis with current prompt...\n")
+print("Starting analysis for downloaded LinkedIn image...\n")
 
 for path in image_paths:
     if not os.path.exists(path):
         print(f"File not found: {path}")
         continue
         
-    print(f"Analyzing: {os.path.basename(path)}")
+    print(f"Analyzing: {path}")
     try:
         result = analyze_image_pro_turbo(path)
         print(f"Confidence: {result.get('confidence')}")
