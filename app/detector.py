@@ -978,6 +978,7 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
         }
 
     is_video = file_path.lower().endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm', '.gif'))
+    # Ensure HEIC/TIFF are treated as images (already covered by else, but good to be explicit mentally)
     
     if is_video:
         safe_path = security_manager.sanitize_log_message(file_path)

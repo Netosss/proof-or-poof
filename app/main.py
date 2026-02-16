@@ -237,6 +237,9 @@ async def download_image(url: str, max_size: int = 50 * 1024 * 1024) -> tuple[by
                 elif "webp" in content_type: suffix = ".webp"
                 elif "gif" in content_type: suffix = ".gif"
                 elif "heic" in content_type: suffix = ".heic"
+                elif "heif" in content_type: suffix = ".heif"
+                elif "tiff" in content_type: suffix = ".tiff"
+                elif "bmp" in content_type: suffix = ".bmp"
                 elif "mp4" in content_type: suffix = ".mp4"
                 elif "quicktime" in content_type or "mov" in content_type: suffix = ".mov"
                 
@@ -246,6 +249,10 @@ async def download_image(url: str, max_size: int = 50 * 1024 * 1024) -> tuple[by
                     if lower_url.endswith(".png"): suffix = ".png"
                     elif lower_url.endswith(".webp"): suffix = ".webp"
                     elif lower_url.endswith(".gif"): suffix = ".gif"
+                    elif lower_url.endswith(".heic"): suffix = ".heic"
+                    elif lower_url.endswith(".heif"): suffix = ".heif"
+                    elif lower_url.endswith(".tiff") or lower_url.endswith(".tif"): suffix = ".tiff"
+                    elif lower_url.endswith(".bmp"): suffix = ".bmp"
                     elif lower_url.endswith(".mp4"): suffix = ".mp4"
                     elif lower_url.endswith(".mov"): suffix = ".mov"
                 
@@ -280,9 +287,6 @@ async def detect(
     # Check Ban Status
     if check_ban_status(device_id):
         raise HTTPException(status_code=403, detail="Device is banned")
-
-    # Deduct Credits (Atomic) - Raises 402 if insufficient
-    new_balance = deduct_guest_credits(device_id, cost=5)
 
     # 2. Extract Content (File or URL)
     file_content = None
@@ -349,15 +353,30 @@ async def detect(
 
     log_memory(f"Pre-Detect: {filename}")
 
+    # Explicit Validation (Check before charging)
+    # This validates extension, size, and magic bytes (if possible)
+    # We pass None for file_path here since we haven't saved it yet, 
+    # but validate_file will check extension/size.
+    # To check magic bytes properly, we'd need the file on disk or a BytesIO wrapper.
+    # However, creating the temp file is cheap, so we'll do that first, THEN validate, THEN charge.
+    
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
         tmp_file.write(file_content)
         temp_path = tmp_file.name
 
     try:
+        # Validate BEFORE charging
+        # Pass temp_path so it can check magic bytes (deep validation)
+        security_manager.validate_file(filename, filesize, temp_path)
+        
+        # Deduct Credits (Atomic) - Raises 402 if insufficient
+        new_balance = deduct_guest_credits(device_id, cost=5)
+        
         start_time = time.time()
         
         # The wrapper handles security logic; we pass detect_ai_media as the worker function
         # Pass device_id for rate limiting
+        # Note: secure_execute calls validate_file again, which is fine (redundant safety)
         result = await security_manager.secure_execute(
             request, filename, filesize, temp_path, 
             lambda path: detect_ai_media(path, trusted_metadata=sidecar_metadata),
