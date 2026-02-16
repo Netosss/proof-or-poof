@@ -58,45 +58,44 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image]) -> dict:
         )
 
         prompt = """
-        ### TASK: FORENSIC AI IMAGE ANALYSIS
-        You are an expert AI Image Auditor. Your goal is to detect generative artifacts while strictly avoiding false positives on human-edited memes, collages, or digital art.
+        ### TASK: FORENSIC AI IMAGE AUDIT
+        You are a skeptical Forensic Image Analyst. Your goal is to detect *high-fidelity* synthetic generation (Midjourney v6, DALL-E 3, Flux) while avoiding false positives on simple memes.
 
-        ### PHASE 1: TECHNICAL & META SCAN (Priority 1)
-        1. **SynthID / Watermarks:** Scan for digital watermarks (e.g., Google SynthID, DALL-E color squares in bottom right, "Made with AI" metadata).
-        -> IF FOUND: **Score = 1.0**. Stop analysis. Output: "Positive Match: [Name of Marker] detected."
+        ### PHASE 1: TECHNICAL & META SCAN (Priority - "Shoot to Kill")
+        1. **SynthID/Watermarks:** Scan corners and edges for digital watermarks (e.g., Google SynthID, DALL-E color squares, "Made with AI" metadata).
+        -> **IF FOUND:** Score = 1.0. STOP. Output: "Positive Match: [Name of Marker] detected."
 
-        ### PHASE 2: STYLE & LOGIC BRANCHING (Crucial)
-        Determine the image category to select the correct detection rules.
+        ### PHASE 2: CONTEXTUAL CLASSIFICATION
+        Determine the image category to apply the correct forensic standard.
 
         **CATEGORY A: PHOTOREALISTIC (Real Life Context)**
-        *Trigger:* Image appears to be a camera photo of real people/places.
-        * **SCAN FOR (Physics Logic):**
-            * **Anatomy:** Melting fingers (>5 or <4), merging limbs, teeth that look like a solid block.
-            * **Texture:** Skin that looks like "smooth plastic" or wax (common in Midjourney/Flux).
-            * **Physics:** Objects clipping through others, shadows contradicting light sources.
-            * **Background:** "Bokeh" blur that creates nonsensical blobs instead of blurred objects.
+        *Trigger:* Image appears to be a camera photo of real people, events, or places.
+        * **PRIMARY SCANS (The "New" AI Tells):**
+            * **The "AI Glaze":** Look for hyper-smooth, "waxy" skin textures that lack natural pores, imperfections, or subsurface scattering. If everyone looks like they have professional makeup or plastic skin, FLAG IT.
+            * **Background Hallucinations:** Focus *away* from the main subject. Are background faces blurred into nondescript blobs? Do background objects (chairs, fences) fade into nothingness or merge?
+            * **Lighting Physics:** Check shadows. Does the shadow direction match the light source? Are there "impossible" lights reflecting in eyes?
+            * **Material Confusion:** Look at hairlines and clothing. Does hair "melt" into the skin? Does the texture of a shirt merge with the neck?
 
-        **CATEGORY B: NON-PHOTOREALISTIC (Art, Anime, Vector, 3D Render)**
-        *Trigger:* Image is a painting, drawing, cartoon, or clearly edited meme.
-        * **SCAN FOR (Pattern Logic):**
-            * **Pattern Meltdown:** Intricate details (lace, crowds, scales) that start structured but turn into random scribbles/noise.
-            * **Incoherent Blending:** Objects merging into the background (e.g., a sword handle melting into a cape).
-            * **Gibberish Text:** Background text that looks like alien hieroglyphs or unreadable symbols.
-        * **DO NOT FLAG:** "Weird" anatomy (big eyes), floating objects, or "bad" photoshop edges. These are artistic choices, not AI errors.
+        **CATEGORY B: ILLUSTRATIVE / ARTISTIC**
+        *Trigger:* Painting, Anime, 3D Render, Vector Art.
+        * **SCAN FOR:**
+            * **Pattern Meltdown:** Complex patterns (lace, crowds, rain) that turn into random noise/scribbles.
+            * **Incoherent Blending:** Distinct objects merging (e.g., a sword handle melting into a hand).
+        * **IGNORE:** Physics, anatomy, and "weird" styles. These are artistic choices.
 
-        ### PHASE 3: FALSE POSITIVE EXCLUSIONS (The "Safety Net")
-        1.  **The "Meme" Rule:** If you see **floating text**, **white caption bars**, or **hard-cut edges** (like a face pasted on a body), these are HUMAN EDITS. Ignore the edges. Only check the *content* of the face/body itself.
-        2.  **The "Date" Rule:** IGNORE the *chronological value* of any date (e.g., "Feb 2030" is fine). ONLY flag if the text characters *themselves* are malformed/melting.
+        ### PHASE 3: FALSE POSITIVE SAFETY NET (Do Not Flag)
+        1. **The "Meme" Rule:** IGNORE "floating text," "white caption bars," or "hard-cut" collages (e.g., a face pasted on a body). These are HUMAN edits. Only analyze the *content* of the face/body itself.
+        2. **The "Date" Rule:** IGNORE the *chronological value* of dates (e.g., "2050" is fine). ONLY flag if the text glyphs are malformed/melting.
 
         ### SCORING & OUTPUT
-        * **Score > 0.9 (AI Detected):** Clear evidence found in the correct Category logic.
-        * **Score < 0.1 (Clean):** No generative anomalies found.
+        * **Score > 0.85 (AI Detected):** High confidence of generative origin based on texture, physics, or metadata.
+        * **Score < 0.15 (Clean):** Natural camera noise, consistent physics, human logic.
 
         **FINAL OUTPUT FORMAT (Strict):**
-        - **If AI (>0.5):** [Explain in max 7 words, e.g., "SynthID detected" or "Fingers merging into soda can"]
+        - **If AI (>0.5):** [Explain in max 7 words, e.g., "Plastic skin texture and background melt"]
         - **If NOT AI:** "No visual anomalies detected"
         """
-        
+
         response = client.models.generate_content(
             model="gemini-3-flash-preview",
             contents=[
