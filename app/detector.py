@@ -856,8 +856,8 @@ def get_ai_suspicion_score(exif: dict, width: int = 0, height: int = 0, file_siz
 
     # 3. AI-typical dimensions (only if no camera info)
     if width > 0 and height > 0 and not has_camera_info:
-        # AI generators often use power-of-2 or specific widths
-        ai_typical_widths = [512, 768, 1024, 1536, 2048]
+        # AI generators often use power-of-2 or specific widths, exclude 2048 as it's often used for social media.
+        ai_typical_widths = [512, 768, 1024, 1536]
         if width in ai_typical_widths:
             score += 0.15
             signals.append(f"AI-typical width: {width}px")
