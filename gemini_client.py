@@ -58,36 +58,45 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image]) -> dict:
         )
 
         prompt = """
-        ### TASK: FORENSIC AI DETECTION
-        Analyze the image for generative artifacts using STYLE-ADAPTIVE LOGIC.
+        ### TASK: FORENSIC AI IMAGE ANALYSIS
+        You are an expert AI Image Auditor. Your goal is to detect generative artifacts while strictly avoiding false positives on human-edited memes, collages, or digital art.
 
-        ### PHASE 1: CLASSIFY STYLE
-        First, categorize the image into one of two modes:
-        A. **PHOTOREALISTIC** (Camera shot, real person, landscape).
-        B. **STYLISTIC** (Painting, Anime, Sketch, 3D Render, Meme, Vector Art).
+        ### PHASE 1: TECHNICAL & META SCAN (Priority 1)
+        1. **SynthID / Watermarks:** Scan for digital watermarks (e.g., Google SynthID, DALL-E color squares in bottom right, "Made with AI" metadata).
+        -> IF FOUND: **Score = 1.0**. Stop analysis. Output: "Positive Match: [Name of Marker] detected."
 
-        ### PHASE 2: APPLY SPECIFIC DETECTION RULES
-        **If Mode A (Photorealistic) -> Use "PHYSICS & ANATOMY" Logic:**
-        - **Look for:** Melting skin texture, merging limbs, pupils that aren't round, light coming from two different directions.
-        - **Strictness:** High. Any anatomical failure is a red flag.
+        ### PHASE 2: STYLE & LOGIC BRANCHING (Crucial)
+        Determine the image category to select the correct detection rules.
 
-        **If Mode B (Stylistic) -> Use "COHERENCE & PATTERN" Logic:**
-        - **IGNORE:** Anatomy (big eyes are normal), physics (floating islands are normal), and "brushstroke" messiness.
-        - **LOOK FOR (The "AI Art" Glitches):**
-        1. **Pattern Meltdowns:** Detailed patterns (like lace, scales, or background crowds) that start structured but turn into random scribbles/noise.
-        2. **Inconsistent Detailing:** One eye is highly detailed with lashes, the other is a blurred smudge.
-        3. **Object Ontology:** Objects that morph into other things (e.g., a sword handle that turns into a cape).
-        4. **Text/Glyphs:** Any background text that looks like alien hieroglyphs or gibberish.
-        
-        ### PHASE 3: THE "MEME SAVER"
-        - If the image contains **Overlay Text** (impact font, speech bubbles): This creates "hard edges" that look like edits. **IGNORE** these edges. They are human edits, not AI artifacts.
-        - **DATE RULE:** Ignore the *content* of dates/timestamps. Only flag them if the *letters themselves* are malformed/melting.
+        **CATEGORY A: PHOTOREALISTIC (Real Life Context)**
+        *Trigger:* Image appears to be a camera photo of real people/places.
+        * **SCAN FOR (Physics Logic):**
+            * **Anatomy:** Melting fingers (>5 or <4), merging limbs, teeth that look like a solid block.
+            * **Texture:** Skin that looks like "smooth plastic" or wax (common in Midjourney/Flux).
+            * **Physics:** Objects clipping through others, shadows contradicting light sources.
+            * **Background:** "Bokeh" blur that creates nonsensical blobs instead of blurred objects.
 
-        ### OUTPUT DECISION - up to 10 words max.
-        - **Score < 0.1:** No anomalies found in the relevant logic mode.
-        - **Score > 0.9:** Clear artifact found (e.g., "Pattern meltdown in anime background" or "Hand merging in photo").
+        **CATEGORY B: NON-PHOTOREALISTIC (Art, Anime, Vector, 3D Render)**
+        *Trigger:* Image is a painting, drawing, cartoon, or clearly edited meme.
+        * **SCAN FOR (Pattern Logic):**
+            * **Pattern Meltdown:** Intricate details (lace, crowds, scales) that start structured but turn into random scribbles/noise.
+            * **Incoherent Blending:** Objects merging into the background (e.g., a sword handle melting into a cape).
+            * **Gibberish Text:** Background text that looks like alien hieroglyphs or unreadable symbols.
+        * **DO NOT FLAG:** "Weird" anatomy (big eyes), floating objects, or "bad" photoshop edges. These are artistic choices, not AI errors.
+
+        ### PHASE 3: FALSE POSITIVE EXCLUSIONS (The "Safety Net")
+        1.  **The "Meme" Rule:** If you see **floating text**, **white caption bars**, or **hard-cut edges** (like a face pasted on a body), these are HUMAN EDITS. Ignore the edges. Only check the *content* of the face/body itself.
+        2.  **The "Date" Rule:** IGNORE the *chronological value* of any date (e.g., "Feb 2030" is fine). ONLY flag if the text characters *themselves* are malformed/melting.
+
+        ### SCORING & OUTPUT
+        * **Score > 0.9 (AI Detected):** Clear evidence found in the correct Category logic.
+        * **Score < 0.1 (Clean):** No generative anomalies found.
+
+        **FINAL OUTPUT FORMAT (Strict):**
+        - **If AI (>0.5):** [Explain in max 7 words, e.g., "SynthID detected" or "Fingers merging into soda can"]
+        - **If NOT AI:** "No visual anomalies detected"
         """
-
+        
         response = client.models.generate_content(
             model="gemini-3-flash-preview",
             contents=[
