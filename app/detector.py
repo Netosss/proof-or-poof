@@ -163,12 +163,20 @@ def get_tiered_signature_score(full_dump: str, clean_dump: str) -> tuple:
             signals.append(f"Found definite generator signature: '{word}'")
             return 0.99, signals 
 
-    # --- TIER 2: STRONG INDICATORS (Checked in everything) ---
+    # --- TIER 2: STRONG INDICATORS (Regex/Safe Search) ---
     tier_2_hits = 0
     for word in TIER_2_TECH_TERMS:
-        if word in full_dump:
-            tier_2_hits += 1
-            signals.append(f"Found technical artifact: '{word}'")
+        # Avoid short substring matches in binary data
+        if len(word) <= 4:
+            # Short words (<=4 chars): Only search in clean_metadata with word boundaries
+            if re.search(r'\b' + re.escape(word) + r'\b', clean_dump):
+                tier_2_hits += 1
+                signals.append(f"Found technical artifact in metadata: '{word}'")
+        else:
+            # Long words: Safe to search in full_dump (binary + text)
+            if word in full_dump:
+                tier_2_hits += 1
+                signals.append(f"Found technical artifact: '{word}'")
     
     if tier_2_hits > 0:
         score += 0.90 + ((tier_2_hits - 1) * 0.40)

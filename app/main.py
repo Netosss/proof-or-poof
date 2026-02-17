@@ -39,7 +39,7 @@ from app.security import (
 from fastapi import Depends
 from fastapi.concurrency import run_in_threadpool
 from contextlib import asynccontextmanager
-from fastapi.responses import Response
+from fastapi.responses import Response, PlainTextResponse
 
 # Faux Lens Remover
 from app.remover import FauxLensRemover
@@ -126,6 +126,12 @@ app.add_middleware(
 @app.get("/health")
 async def health():
     return {"status": "healthy"}
+
+@app.get("/robots.txt", response_class=PlainTextResponse)
+def robots():
+    # "User-agent: *" means all bots
+    # "Disallow: /" means don't crawl anything here
+    return "User-agent: *\nDisallow: /"
 
 # ---- RunPod Webhook Endpoint ----
 @app.post("/webhook/runpod")
