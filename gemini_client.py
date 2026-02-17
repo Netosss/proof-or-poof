@@ -2,6 +2,8 @@ import os
 import json
 import io
 import time
+import cv2
+import numpy as np
 from PIL import Image
 from google import genai
 from google.genai import types
@@ -13,13 +15,113 @@ client = genai.Client(
     http_options=types.HttpOptions(timeout=20000)
 )
 
+def get_quality_context(image_source: Union[str, Image.Image]) -> str:
+    """
+    Analyzes image quality using a weighted scoring system (DQT, Resolution, Blur).
+    Returns a context string for Gemini.
+    """
+    score = 100
+    issues = []
+    
+    try:
+        # 1. Standardize Input (Handle Path vs PIL)
+        if isinstance(image_source, str):
+            try:
+                img_pil = Image.open(image_source)
+            except Exception:
+                return "**CONTEXT: QUALITY UNKNOWN (Could not open).**"
+            was_path = True
+            filename = os.path.basename(image_source)
+        else:
+            img_pil = image_source
+            was_path = False
+            filename = "Image Object"
+
+        # --- LAYER 1: DQT (JPEG Artifacts) ---
+        # Only works if original metadata is preserved
+        try:
+            if hasattr(img_pil, 'quantization') and img_pil.quantization:
+                table = img_pil.quantization.get(0) # Luminance table
+                if table:
+                    avg_q_val = sum(table) / len(table)
+                    if avg_q_val > 30: # Very heavy compression (Q < 40)
+                        score -= 40
+                        issues.append(f"Severe Compression (~Q{int(100 - avg_q_val*2)})")
+                    elif avg_q_val > 20: # Moderate compression (Q < 60)
+                        score -= 20
+                        issues.append(f"Compression Artifacts (~Q{int(100 - avg_q_val*2)})")
+        except Exception:
+            pass
+
+        # --- LAYER 2: PIXEL ANALYSIS (Resolution & Blur) ---
+        # Convert PIL to CV2 without re-reading from disk
+        try:
+            img_arr = np.array(img_pil.convert('RGB')) 
+            # Convert RGB (PIL) to BGR (OpenCV)
+            img_cv = img_arr[:, :, ::-1].copy() 
+            
+            gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+            
+            h, w = gray.shape
+            pixels = h * w
+            
+            # Resolution Penalties
+            if pixels < 250_000: # Very small (< 500x500)
+                score -= 50
+                issues.append(f"Tiny Resolution ({w}x{h})")
+            elif pixels < 800_000: # Small-ish (< 1000x800)
+                score -= 40
+                issues.append(f"Low Resolution ({w}x{h})")
+
+            # Blur Penalties (Laplacian Variance)
+            blur_score = cv2.Laplacian(gray, cv2.CV_64F).var()
+            
+            if blur_score < 10: # Almost no edges / Solid color / severe blur
+                score -= 60
+                issues.append(f"Near Zero Detail (Score: {blur_score:.0f})")
+            elif blur_score < 25: # Unusable / Very Blurry
+                score -= 25
+                issues.append(f"Extreme Blur (Score: {blur_score:.0f})")
+            elif blur_score < 50: # Soft / Slightly Out of Focus (or Smooth AI)
+                score -= 10
+                issues.append(f"Soft Focus/Smooth (Score: {blur_score:.0f})")
+            elif blur_score > 600 and avg_q_val < 20: # Very Sharp AND NOT Compressed
+                score += 20
+                issues.append(f"High Sharpness (Score: {blur_score:.0f})")
+            elif blur_score > 300 and avg_q_val < 20: # Sharp AND NOT Compressed
+                score += 10
+                issues.append(f"Good Sharpness (Score: {blur_score:.0f})")
+                
+        except Exception:
+            pass # CV2 conversion failed, skip pixel checks
+
+        # Close if we opened it locally
+        if was_path:
+            img_pil.close()
+
+        # --- FINAL VERDICT ---
+        score = max(0, score) # Clamp at 0
+        
+        if score < 50:
+            return f"**CRITICAL CONTEXT: LOW QUALITY IMAGE ({', '.join(issues)}).** INSTRUCTION: This image is heavily compressed/low-res. Warning: This quality naturally causes **WAXY SKIN**, **SMOOTH TEXTURES**, distorted faces, and blur. **IGNORE** any 'waxy' or 'smooth' appearance—it is due to low quality, not AI. Only flag **STRUCTURAL IMPOSSIBILITIES** that compression CANNOT explain (e.g., gibberish text, extra limbs). If unsure, assume it is compression."
+        elif score < 80:
+             return f"**CONTEXT: MEDIUM QUALITY ({', '.join(issues)}).** INSTRUCTION: Image has reduced quality. Do NOT flag soft edges or indistinct textures as AI. However, compression does NOT explain structural impossibilities (like extra fingers, gibberish text, or impossible physics). If you see these CLEAR logic errors, FLAG THEM."
+        
+        return "**CONTEXT: HIGH QUALITY IMAGE.** Image is sharp and clean. Any visual anomaly is likely a sign of manipulation."
+
+    except Exception as e:
+        return "**CONTEXT: QUALITY UNKNOWN.** Proceed with standard analysis."
+
 def analyze_image_pro_turbo(image_source: Union[str, Image.Image]) -> dict:
     """
     GEMINI 3.0 FLASH - TURBO MODE
     Accepts either a file path (str) or a PIL Image object.
     """
     try:
-        # 1. Image Prep
+        # 1. Get Quality Context (Run on the source image for best accuracy)
+        quality_context = get_quality_context(image_source)
+
+        # 2. Image Prep
         if isinstance(image_source, str):
             img = Image.open(image_source)
         else:
@@ -57,8 +159,10 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image]) -> dict:
             }
         )
 
-        prompt = """
+        prompt = f"""
 You are an expert AI Detection System. Analyze the image for synthetic generation.
+
+{quality_context}
 
 ### CORE INSTRUCTIONS (Trust Your Intuition, But Follow These Rules):
 1.  **CONTEXT MATTERS:**
