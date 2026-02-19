@@ -815,6 +815,11 @@ def get_forensic_metadata_score(exif: dict) -> tuple:
          score += 0.15
          signals.append("ICC Color Profile detected")
 
+    # --- Tier X: Orientation Sensor ---
+    if "Orientation" in exif:
+        score += 0.10
+        signals.append("Physical orientation sensor data present")
+
     return round(score, 2), signals
 
 def get_ai_suspicion_score(exif: dict, width: int = 0, height: int = 0, file_size: int = 0) -> tuple:
@@ -1133,7 +1138,8 @@ PROVENANCE_WHITELIST = {
     "Make", "Model", "ExposureTime", "ISOSpeedRatings", 
     "FNumber", "GPSLatitude", "GPSLongitude", "GPSAltitude",
     "BodySerialNumber", "LensSerialNumber", "LensModel", "Flash",
-    "SubSecTimeOriginal", "SubSecTimeDigitized"
+    "SubSecTimeOriginal", "SubSecTimeDigitized",
+    "Orientation", "ColorSpace", "ExifOffset"
 }
 
 async def detect_ai_media_image_logic(
@@ -1350,7 +1356,7 @@ async def detect_ai_media_image_logic(
             cached_explanation = cached_result.get("explanation", "Analyzed via second layer of AI analysis (Cached)")
             
             return {
-                "summary": "Likely AI-Generated" if is_ai_likely else "No AI Detected",
+                "summary": "AI-Generated" if final_conf > 0.99 else "Likely AI-Generated",
                 "confidence_score": round(final_conf, 2),
                 "is_gemini_used": True,
                 "is_cached": True,
@@ -1401,7 +1407,7 @@ async def detect_ai_media_image_logic(
                 final_conf = boost_score(raw_conf, is_ai_likely=is_ai_likely)
 
                 return {
-                    "summary": "Likely AI-Generated" if is_ai_likely else "Likely No AI Detected",
+                    "summary": "AI-Generated" if final_conf > 0.99 else ("Likely AI-Generated" if is_ai_likely else "Likely No AI Detected"),
                     "confidence_score": round(final_conf, 2),
                     "is_gemini_used": True,
                     "gpu_time_ms": 0,
@@ -1470,7 +1476,11 @@ async def detect_ai_media_image_logic(
         "signals": final_signals
     }
     
-    if forensic_probability > 0.5: summary = "AI-Generated"
+    if forensic_probability > 0.5: 
+        if final_conf > 0.99:
+            summary = "AI-Generated"
+        else:
+            summary = "Likely AI-Generated"
     else: summary = "No AI Detected"
     
     # Boost the overall confidence score (only for AI-likely results)
