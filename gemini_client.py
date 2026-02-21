@@ -162,9 +162,11 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image]) -> dict:
         prompt = f"""
 You are an expert AI Detection System. Analyze the image for synthetic generation.
 
-{quality_context}
-
 ### CORE INSTRUCTIONS (Trust Your Intuition, But Follow These Rules):
+First try to use synthID or found any AI generated details in the image.(watermark, color strips, etc.)
+if you found any, give a high score and stop the analysis.
+if you didn't find any, then continue with the following instructions.
+{quality_context}
 1.  **CONTEXT MATTERS:**
     * **Art/Memes:** Be lenient. Do NOT flag stylized anatomy or "bad photoshop" edges as AI.
     * **Photos:** Be strict. Look for "plastic/waxy" skin, merging objects, and dream-like physics, and any physical errors (in any object in the image). be context aware, try to find any incorrect logic errors and contextually impossible details..
@@ -241,6 +243,13 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image]])
                 img.close()
 
         # 2. CONFIGURATION
+        try:
+             # Use the second image (index 1) for quality context if available, else first
+             idx = 1 if len(image_sources) > 1 else 0
+             quality_context = get_quality_context(image_sources[idx])
+        except:
+             quality_context = "**CONTEXT: QUALITY UNKNOWN.**"
+
         config = types.GenerateContentConfig(
             thinking_config=types.ThinkingConfig(thinking_level="LOW"),
             media_resolution="MEDIA_RESOLUTION_MEDIUM",
@@ -260,16 +269,27 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image]])
         )
 
         # 3. PROMPT
-        prompt_text = """
+        prompt_text = f"""
         Analyze EACH of the attached images for SYNTHETIC GENERATION ARTIFACTS.
         Return a JSON list where each item corresponds to the images in order.
         
-        STABILITY RULES:
-        1. "High Quality" or "Smoothness" is NOT evidence of AI. Do not flag it.
-        2. You must find a LOGICAL or STRUCTURAL error to assign a high score.
-        3. If no artifacts are found, the score MUST be < 0.1.
-        4. synthid markers are present in the image. -> give a high score.
-        5. If the image was edited with AI, give a high score.
+
+        ### CORE INSTRUCTIONS (Trust Your Intuition, But Follow These Rules):
+        First try to use synthID or found any AI generated details in the image.(watermark, color strips, etc.)
+        if you found any, give a high score and stop the analysis.
+        if you didn't find any, then continue with the following instructions.
+        {quality_context}
+
+        1.  **CONTEXT MATTERS:**
+            * **Art/Memes:** Be lenient. Do NOT flag stylized anatomy or "bad photoshop" edges as AI.
+            * **Photos:** Be strict. Look for "plastic/waxy" skin, merging objects, and dream-like physics, and any physical errors (in any object in the image). be context aware, try to find any incorrect logic errors and contextually impossible details..
+
+        2.  **THE "TEXT" TRAP:**
+            * If you see text (any language), **READ IT**. If the letters form **gibberish/non-words** (e.g., "הצסיהת") or the sentence is incorrect logically, it is AI. 
+            * **Ignore Dates:** The year is irrelevant. Do not use "future dates" as a signal.
+
+        3.  **THE "WATERMARK" CHECK:**
+            * Scan corners for **SynthID**, **DALL-E color strips**, or **"CR"** icons. If found -> AUTOMATIC AI.
 
         SCORING GUIDE:
         - 0.01 - 0.10: Clean image. No structural melting, no physics errors.
