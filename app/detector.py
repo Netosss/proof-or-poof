@@ -1385,6 +1385,44 @@ async def detect_ai_media_image_logic(
                     }
                 ]
             }
+        else:
+            logger.info(f"[CACHE] Returning cached GPU result (ai_score={forensic_probability:.4f})")
+            # Return cached GPU result
+            l2_data = {
+                "status": "detected" if forensic_probability > 0.5 else "not_detected",
+                "probability": round(forensic_probability, 4),
+                "signals": ["Cached result"]
+            }
+            
+            is_ai_likely = forensic_probability > 0.5
+            raw_conf = forensic_probability if is_ai_likely else (1.0 - forensic_probability)
+            final_conf = boost_score(raw_conf, is_ai_likely=is_ai_likely)
+            
+            if final_conf > 0.99:
+                final_conf = 0.99
+
+            summary = "AI-Generated" if forensic_probability > 0.5 else "No AI Detected" # Simplify for cache
+
+            return {
+                "summary": summary,
+                "confidence_score": round(final_conf, 2),
+                "is_cached": True,
+                "gpu_time_ms": 0,
+                "evidence_chain": [
+                    {
+                        "layer": "Layer 1: Metadata Check",
+                        "status": "warning",
+                        "label": "Metadata Check",
+                        "detail": "No camera metadata found."
+                    },
+                    {
+                        "layer": "Layer 3: Deep Forensics",
+                        "status": "flagged" if is_ai_likely else "passed",
+                        "label": "Pixel Analysis",
+                        "detail": "Noise patterns consistent with generative AI." if is_ai_likely else "Sensor noise patterns consistent with optical lenses."
+                    }
+                ]
+            }
     else:
         # --- STRIPPED-JPEG ADAPTIVE POLICY (Gemini Gateway) ---
         # Trigger Gemini if:
