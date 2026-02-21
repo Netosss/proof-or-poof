@@ -899,9 +899,11 @@ def get_ai_suspicion_score(exif: dict, width: int = 0, height: int = 0, file_siz
         is_phone_aspect = 0.40 < aspect < 0.60  # Modern phones: 9:16 to 9:22
         
         if is_portrait and is_phone_width and is_phone_aspect:
-            # Likely a phone screenshot - reduce AI suspicion significantly
-            score -= 0.20
-            signals.append(f"Likely phone screenshot ({width}x{height}) - forcing GPU analysis")
+            # It's a screenshot - we want to analyze it with Gemini if stripped, or GPU if not.
+            # reducing score is fine to avoid "AI-typical dimensions" flag, 
+            # but we shouldn't explicitly force GPU if we want Gemini to have a look.
+            score -= 0.10
+            signals.append(f"Likely phone screenshot ({width}x{height})")
         elif not is_standard and aspect > 0:
             score += 0.05
             signals.append(f"Non-standard aspect ratio: {aspect:.2f}")
@@ -1325,10 +1327,17 @@ async def detect_ai_media_image_logic(
     # Determine if the image is truly stripped of hardware provenance
     # We ignore "Web Junk" tags (JFIF, DPI, etc.) and only look for the High Value Whitelist
     # Also skip Gemini if we found strong technical AI indicators (Tier 1 or Tier 2)
-    is_stripped = not any(tag in exif for tag in PROVENANCE_WHITELIST) and tiered_score < 0.50
+    # NOTE: Screenshots often have minimal metadata (like ColorSpace/ExifOffset) but NO hardware info.
+    # We should treat them as stripped if they lack MAJOR hardware tags (Make/Model).
+    
+    # Strict whitelist: tags that confirm physical camera hardware
+    HARDWARE_TAGS = {"Make", "Model", "ExposureTime", "ISOSpeedRatings", "FNumber", "BodySerialNumber", "LensModel", "GPSLatitude"}
+    has_hardware_provenance = any(tag in exif for tag in HARDWARE_TAGS)
+    
+    is_stripped = not has_hardware_provenance and tiered_score < 0.50
     
     if is_stripped:
-        logger.info(f"[META] Image classified as STRIPPED (No High-Value Provenance Tags found)")
+        logger.info(f"[META] Image classified as STRIPPED (No Hardware Provenance Tags found)")
     elif tiered_score >= 0.50:
         logger.info(f"[META] Image has technical AI signatures (score={tiered_score:.2f}) - bypassing stripped check")
     else:
