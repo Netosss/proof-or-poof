@@ -448,7 +448,9 @@ async def get_balance(device_id: str = Header(..., alias="X-Device-ID")):
     Auto-creates wallet with 10 credits if it doesn't exist.
     """
     wallet = get_guest_wallet(device_id)
-    return {"balance": wallet.get("credits", 0)}
+    balance = wallet.get("credits", 0)
+    logger.info(f"[BALANCE] Device: {device_id} | Credits: {balance}")
+    return {"balance": balance}
 
 # ---- Recharge Webhook ----
 class RechargeRequest(BaseModel):
