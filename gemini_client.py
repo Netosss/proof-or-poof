@@ -164,7 +164,7 @@ You are an expert AI Detection System. Analyze the image for synthetic generatio
 
 ### CORE INSTRUCTIONS (Trust Your Intuition, But Follow These Rules):
 First try to use synthID or found any AI generated details in the image.(watermark, color strips, etc.)
-if you found any, give a high score and stop the analysis.
+if you found any, give a high score and stop the analysis. Say in the output that you found the AI generated details. Do not say anything else.
 if you didn't find any, then continue with the following instructions.
 {quality_context}
 1.  **CONTEXT MATTERS:**
@@ -276,7 +276,7 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image]])
 
         ### CORE INSTRUCTIONS (Trust Your Intuition, But Follow These Rules):
         First try to use synthID or found any AI generated details in the image.(watermark, color strips, etc.)
-        if you found any, give a high score and stop the analysis.
+        if you found any, give a high score and stop the analysis. Say in the output that you found the AI generated details. Do not say anything else.
         if you didn't find any, then continue with the following instructions.
         {quality_context}
 
