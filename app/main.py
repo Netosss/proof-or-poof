@@ -126,6 +126,16 @@ async def custom_http_exception_handler(request: Request, exc: StarletteHTTPExce
     headers["Access-Control-Allow-Methods"] = "*"
     headers["Access-Control-Allow-Headers"] = "*"
     
+    # 🔴 CRITICAL FIX for ERR_HTTP2_PROTOCOL_ERROR on file uploads 🔴
+    # Drain the incoming request body so the server doesn't forcefully 
+    # drop the TCP connection when rejecting uploads early.
+    try:
+        # We use stream() to safely discard bytes without loading large files into memory
+        async for _ in request.stream():
+            pass
+    except Exception as e:
+        logger.warning(f"Error draining request stream in exception handler: {e}")
+        
     response_data = {"detail": exc.detail}
     logger.info(f"[ERROR HANDLER] Returning {exc.status_code} to client. Body: {response_data}, Headers: {headers}")
     
