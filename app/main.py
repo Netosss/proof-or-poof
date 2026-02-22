@@ -126,9 +126,12 @@ async def custom_http_exception_handler(request: Request, exc: StarletteHTTPExce
     headers["Access-Control-Allow-Methods"] = "*"
     headers["Access-Control-Allow-Headers"] = "*"
     
+    response_data = {"detail": exc.detail}
+    logger.info(f"[ERROR HANDLER] Returning {exc.status_code} to client. Body: {response_data}, Headers: {headers}")
+    
     return JSONResponse(
         status_code=exc.status_code,
-        content={"detail": exc.detail},
+        content=response_data,
         headers=headers
     )
 
