@@ -323,22 +323,21 @@ async def detect(
     """
     
     # 1. Security & Wallet Check
-    # Verify IP Device Limit and CAPTCHA
     ip = get_client_ip(request)
     
-    # TEMPORARY FOR FRONTEND TESTING: Force CAPTCHA on every request
+    # Require CAPTCHA unconditionally on this endpoint
     if not turnstile_token:
         raise HTTPException(
             status_code=403, 
-            detail={"code": "CAPTCHA_REQUIRED", "message": "Verification needed (Testing Mode)"}
+            detail={"code": "CAPTCHA_REQUIRED", "message": "Verification needed"}
         )
     
     is_human = await verify_turnstile(turnstile_token)
     if not is_human:
         raise HTTPException(status_code=403, detail="Invalid CAPTCHA")
         
-    # Standard logic (bypassed by the forced check above for now)
-    # await check_ip_device_limit(ip, device_id, turnstile_token)
+    # Check IP limits but bypass internal CAPTCHA verification since we just did it
+    await check_ip_device_limit(ip, device_id, token_already_verified=True)
 
     # Check Ban Status
     if check_ban_status(device_id):

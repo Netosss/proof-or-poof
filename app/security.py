@@ -87,7 +87,7 @@ def get_client_ip(request: Request) -> str:
 MAX_NEW_DEVICES_PER_IP = 3
 IP_DEVICE_WINDOW = 86400  # 24 hours in seconds
 
-async def check_ip_device_limit(ip_address: str, device_id: str, turnstile_token: Optional[str] = None):
+async def check_ip_device_limit(ip_address: str, device_id: str, turnstile_token: Optional[str] = None, token_already_verified: bool = False):
     """
     Checks if this IP has created too many unique device IDs.
     If limit exceeded, requires a valid Turnstile token.
@@ -114,18 +114,19 @@ async def check_ip_device_limit(ip_address: str, device_id: str, turnstile_token
     limit = 1 if is_fallback else MAX_NEW_DEVICES_PER_IP
 
     if current_count >= limit:
-        # Limit reached! Is there a CAPTCHA token?
-        if not turnstile_token:
-            logger.warning(f"IP {ip_address} reached device limit. CAPTCHA required.")
-            raise HTTPException(
-                status_code=403, 
-                detail={"code": "CAPTCHA_REQUIRED", "message": "Verification needed"}
-            )
-        
-        # 4. Verify the CAPTCHA
-        is_human = await verify_turnstile(turnstile_token)
-        if not is_human:
-            raise HTTPException(status_code=403, detail="Invalid CAPTCHA")
+        if not token_already_verified:
+            # Limit reached! Is there a CAPTCHA token?
+            if not turnstile_token:
+                logger.warning(f"IP {ip_address} reached device limit. STRICT CAPTCHA required.")
+                raise HTTPException(
+                    status_code=403, 
+                    detail={"code": "STRICT_CAPTCHA_REQUIRED", "message": "High activity detected. Strict verification needed."}
+                )
+            
+            # 4. Verify the CAPTCHA
+            is_human = await verify_turnstile(turnstile_token)
+            if not is_human:
+                raise HTTPException(status_code=403, detail="Invalid CAPTCHA")
             
     # 5. Register the new device to this IP using a pipeline
     write_pipeline = redis_client.pipeline()
