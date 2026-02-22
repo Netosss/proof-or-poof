@@ -115,10 +115,21 @@ app = FastAPI(title="AI Provenance & Cleansing API", lifespan=lifespan)
 # so the frontend can read the JSON body instead of getting a generic Network Error.
 @app.exception_handler(StarletteHTTPException)
 async def custom_http_exception_handler(request: Request, exc: StarletteHTTPException):
+    headers = getattr(exc, "headers", None)
+    if headers is None:
+        headers = {}
+    
+    # Force CORS headers onto every single HTTP error response!
+    # Without this, the browser will block the 403 response.
+    headers["Access-Control-Allow-Origin"] = "*"
+    headers["Access-Control-Allow-Credentials"] = "true"
+    headers["Access-Control-Allow-Methods"] = "*"
+    headers["Access-Control-Allow-Headers"] = "*"
+    
     return JSONResponse(
         status_code=exc.status_code,
         content={"detail": exc.detail},
-        headers={"Access-Control-Allow-Origin": "*"}
+        headers=headers
     )
 
 # ---- Pricing Constants (USD per unit) ----
