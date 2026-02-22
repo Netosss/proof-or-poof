@@ -375,9 +375,15 @@ async def detect(
         # Pass temp_path so it can check magic bytes (deep validation)
         security_manager.validate_file(filename, filesize, temp_path)
         
+        # 1. Check Balance First (Fast, Cheap)
         # Deduct Credits (Atomic) - Raises 402 if insufficient
-        new_balance = deduct_guest_credits(device_id, cost=5)
+        wallet = get_guest_wallet(device_id)
+        current_credits = wallet.get("credits", 0)
         
+        if current_credits < 5:
+            logger.info(f"[BILLING] Insufficient credits for {device_id} (Has: {current_credits}, Need: 5)")
+            raise HTTPException(status_code=402, detail="Insufficient credits")
+
         start_time = time.time()
         
         # The wrapper handles security logic; we pass detect_ai_media as the worker function
@@ -388,6 +394,17 @@ async def detect(
             lambda path: detect_ai_media(path, trusted_metadata=sidecar_metadata),
             uid=device_id
         )
+
+        # 2. Deduct Credits ONLY on Success
+        # If secure_execute raises an error, this line is never reached.
+        # Also skip deduction if the result indicates a soft failure (Analysis Failed, File too large)
+        if result.get("summary") in ["Analysis Failed", "File too large to scan"]:
+            logger.info(f"[BILLING] Skipped deduction for {device_id} due to soft failure: {result.get('summary')}")
+            # Get current balance without deduction
+            wallet = get_guest_wallet(device_id)
+            new_balance = wallet.get("credits", 0)
+        else:
+            new_balance = deduct_guest_credits(device_id, cost=5)
         
         duration = time.time() - start_time
         

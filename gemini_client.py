@@ -32,7 +32,7 @@ class DetectionResult(BaseModel):
     confidence: float = Field(description="Confidence score between 0.0 and 1.0")
     explanation: str = Field(description="Max 10 words explaining the artifact")
 
-def get_quality_context(image_source: Union[str, Image.Image]) -> tuple[str, int]:
+def get_quality_context(image_source: Union[str, Image.Image, bytes]) -> tuple[str, int]:
     """
     Analyzes image quality using a weighted scoring system (DQT, Resolution, Blur).
     Returns a tuple of (context string for Gemini, quality score).
@@ -42,7 +42,7 @@ def get_quality_context(image_source: Union[str, Image.Image]) -> tuple[str, int
     avg_q_val = 0 # Default to 0 (High Quality/No Compression Artifacts)
     
     try:
-        # 1. Standardize Input (Handle Path vs PIL)
+        # 1. Standardize Input (Handle Path vs PIL vs Bytes)
         if isinstance(image_source, str):
             try:
                 img_pil = Image.open(image_source)
@@ -50,6 +50,16 @@ def get_quality_context(image_source: Union[str, Image.Image]) -> tuple[str, int
                 return "**CONTEXT: QUALITY UNKNOWN (Could not open).**", 0
             was_path = True
             filename = os.path.basename(image_source)
+        elif isinstance(image_source, bytes):
+            try:
+                # Decode bytes to PIL for consistency
+                # We use cv2 for decoding as it might be faster for the subsequent cv2 ops, 
+                # but PIL is needed for DQT check. Let's just use BytesIO -> PIL.
+                img_pil = Image.open(io.BytesIO(image_source))
+            except Exception:
+                return "**CONTEXT: QUALITY UNKNOWN (Could not decode bytes).**", 0
+            was_path = True # Treat as temp object that needs closing
+            filename = "Video Frame Bytes"
         else:
             img_pil = image_source
             was_path = False
@@ -206,7 +216,7 @@ def _resize_if_needed(img: Image.Image) -> Image.Image:
     
     return img
 
-def analyze_image_pro_turbo(image_source: Union[str, Image.Image]) -> dict:
+def analyze_image_pro_turbo(image_source: Union[str, Image.Image], pre_calculated_quality_context: str = None) -> dict:
     """
     GEMINI 3.0 FLASH - OPTIMIZED FOR FORENSIC DETECTION
     """
@@ -219,8 +229,12 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image]) -> dict:
         else:
             img_original = image_source
 
-        # 1. Analyze Quality on ORIGINAL resolution
-        quality_context, quality_score = get_quality_context(img_original)
+        # 1. Analyze Quality on ORIGINAL resolution (if not pre-calculated)
+        quality_score = 0
+        if pre_calculated_quality_context:
+            quality_context = pre_calculated_quality_context
+        else:
+            quality_context, quality_score = get_quality_context(img_original)
 
         # 2. Resize for Upload
         img_working = _resize_if_needed(img_original)
@@ -282,13 +296,14 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image]) -> dict:
             }
         
         # result["quality_score"] = quality_score # Already added above
+        result["quality_context"] = quality_context
         return result
 
     except Exception as e:
         print(f"Gemini Error: {e}")
         return {"confidence": -1.0}
 
-def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image]]) -> dict:
+def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image, bytes]]) -> dict:
     """
     Analyzes a batch of images for synthetic generation artifacts using Gemini 3.0 Flash.
     Returns a single aggregated result based on the median decision.
@@ -300,6 +315,22 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image]])
         idx_to_scan = 1 if len(image_sources) > 1 else 0
 
         for i, src in enumerate(image_sources):
+            # Check for quality context on the selected frame
+            if i == idx_to_scan:
+                # This works for bytes too now!
+                try:
+                    quality_context, _ = get_quality_context(src)
+                except Exception as e:
+                    print(f"Failed to get quality context for video frame: {e}")
+
+            # Optimization: Direct bytes (Video Frame)
+            if isinstance(src, bytes):
+                # We assume it's already a valid JPEG from cv2.imencode
+                image_parts.append(
+                    types.Part.from_bytes(data=src, mime_type="image/jpeg")
+                )
+                continue
+
             img_to_close = [] # Track objects for this specific image in the loop
             
             if isinstance(src, str):
@@ -308,7 +339,9 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image]])
             else:
                 img_original = src
 
-            if i == idx_to_scan:
+            if i == idx_to_scan and not quality_context:
+                 # Fallback if src was PIL/Path and loop order logic requires it here
+                 # (Though we moved it up, so this is just safety)
                 quality_context, _ = get_quality_context(img_original)
 
             img_working = _resize_if_needed(img_original)
@@ -332,6 +365,7 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image]])
                 img_obj.close()
                 
         if not quality_context:
+             # Fallback if no quality context could be determined (e.g. decoding failed)
              quality_context = "**CONTEXT: QUALITY UNKNOWN.**"
 
         # --- CONFIGURATION ---
@@ -369,7 +403,8 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image]])
             best_explanation_item = max(ai_votes, key=lambda x: x.confidence)
             final_result = {
                 "confidence": round(avg_conf, 2),
-                "explanation": best_explanation_item.explanation
+                "explanation": best_explanation_item.explanation,
+                "quality_context": quality_context
             }
         else:
             if not_ai_votes:
@@ -382,7 +417,8 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image]])
 
             final_result = {
                 "confidence": round(avg_conf, 2),
-                "explanation": explanation
+                "explanation": explanation,
+                "quality_context": quality_context
             }
             
         if hasattr(response, "usage_metadata"):
