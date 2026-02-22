@@ -41,7 +41,8 @@ from app.security import (
 from fastapi import Depends
 from fastapi.concurrency import run_in_threadpool
 from contextlib import asynccontextmanager
-from fastapi.responses import Response, PlainTextResponse
+from fastapi.responses import Response, PlainTextResponse, JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 # Faux Lens Remover
 from app.remover import FauxLensRemover
@@ -108,6 +109,17 @@ async def lifespan(app: FastAPI):
     logger.info("[SHUTDOWN] Background cleanup task stopped")
 
 app = FastAPI(title="AI Provenance & Cleansing API", lifespan=lifespan)
+
+# ---- Global Exception Handler for CORS ----
+# Ensures that HTTP exceptions (like our 403 CAPTCHA block) always return CORS headers
+# so the frontend can read the JSON body instead of getting a generic Network Error.
+@app.exception_handler(StarletteHTTPException)
+async def custom_http_exception_handler(request: Request, exc: StarletteHTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+        headers={"Access-Control-Allow-Origin": "*"}
+    )
 
 # ---- Pricing Constants (USD per unit) ----
 GPU_RATE_PER_SEC = 0.0019  # RunPod A5000/L4 rate
