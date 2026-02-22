@@ -34,6 +34,8 @@ from app.security import (
     check_ban_status, 
     deduct_guest_credits,
     get_guest_wallet,
+    check_ip_device_limit,
+    get_client_ip,
     db
 )
 from fastapi import Depends
@@ -271,7 +273,7 @@ async def download_image(url: str, max_size: int = 50 * 1024 * 1024) -> tuple[by
 async def detect(
     request: Request, 
     device_id: str = Header(..., alias="X-Device-ID"),
-    turnstile_token: str = Header(..., alias="X-Turnstile-Token")
+    turnstile_token: Optional[str] = Header(None, alias="X-Turnstile-Token")
 ):
     """
     Detect AI-generated content in images/videos.
@@ -285,10 +287,9 @@ async def detect(
     """
     
     # 1. Security & Wallet Check
-    # Verify Turnstile
-    is_human = await verify_turnstile(turnstile_token)
-    if not is_human:
-        raise HTTPException(status_code=403, detail="Turnstile validation failed")
+    # Verify IP Device Limit and CAPTCHA
+    ip = get_client_ip(request)
+    await check_ip_device_limit(ip, device_id, turnstile_token)
 
     # Check Ban Status
     if check_ban_status(device_id):
@@ -459,11 +460,18 @@ async def detect(
 
 # ---- Guest Balance Endpoint ----
 @app.get("/api/user/balance")
-async def get_balance(device_id: str = Header(..., alias="X-Device-ID")):
+async def get_balance(
+    request: Request,
+    device_id: str = Header(..., alias="X-Device-ID"),
+    turnstile_token: Optional[str] = Header(None, alias="X-Turnstile-Token")
+):
     """
     Get current credit balance for a guest device.
     Auto-creates wallet with 10 credits if it doesn't exist.
     """
+    ip = get_client_ip(request)
+    await check_ip_device_limit(ip, device_id, turnstile_token)
+
     wallet = get_guest_wallet(device_id)
     balance = wallet.get("credits", 0)
     logger.info(f"[BALANCE] Device: {device_id} | Credits: {balance}")
@@ -531,10 +539,11 @@ async def add_credits_get(
 # ---- Inpaint Endpoint (Sync/CPU Optimized) ----
 @app.post("/inpaint/image")
 async def inpaint_image(
+    request: Request,
     image: UploadFile = File(...), 
     mask: UploadFile = File(...),
     device_id: str = Header(..., alias="X-Device-ID"),
-    turnstile_token: str = Header(..., alias="X-Turnstile-Token")
+    turnstile_token: Optional[str] = Header(None, alias="X-Turnstile-Token")
 ):
     """
     Remove objects from an image using the LaMA model (CPU optimized).
@@ -544,10 +553,9 @@ async def inpaint_image(
     logger.info(f"[INPAINT] Request {request_id} started. Image: {image.filename}, Device: {device_id}")
 
     # 1. Security & Wallet Check
-    # Verify Turnstile (Async)
-    is_human = await verify_turnstile(turnstile_token)
-    if not is_human:
-        raise HTTPException(status_code=403, detail="Turnstile validation failed")
+    # Verify IP Device Limit and CAPTCHA
+    ip = get_client_ip(request)
+    await check_ip_device_limit(ip, device_id, turnstile_token)
 
     if check_ban_status(device_id):
         raise HTTPException(status_code=403, detail="Device is banned")
