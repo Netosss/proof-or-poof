@@ -37,7 +37,10 @@ class FauxLensRemover:
         dummy_img = Image.new('RGB', (512, 512), (0, 0, 0))
         dummy_mask = Image.new('L', (512, 512), 0)
         
-        with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        # FIX: The saved model 'big-lama.pt' does not support BFloat16 natively.
+        # We must use Float16 (half precision) or Float32.
+        # BFloat16 is newer and not supported by all JIT trace versions or model architectures.
+        with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.float16):
             _ = self.model(dummy_img, dummy_mask)
         logger.info("Warmup complete. Worker ready.")
 
@@ -61,7 +64,8 @@ class FauxLensRemover:
              mask = mask.resize(img.size, Image.Resampling.NEAREST)
 
         # RTX 4090 Inference
-        with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        # FIX: Use Float16 instead of BFloat16 for compatibility
+        with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.float16):
             result = self.model(img, mask)
 
         out_io = io.BytesIO()
