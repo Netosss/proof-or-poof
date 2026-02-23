@@ -1,5 +1,4 @@
-torch==2.2.1
-torchvision==0.17.1
+# torch & torchvision removed - we use the pre-installed versions from the base image
 pillow>=10.0.0
 pillow-heif>=0.15.0
 simple-lama-inpainting==0.1.1
