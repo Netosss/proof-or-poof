@@ -422,3 +422,57 @@ async def run_video_removal(video_path: str) -> Dict[str, Any]:
         if status == "COMPLETED": return job.output()
         if status == "FAILED": return {"error": "Job failed"}
         await asyncio.sleep(1)
+
+async def run_gpu_inpainting(image_bytes: bytes, mask_bytes: bytes) -> bytes:
+    """
+    Run inpainting on RunPod GPU worker.
+    Returns: processed image bytes (PNG).
+    """
+    config = get_config()
+    if not config["endpoint_id"]:
+        raise ValueError("RunPod configuration missing (RUNPOD_ENDPOINT_ID)")
+
+    try:
+        runpod.api_key = config["api_key"]
+        endpoint = runpod.Endpoint(config["endpoint_id"])
+
+        # Base64 encode inputs
+        img_b64 = base64.b64encode(image_bytes).decode("utf-8")
+        mask_b64 = base64.b64encode(mask_bytes).decode("utf-8")
+
+        payload = {
+            "image": img_b64,
+            "mask": mask_b64
+        }
+        
+        webhook_url = config.get("webhook_url")
+        # Use a longer timeout for inpainting as it might cold start
+        timeout = 180 
+        
+        if webhook_url:
+             job_result = await _run_with_webhook(endpoint, payload, webhook_url, timeout_seconds=timeout)
+        else:
+             job_result = await _run_with_polling(endpoint, payload, timeout_seconds=timeout)
+
+        if not job_result:
+             raise RuntimeError("Empty response from worker")
+
+        if "error" in job_result:
+            raise RuntimeError(f"Worker error: {job_result['error']}")
+            
+        if "image_base64" not in job_result:
+             # Check if it's a batch result by mistake
+             if "results" in job_result:
+                 # Try to grab first result
+                 first = job_result["results"][0]
+                 if "image_base64" in first:
+                     return base64.b64decode(first["image_base64"])
+             
+             logger.error(f"[RUNPOD] Invalid response keys: {job_result.keys()}")
+             raise RuntimeError("Worker did not return image_base64")
+             
+        return base64.b64decode(job_result["image_base64"])
+
+    except Exception as e:
+        logger.error(f"[RUNPOD] Inpainting failed: {e}")
+        raise e

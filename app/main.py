@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 from app.detector import detect_ai_media
 from app.schemas import DetectionResponse
-from app.runpod_client import run_video_removal, pending_jobs, webhook_result_buffer, cleanup_stale_jobs
+from app.runpod_client import run_video_removal, pending_jobs, webhook_result_buffer, cleanup_stale_jobs, run_gpu_inpainting
 from app.security import (
     security_manager, 
     check_and_deduct_credits, 
@@ -44,8 +44,9 @@ from contextlib import asynccontextmanager
 from fastapi.responses import Response, PlainTextResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-# Faux Lens Remover
-from app.remover import FauxLensRemover
+# Faux Lens Remover - DEPRECATED / REMOVED
+# from app.remover import FauxLensRemover
+
 
 # Webhook authentication secret (set via environment variable)
 RUNPOD_WEBHOOK_SECRET = os.getenv("RUNPOD_WEBHOOK_SECRET", "")
@@ -89,15 +90,10 @@ async def lifespan(app: FastAPI):
     cleanup_task = asyncio.create_task(periodic_cleanup())
     logger.info("[STARTUP] Background cleanup task started")
 
-    # Initialize FauxLensRemover
-    try:
-        app.state.remover = FauxLensRemover()
-        logger.info("[STARTUP] FauxLensRemover initialized")
-    except Exception as e:
-        logger.error(f"[STARTUP] Failed to initialize FauxLensRemover: {e}")
-        # We don't raise here so the app can still start, but inpaint endpoint will fail
-        app.state.remover = None
-
+    # Initialize FauxLensRemover - DEPRECATED / REMOVED
+    # We now use RunPod GPU worker exclusively.
+    # app.state.remover = None 
+    
     yield
     # Shutdown: cancel cleanup task
     if cleanup_task:
@@ -584,7 +580,7 @@ async def add_credits_get(
 ):
     return perform_recharge(user_id, amount, key)
 
-# ---- Inpaint Endpoint (Sync/CPU Optimized) ----
+# ---- Inpaint Endpoint (RunPod GPU Only) ----
 @app.post("/inpaint/image")
 async def inpaint_image(
     request: Request,
@@ -594,8 +590,8 @@ async def inpaint_image(
     turnstile_token: Optional[str] = Header(None, alias="X-Turnstile-Token")
 ):
     """
-    Remove objects from an image using the LaMA model (CPU optimized).
-    This endpoint is async to verify Turnstile, and offloads heavy work to threadpool.
+    Remove objects from an image using RunPod GPU worker (LaMA).
+    Endpoint verifies Turnstile, checks credits, and only deducts on success.
     """
     request_id = str(uuid.uuid4())
     logger.info(f"[INPAINT] Request {request_id} started. Image: {image.filename}, Device: {device_id}")
@@ -608,86 +604,79 @@ async def inpaint_image(
     if check_ban_status(device_id):
         raise HTTPException(status_code=403, detail="Device is banned")
 
-    # [NEW] Free Retry Logic (Hash-Based)
-    # Check if this exact image was just paid for.
-    is_free_retry = False
-    image_bytes = await image.read()
-    image.file.seek(0) # Reset file pointer for later use
+    # 2. Free Retry & Balance Check
+    # We need to calculate hash before reading full files, but reading is async.
+    # We'll read the files now as we need them for processing anyway.
     
+    # Read files into memory (limited by server config/memory, but safer for GPU transfer)
+    try:
+        image_bytes = await image.read()
+        mask_bytes = await mask.read()
+        
+        # Reset file pointers not needed since we have bytes in memory
+        image_size_mb = len(image_bytes) / (1024 * 1024)
+        logger.info(f"[INPAINT] Request {request_id}: Files read. Image size: {image_size_mb:.2f}MB")
+        
+    except Exception as e:
+        logger.error(f"[INPAINT] File read error: {e}")
+        raise HTTPException(status_code=400, detail="Error reading upload files")
+
+    # Check for Free Retry (Hash-Based)
+    is_free_retry = False
     img_hash = hashlib.sha256(image_bytes).hexdigest()
-    # Cache key: paid_image:{device_id}:{img_hash}
     cache_key = f"paid_image:{device_id}:{img_hash}"
     
     # We need to access redis directly. Using security_manager logic style.
-    # Ideally import redis_client from app.security
     from app.security import redis_client
 
     if redis_client:
         if redis_client.get(cache_key):
             is_free_retry = True
-            logger.info(f"[INPAINT] Free retry for {device_id} on image {img_hash[:8]}")
-            # Delete key to consume the free retry (One free retry per payment)
-            redis_client.delete(cache_key)
+            logger.info(f"[INPAINT] Free retry available for {device_id} on image {img_hash[:8]}")
     
-    new_balance = -1 # Placeholder
+    # Check Balance (Only if not free retry)
+    wallet = get_guest_wallet(device_id)
+    current_credits = wallet.get("credits", 0)
+    
+    if not is_free_retry and current_credits < 2:
+        logger.info(f"[BILLING] Insufficient credits for {device_id} (Has: {current_credits}, Need: 2)")
+        raise HTTPException(status_code=402, detail="Insufficient credits")
 
-    if not is_free_retry:
-        # Deduct 2 Credits (Atomic) - Raises 402 if insufficient
-        try:
-            new_balance = deduct_guest_credits(device_id, cost=2)
-            
-            # Set flag for next time
-            if redis_client:
-                # Expire in 10 minutes (plenty of time to retry)
-                redis_client.set(cache_key, "1", ex=600) 
-        except HTTPException as e:
-            logger.warning(f"[INPAINT] Request {request_id} Insufficient funds for {device_id}")
-            raise e
-    else:
-        # Just get current balance for header
-        wallet = get_guest_wallet(device_id)
-        new_balance = wallet.get("credits", 0)
-
-    if not hasattr(app.state, "remover") or app.state.remover is None:
-        logger.error(f"[INPAINT] Service unavailable for request {request_id}")
-        raise HTTPException(status_code=503, detail="Inpainting service unavailable")
-
+    # 3. Process Content (GPU Only)
     try:
         start_time = time.time()
+        logger.info(f"[INPAINT] Request {request_id} sending to GPU worker...")
         
-        # 1. READ (Async friendly)
-        read_start = time.time()
-        # image_bytes already read above for hashing
-        mask_bytes = await mask.read()
-        read_duration = time.time() - read_start
+        # Call RunPod Worker
+        result_bytes = await run_gpu_inpainting(image_bytes, mask_bytes)
         
-        log_memory(f"Pre-Inpaint: {image.filename}")
+        duration = time.time() - start_time
+        logger.info(f"[INPAINT] GPU Request {request_id} COMPLETED in {duration:.3f}s")
         
-        image_size_mb = len(image_bytes) / (1024 * 1024)
-        logger.info(f"[INPAINT] Request {request_id}: Files read in {read_duration:.3f}s. Image size: {image_size_mb:.2f}MB")
+        # 4. Settlement (On Success)
+        if is_free_retry:
+            # Consume the retry token
+            if redis_client:
+                redis_client.delete(cache_key)
+            # No deduction, use current balance
+            new_balance = current_credits
+        else:
+            # Deduct 2 Credits
+            new_balance = deduct_guest_credits(device_id, cost=2)
+            # Grant free retry for 10 minutes (in case user needs to regenerate/download again immediately)
+            if redis_client:
+                redis_client.set(cache_key, "1", ex=600)
         
-        # 2. PROCESS (Offload CPU work to threadpool)
-        process_start = time.time()
-        # Run CPU-heavy task in threadpool so we don't block the async event loop
-        result = await run_in_threadpool(app.state.remover.process_image, image_bytes, mask_bytes)
-        process_duration = time.time() - process_start
-        
-        total_duration = time.time() - start_time
-        logger.info(f"[INPAINT] Request {request_id} COMPLETED in {total_duration:.3f}s (Processing: {process_duration:.3f}s)")
-        
-        log_memory(f"Post-Inpaint: {image.filename}")
-        
-        # 3. RETURN
-        # Add X-User-Balance header
+        # 5. Return Response
         headers = {"X-User-Balance": str(new_balance)}
-        return Response(content=result, media_type="image/png", headers=headers)
+        return Response(content=result_bytes, media_type="image/png", headers=headers)
         
-    except ValueError as e:
-        logger.warning(f"[INPAINT] Request {request_id} Validation Error: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"[INPAINT] Request {request_id} FAILED: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal processing error")
+        logger.error(f"[INPAINT] GPU Worker failed for {request_id}: {e}", exc_info=True)
+        # IMPORTANT: We do not deduct credits here since the operation failed.
+        # If it was a free retry, we don't consume it either, allowing the user to try again.
+        raise HTTPException(status_code=500, detail="Inpainting service unavailable")
+
 
 
 # ---- Lemon Squeezy Webhook ----
