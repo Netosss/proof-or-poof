@@ -544,7 +544,7 @@ def get_video_metadata_score(metadata: dict, filename: str = "", file_path: str 
         human_score += 0.10
         signals.append("Creation time with timezone")
     
-    # 6. Audio channel analysis - mono typical of phone
+    # 6. Audio channel analysis
     if audio_stream:
         channels = audio_stream.get("channels", 0)
         if channels == 1:
@@ -554,7 +554,7 @@ def get_video_metadata_score(metadata: dict, filename: str = "", file_path: str 
             ai_score += 0.05
             signals.append("Stereo audio")
     
-    # 7. Rotation metadata - phones often record with rotation
+    # 7. Rotation metadata
     if video_stream:
         rotation = video_stream.get("tags", {}).get("rotate", "")
         side_data = video_stream.get("side_data_list", [])
@@ -563,7 +563,7 @@ def get_video_metadata_score(metadata: dict, filename: str = "", file_path: str 
             human_score += 0.10
             signals.append("Video rotation metadata (phone typical)")
     
-    # 8. Duration analysis - AI videos typically 3-10s, human videos vary
+    # 8. Duration analysis
     if duration > 30:
         human_score += 0.05
         signals.append(f"Long duration ({duration:.1f}s) - human typical")
@@ -571,7 +571,7 @@ def get_video_metadata_score(metadata: dict, filename: str = "", file_path: str 
         ai_score += 0.05
         signals.append(f"Short duration ({duration:.1f}s) - AI typical")
     
-    # 9. Variable frame rate / VBR - common in phone recordings
+    # 9. Variable frame rate / VBR
     if avg_frame_rate and r_frame_rate and avg_frame_rate != r_frame_rate:
         human_score += 0.05
         signals.append("Variable frame rate detected (phone/screen rec typical)")
@@ -817,7 +817,7 @@ def get_forensic_metadata_score(exif: dict) -> tuple:
         score += 0.05
         signals.append("Standard camera compression")
 
-    # === TIER 8: COLOR PROFILES (Strong Human Signal) ===
+    # === TIER 8: COLOR PROFILES & SENSOR PHYSICS ===
     # Real phones/cameras often use "Uncalibrated" (65535) + ICC Profile (e.g. Display P3)
     # AI generators typically default to standard sRGB (1) with no profile.
     
@@ -839,6 +839,37 @@ def get_forensic_metadata_score(exif: dict) -> tuple:
     if "Orientation" in exif:
         score += 0.10
         signals.append("Physical orientation sensor data present")
+
+    # --- Tier 8: Sensor Physics ---
+    # SensingMethod: 2 = One-chip color area sensor (Standard Digital Camera)
+    sensing_method = to_float(exif.get("SensingMethod"))
+    if sensing_method == 2:
+        score += 0.20
+        signals.append("Authenticated sensor sensing method (Digital Camera)")
+    
+    # FocalPlaneResolution: Pro cameras use this
+    if "FocalPlaneXResolution" in exif or "FocalPlaneYResolution" in exif:
+        score += 0.15
+        signals.append("High-fidelity focal plane resolution calibration")
+
+    # --- Tier 9: Image Origin ---
+    # FileSource: 3 = Digital Camera (often encoded as bytes b'\x03')
+    file_src = exif.get("FileSource")
+    # Handle both byte and int representations
+    if file_src == 3 or file_src == b'\x03' or str(file_src) == '3':
+         score += 0.15
+         signals.append("Digital camera file source verified")
+    
+    # SceneType: 1 = Directly photographed
+    scene_type = exif.get("SceneType")
+    if scene_type == 1 or scene_type == b'\x01' or str(scene_type) == '1':
+        score += 0.15
+        signals.append("Directly photographed scene type (Non-synthetic)")
+
+    # --- Tier 10: Low-Level Hardware ---
+    if "CFAPattern" in exif:
+        score += 0.10
+        signals.append("Color Filter Array (CFA) pattern fingerprint")
 
     return round(score, 2), signals
 
