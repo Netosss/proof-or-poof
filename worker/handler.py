@@ -9,11 +9,15 @@ logger = logging.getLogger(__name__)
 
 # ---------------- Global Initialization ----------------
 # This triggers the JIT warmup immediately on pod boot
+remover = None
 try:
     remover = FauxLensRemover()
+    logger.info("FauxLensRemover initialized successfully.")
 except Exception as e:
     logger.error(f"Worker initialization failed: {e}")
-    remover = None
+    # Don't set remover to None, just leave it as None to fail specific requests
+    # but still allow the worker to start and report error
+
 
 # ---------------- Worker Logic ----------------
 def handler(job):

@@ -11,7 +11,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 # Bake the model directly into the image for instant cold starts
 RUN mkdir -p /app/models/hub/checkpoints && \
-    curl -L -o /app/models/hub/checkpoints/big-lama.pt \
+    wget -L -O /app/models/hub/checkpoints/big-lama.pt \
     "https://github.com/geekyutao/Inpaint-Anything/releases/download/v1.0/big-lama.pt"
 
 COPY worker/handler.py .
