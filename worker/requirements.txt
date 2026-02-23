@@ -1,7 +1,7 @@
+torch==2.2.1
+torchvision==0.17.1
+pillow>=10.0.0
+pillow-heif>=0.15.0
+simple-lama-inpainting==0.1.1
+psutil
 runpod
-transformers==4.48.3
-accelerate
-Pillow
-timm
-numpy
-safetensors

@@ -1449,162 +1449,84 @@ async def detect_ai_media_image_logic(
                 ]
             }
     else:
-        # --- STRIPPED-JPEG ADAPTIVE POLICY (Gemini Gateway) ---
-        # Trigger Gemini if:
-        # 1. Image is Stripped (no metadata) OR
-        # 2. Metadata shows "uncertain" AI signals (0.3 < tiered_score < 0.8) - Double Check
-        # AND Image is large enough (>= 50k pixels, approx 224x224)
-        should_use_gemini = total_pixels >= 50_000 and (is_stripped or (0.3 < tiered_score < 0.8))
+        # --- GEMINI (Standard Case) ---
+        # "All images go to Gemini" - bypassing previous stripped/tiered logic
+        logger.info(f"[GEMINI] Triggering Gemini Pro Turbo (Pixels: {total_pixels}, Score: {tiered_score:.2f})")
+            
+        # --- OPTIMIZATION: Pre-calculate quality context to avoid redundant I/O ---
+        # We already have the file open (or logic to open it)
+        # If we have a frame, use it. If we have a path, open it once here.
+        pre_calc_context = None
+        source_for_gemini = frame or file_path
         
-        if should_use_gemini:
-            logger.info(f"[GEMINI] Triggering Gemini Pro Turbo (Pixels: {total_pixels}, Stripped: {is_stripped}, Score: {tiered_score:.2f})")
+        try:
+            # Run quality check in thread pool to avoid blocking event loop
+            # Use standard PIL open for quality check (needs full image)
+            def _get_context_safe():
+                if frame:
+                    return get_quality_context(frame)[0]
+                else:
+                    with Image.open(file_path) as img:
+                        return get_quality_context(img)[0]
+                        
+            pre_calc_context = await asyncio.to_thread(_get_context_safe)
+        except Exception as e:
+            logger.warning(f"Failed to pre-calc quality context: {e}")
+        
+        # Pass pre-calculated context to Gemini Client
+        gemini_res = await asyncio.to_thread(analyze_image_pro_turbo, source_for_gemini, pre_calculated_quality_context=pre_calc_context)
+        logger.info(f"[GEMINI] Raw response: {json.dumps(gemini_res)}")
+        
+        gemini_score = float(gemini_res.get("confidence", -1.0))
+        gemini_explanation = gemini_res.get("explanation", "Analyzed via second layer of AI analysis")
+        quality_context = gemini_res.get("quality_context", "Unknown")
+        
+        if gemini_score >= 0.0:
+            # Cache the Gemini result too!
+            set_cached_result(img_hash, {
+                "ai_score": gemini_score,
+                "explanation": gemini_explanation,
+                "is_gemini_used": True,
+                "gpu_time_ms": 0,
+                "quality_context": quality_context
+            })
             
-            # --- OPTIMIZATION: Pre-calculate quality context to avoid redundant I/O ---
-            # We already have the file open (or logic to open it)
-            # If we have a frame, use it. If we have a path, open it once here.
-            pre_calc_context = None
-            source_for_gemini = frame or file_path
-            
-            try:
-                # Run quality check in thread pool to avoid blocking event loop
-                # Use standard PIL open for quality check (needs full image)
-                def _get_context_safe():
-                    if frame:
-                        return get_quality_context(frame)[0]
-                    else:
-                        with Image.open(file_path) as img:
-                            return get_quality_context(img)[0]
-                            
-                pre_calc_context = await asyncio.to_thread(_get_context_safe)
-            except Exception as e:
-                logger.warning(f"Failed to pre-calc quality context: {e}")
-            
-            # Pass pre-calculated context to Gemini Client
-            gemini_res = await asyncio.to_thread(analyze_image_pro_turbo, source_for_gemini, pre_calculated_quality_context=pre_calc_context)
-            logger.info(f"[GEMINI] Raw response: {json.dumps(gemini_res)}")
-            
-            gemini_score = float(gemini_res.get("confidence", -1.0))
-            gemini_explanation = gemini_res.get("explanation", "Analyzed via second layer of AI analysis")
-            quality_context = gemini_res.get("quality_context", "Unknown")
-            
-            if gemini_score >= 0.0:
-                # Cache the Gemini result too!
-                set_cached_result(img_hash, {
-                    "ai_score": gemini_score,
-                    "explanation": gemini_explanation,
-                    "is_gemini_used": True,
-                    "gpu_time_ms": 0,
-                    "quality_context": quality_context
-                })
-                
-                is_ai_likely = gemini_score > 0.5
-                raw_conf = gemini_score if is_ai_likely else (1.0 - gemini_score)
-                final_conf = boost_score(raw_conf, is_ai_likely=is_ai_likely)
+            is_ai_likely = gemini_score > 0.5
+            raw_conf = gemini_score if is_ai_likely else (1.0 - gemini_score)
+            final_conf = boost_score(raw_conf, is_ai_likely=is_ai_likely)
 
-                return {
-                    "summary": "AI-Generated" if final_conf > 0.99 else ("Likely AI-Generated" if is_ai_likely else "Likely No AI Detected"),
-                    "confidence_score": round(final_conf, 2),
-                    "is_gemini_used": True,
-                    "gpu_time_ms": 0,
-                    "evidence_chain": [
-                        {
-                            "layer": "Layer 1: Metadata Check",
-                            "status": "warning",
-                            "label": "Metadata Check",
-                            "detail": "No camera metadata found."
-                        },
-                        {
-                            "layer": "Layer 3: Visual Context",
-                            "status": "flagged" if is_ai_likely else "passed",
-                            "label": "Visual Inspection",
-                            "detail": gemini_explanation,
-                            "context_quality": quality_context
-                        }
-                    ]
-                }
-
-    # Wallet Guard: Prevent multi-minute GPU jobs for huge files
-    if not frame and os.path.exists(file_path):
-        f_size = os.path.getsize(file_path)
-        if f_size > 50 * 1024 * 1024:
             return {
-                "summary": "File too large to scan",
-                "confidence_score": 0.0, 
+                "summary": "AI-Generated" if final_conf > 0.99 else ("Likely AI-Generated" if is_ai_likely else "Likely No AI Detected"),
+                "confidence_score": round(final_conf, 2),
+                "is_gemini_used": True,
+                "gpu_time_ms": 0,
                 "evidence_chain": [
                     {
-                        "layer": "System",
+                        "layer": "Layer 1: Metadata Check",
                         "status": "warning",
-                        "label": "File Error",
-                        "detail": "File exceeds size limit."
+                        "label": "Metadata Check",
+                        "detail": "No camera metadata found."
+                    },
+                    {
+                        "layer": "Layer 3: Visual Context",
+                        "status": "flagged" if is_ai_likely else "passed",
+                        "label": "Visual Inspection",
+                        "detail": gemini_explanation,
+                        "context_quality": quality_context
                     }
                 ]
             }
-
-    # --- Local GPU Scan (Fallback or Standard Case) ---
-    t_gpu = time.perf_counter()
-    # At this point, we know cached_result is None because the cache hit handled above
-    forensic_result = await run_deep_forensics(source_for_hash, width, height)
-    forensic_probability = forensic_result.get("ai_score", 0.0)
-    actual_gpu_time_ms = forensic_result.get("gpu_time_ms", 0.0)
-    set_cached_result(img_hash, forensic_result)
-    roundtrip_ms = (time.perf_counter() - t_gpu) * 1000
-    logger.info(f"[TIMING] Layer 2 - GPU scan (RunPod): {roundtrip_ms:.2f}ms | Actual GPU: {actual_gpu_time_ms:.2f}ms")
-    
-    total_layer_time_ms = (time.perf_counter() - layer_start) * 1000
-    logger.info(f"[TIMING] Layer 2 - Total: {total_layer_time_ms:.2f}ms | Result: {forensic_probability:.4f}")
-    
-    # --- Metadata-Model Conflict Resolution (Weighted Blend) ---
-    # When metadata signals strongly suggest AI but model disagrees, blend the scores
-    final_signals = ["Multi-layered consensus applied (Deep Learning + FFT)"]
-    original_prob = forensic_probability
-    
-    if ai_score >= 0.40 and forensic_probability < 0.20:
-        # Conflict: Metadata screams AI, model says human
-        # Blend: 65% metadata suspicion, 35% model (gentle nudge)
-        blended_prob = (ai_score * 0.65) + (forensic_probability * 0.35)
-        forensic_probability = blended_prob
-        final_signals.append(f"Metadata-model conflict: blended {ai_score:.2f}*0.65 + {original_prob:.4f}*0.35 = {blended_prob:.4f}")
-        logger.info(f"[CONFLICT] Metadata ai_score={ai_score:.2f}, model={original_prob:.4f} → blended={blended_prob:.4f}")
-    
-    l2_data = {
-        "status": "detected" if forensic_probability > 0.5 else "not_detected",
-        "probability": round(forensic_probability, 4),  # RAW probability for video aggregation
-        "signals": final_signals
-    }
-    
-    # Boost the overall confidence score (only for AI-likely results)
-    is_ai_likely = forensic_probability > 0.5
-    raw_conf = forensic_probability if is_ai_likely else (1.0 - forensic_probability)
-    final_conf = boost_score(raw_conf, is_ai_likely=is_ai_likely)
-
-    if forensic_probability > 0.5: 
-        if final_conf > 0.99:
-            summary = "AI-Generated"
-        else:
-            summary = "Likely AI-Generated"
-    else: summary = "No AI Detected"
-    
-    # Cap probabilistic scores at 0.99 to avoid "fake" 100% look, unless it's a hard metadata match
-    if final_conf > 0.99:
-        final_conf = 0.99
-
-    return {
-        "summary": summary,
-        "confidence_score": round(final_conf, 2),
-        "is_cached": cached_result is not None,
-        "gpu_time_ms": actual_gpu_time_ms,  # Actual GPU time for cost calculation
-        "evidence_chain": [
-            {
-                "layer": "Layer 1: Metadata Check",
-                "status": "warning",
-                "label": "Metadata Check",
-                "detail": "No camera metadata found."
-            },
-            {
-                "layer": "Layer 3: Deep Forensics",
-                "status": "flagged" if is_ai_likely else "passed",
-                "label": "Pixel Analysis",
-                "detail": "Noise patterns consistent with generative AI." if is_ai_likely else "Sensor noise patterns consistent with optical lenses."
-            }
-        ]
-    }
+        
+        # Fallback to a default error response if Gemini fails (shouldn't happen often)
+        return {
+            "summary": "Analysis Failed",
+            "confidence_score": 0.0,
+            "evidence_chain": [
+                {
+                    "layer": "System",
+                    "status": "warning",
+                    "label": "Service Error",
+                    "detail": "Gemini analysis failed."
+                }
+            ]
+        }
