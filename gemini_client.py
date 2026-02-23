@@ -166,6 +166,16 @@ Analyze the provided image and determine if it was generated or manipulated by a
    * If you see text in any language, read it carefully. If the letters form gibberish/non-words (e.g., English "Welcme tp th" or Hebrew "הצסיהת") or the structural logic of the sign fails, it is AI.
    * Ignore the actual date or year. Do not use "future dates" as a manipulation signal.
 
+4. LIGHTING & PHYSICS (THE "SUNSET" TEST):
+   * Trace the primary light source (e.g., the sun, a lamp). Do the shadows point in the exact opposite direction? Conflicting shadow directions equal a physics violation.
+   * Check foreground illumination: If the primary light source is behind the subject (backlit), the foreground MUST be in heavy shadow. If the foreground is brightly lit despite a backlit sun, it is AI.
+   * Look for impossible lens flares (e.g., perfectly straight, opaque geometric lines of light that lack natural optical scatter or camera aperture shapes).
+
+5. THE PORTRAIT & FABRIC TEST:
+   * Do not dismiss flawless skin or smooth backgrounds as mere "retouching." You must inspect the physical logic of the subject.
+   * FABRIC PHYSICS: Inspect clothing collars, necklines, and hems. AI consistently fails to render 3D fabric thickness, physical seams, or the micro-shadows where cloth rests on skin. Look for necklines that look mathematically "painted" flat onto the 2D surface of the body.
+   * EDGE DISSOLVING: Inspect where stray hairs meet a heavily blurred background. Real hair simply goes out of focus (optical blur); AI-generated hair structurally melts, smudges, or bleeds directly into the background colors.
+
 [OUTPUT FORMAT & EXAMPLES]
 You must respond strictly in JSON.
 * If AI (>0.5): The explanation must be a single, clinical sentence (max 10 words) isolating the specific artifact.
@@ -195,6 +205,16 @@ Example 4 (AI Generated Street Sign):
 {{
   "confidence": 0.88,
   "explanation": "Background stop sign contains illegible, gibberish characters."
+}}
+Example 5 (Lighting/Physics Failure):
+{{
+  "confidence": 0.92,
+  "explanation": "Foreground rocks are brightly illuminated despite the sun setting behind them."
+}}
+Example 5 (Fabric/Boundary AI Failure):
+{{
+  "confidence": 0.94,
+  "explanation": "Shirt neckline lacks 3D fabric thickness and appears painted on."
 }}
 """
 
