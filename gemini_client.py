@@ -164,6 +164,7 @@ Analyze the provided image and determine if it was generated or manipulated by a
    
 3. THE "TEXT" TRAP:
    * If you see text in any language, read it carefully. If the letters form gibberish/non-words (e.g., English "Welcme tp th" or Hebrew "הצסיהת") or the structural logic of the sign fails, it is AI.
+   * If a patch or logo contains squiggles, melted shapes, or pseudo-letters that mimic text but form absolute gibberish, it is an AI generation.
    * Ignore the actual date or year. Do not use "future dates" as a manipulation signal.
 
 4. LIGHTING & PHYSICS (THE "SUNSET" TEST):
@@ -176,6 +177,13 @@ Analyze the provided image and determine if it was generated or manipulated by a
    * FABRIC PHYSICS: Inspect clothing collars, necklines, and hems. AI consistently fails to render 3D fabric thickness, physical seams, or the micro-shadows where cloth rests on skin. Look for necklines that look mathematically "painted" flat onto the 2D surface of the body.
    * EDGE DISSOLVING: Inspect where stray hairs meet a heavily blurred background. Real hair simply goes out of focus (optical blur); AI-generated hair structurally melts, smudges, or bleeds directly into the background colors.
 
+6. MANDATORY SELF-VERIFICATION & ANTI-HALLUCINATION:
+   * AI models frequently hallucinate anatomical errors (like extra fingers) by misinterpreting shadows or overlapping objects.
+   * THE DEVIL'S ADVOCATE TEST: Before finalizing *any* structural anomaly as your explanation, you MUST actively attempt to debunk your own finding. 
+   * Ask yourself: "Can this visual anomaly be logically explained by a strange camera perspective, overlapping objects (occlusion), motion blur, or harsh real-world lighting?"
+   * If the answer is YES, or if it is even slightly ambiguous, you MUST DISCARD that anomaly. 
+   * Only select an anomaly for your final explanation if it is completely undeniable to a human observer (e.g., gibberish text, 2D objects lacking physical depth).
+   
 [OUTPUT FORMAT & EXAMPLES]
 You must respond strictly in JSON.
 * If AI (>0.5): The explanation must be a single, clinical sentence (max 10 words) isolating the specific artifact.
