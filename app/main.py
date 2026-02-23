@@ -142,7 +142,8 @@ async def custom_http_exception_handler(request: Request, exc: StarletteHTTPExce
     )
 
 # ---- Pricing Constants (USD per unit) ----
-GPU_RATE_PER_SEC = 0.0019  # RunPod A5000/L4 rate
+GPU_RATE_PER_SEC = 0.0019  # RunPod A5000/L4 rate (Detection)
+INPAINT_COST_PER_SEC = 0.00031 # RunPod RTX 4090 rate (Inpainting)
 CPU_RATE_PER_SEC = 0.0001  # Estimated Railway CPU rate
 GEMINI_FIXED_COST = 0.0024  # Cost per Gemini 3.0 Pro analysis
 AD_REVENUE_PER_REWARD = 0.015  # Avg eCPM for verified view
@@ -652,6 +653,10 @@ async def inpaint_image(
         
         duration = time.time() - start_time
         logger.info(f"[INPAINT] GPU Request {request_id} COMPLETED in {duration:.3f}s")
+        
+        # Log Cost (USD)
+        usd_cost = duration * INPAINT_COST_PER_SEC
+        log_transaction("INPAINT", -usd_cost, {"device_id": device_id, "duration": duration, "request_id": request_id})
         
         # 4. Settlement (On Success)
         if is_free_retry:
