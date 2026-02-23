@@ -10,9 +10,10 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
 # Bake the model directly into the image for instant cold starts
+# Using curl to follow redirects properly from GitHub Releases
 RUN mkdir -p /app/models/hub/checkpoints && \
-    wget -L -O /app/models/hub/checkpoints/big-lama.pt \
-    "https://github.com/geekyutao/Inpaint-Anything/releases/download/v1.0/big-lama.pt"
+    curl -L -o /app/models/hub/checkpoints/big-lama.pt \
+    "https://github.com/Sanster/models/releases/download/add_big_lama/big-lama.pt"
 
 COPY worker/handler.py .
 COPY worker/remover.py .
