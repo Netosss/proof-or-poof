@@ -5,8 +5,9 @@ import time
 import uuid
 import hashlib
 import json
-from typing import Optional
+from typing import Optional, Union
 import hmac
+import aiohttp
 from app.finance_logger import log_transaction
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header, Query
@@ -14,6 +15,7 @@ from firebase_admin import firestore
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 from pydantic import BaseModel
+import psutil
 
 # Load environment variables at the very beginning
 load_dotenv()
@@ -32,10 +34,18 @@ from app.security import (
     check_ban_status, 
     deduct_guest_credits,
     get_guest_wallet,
+    check_ip_device_limit,
+    get_client_ip,
     db
 )
 from fastapi import Depends
+from fastapi.concurrency import run_in_threadpool
 from contextlib import asynccontextmanager
+from fastapi.responses import Response, PlainTextResponse, JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+# Faux Lens Remover
+from app.remover import FauxLensRemover
 
 # Webhook authentication secret (set via environment variable)
 RUNPOD_WEBHOOK_SECRET = os.getenv("RUNPOD_WEBHOOK_SECRET", "")
@@ -45,6 +55,19 @@ RECHARGE_SECRET_KEY = os.getenv("RECHARGE_SECRET_KEY", "")
 
 # Background cleanup task
 cleanup_task = None
+
+def log_memory(stage: str):
+    """Log current memory usage."""
+    process = psutil.Process(os.getpid())
+    mem_info = process.memory_info()
+    sys_mem = psutil.virtual_memory()
+    
+    logger.info(
+        f"[MEMORY] {stage} | "
+        f"PID: {os.getpid()} | "
+        f"Process RSS: {mem_info.rss / 1024 / 1024:.2f} MB | "
+        f"System Available: {sys_mem.available / 1024 / 1024:.2f} MB / {sys_mem.total / 1024 / 1024:.2f} MB"
+    )
 
 async def periodic_cleanup():
     """Background task to clean up stale pending jobs every 30 seconds."""
@@ -65,6 +88,16 @@ async def lifespan(app: FastAPI):
     # Startup: start background cleanup
     cleanup_task = asyncio.create_task(periodic_cleanup())
     logger.info("[STARTUP] Background cleanup task started")
+
+    # Initialize FauxLensRemover
+    try:
+        app.state.remover = FauxLensRemover()
+        logger.info("[STARTUP] FauxLensRemover initialized")
+    except Exception as e:
+        logger.error(f"[STARTUP] Failed to initialize FauxLensRemover: {e}")
+        # We don't raise here so the app can still start, but inpaint endpoint will fail
+        app.state.remover = None
+
     yield
     # Shutdown: cancel cleanup task
     if cleanup_task:
@@ -76,6 +109,41 @@ async def lifespan(app: FastAPI):
     logger.info("[SHUTDOWN] Background cleanup task stopped")
 
 app = FastAPI(title="AI Provenance & Cleansing API", lifespan=lifespan)
+
+# ---- Global Exception Handler for CORS ----
+# Ensures that HTTP exceptions (like our 403 CAPTCHA block) always return CORS headers
+# so the frontend can read the JSON body instead of getting a generic Network Error.
+@app.exception_handler(StarletteHTTPException)
+async def custom_http_exception_handler(request: Request, exc: StarletteHTTPException):
+    headers = getattr(exc, "headers", None)
+    if headers is None:
+        headers = {}
+    
+    # Force CORS headers onto every single HTTP error response!
+    # Without this, the browser will block the 403 response.
+    headers["Access-Control-Allow-Origin"] = "*"
+    headers["Access-Control-Allow-Credentials"] = "true"
+    headers["Access-Control-Allow-Methods"] = "*"
+    headers["Access-Control-Allow-Headers"] = "*"
+    
+    # 🔴 CRITICAL FIX for ERR_HTTP2_PROTOCOL_ERROR on file uploads 🔴
+    # Drain the incoming request body so the server doesn't forcefully 
+    # drop the TCP connection when rejecting uploads early.
+    try:
+        # We use stream() to safely discard bytes without loading large files into memory
+        async for _ in request.stream():
+            pass
+    except Exception as e:
+        logger.warning(f"Error draining request stream in exception handler: {e}")
+        
+    response_data = {"detail": exc.detail}
+    logger.info(f"[ERROR HANDLER] Returning {exc.status_code} to client. Body: {response_data}, Headers: {headers}")
+    
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=response_data,
+        headers=headers
+    )
 
 # ---- Pricing Constants (USD per unit) ----
 GPU_RATE_PER_SEC = 0.0019  # RunPod A5000/L4 rate
@@ -96,6 +164,12 @@ app.add_middleware(
 @app.get("/health")
 async def health():
     return {"status": "healthy"}
+
+@app.get("/robots.txt", response_class=PlainTextResponse)
+def robots():
+    # "User-agent: *" means all bots
+    # "Disallow: /" means don't crawl anything here
+    return "User-agent: *\nDisallow: /"
 
 # ---- RunPod Webhook Endpoint ----
 @app.post("/webhook/runpod")
@@ -186,70 +260,204 @@ async def runpod_webhook(request: Request):
         logger.error(f"[WEBHOOK] Error processing callback: {e}")
         return {"status": "error", "message": str(e)}
 
+
+async def download_image(url: str, max_size: int = 50 * 1024 * 1024) -> tuple[bytes, str]:
+    """Helper to download image from URL."""
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url) as response:
+                if response.status != 200:
+                    raise HTTPException(status_code=400, detail=f"Failed to fetch image from URL: Status {response.status}")
+                
+                content = await response.read()
+                if len(content) > max_size:
+                    raise HTTPException(status_code=400, detail="Image too large (max 50MB)")
+                
+                # Determine filename/extension
+                content_type = response.headers.get("Content-Type", "")
+                suffix = ".jpg" # Default
+                if "png" in content_type: suffix = ".png"
+                elif "jpeg" in content_type or "jpg" in content_type: suffix = ".jpg"
+                elif "webp" in content_type: suffix = ".webp"
+                elif "gif" in content_type: suffix = ".gif"
+                elif "heic" in content_type: suffix = ".heic"
+                elif "heif" in content_type: suffix = ".heif"
+                elif "tiff" in content_type: suffix = ".tiff"
+                elif "bmp" in content_type: suffix = ".bmp"
+                elif "mp4" in content_type: suffix = ".mp4"
+                elif "quicktime" in content_type or "mov" in content_type: suffix = ".mov"
+                
+                # Try to guess from url if content-type is generic
+                if not content_type or "application" in content_type or "octet-stream" in content_type:
+                    lower_url = url.lower()
+                    if lower_url.endswith(".png"): suffix = ".png"
+                    elif lower_url.endswith(".webp"): suffix = ".webp"
+                    elif lower_url.endswith(".gif"): suffix = ".gif"
+                    elif lower_url.endswith(".heic"): suffix = ".heic"
+                    elif lower_url.endswith(".heif"): suffix = ".heif"
+                    elif lower_url.endswith(".tiff") or lower_url.endswith(".tif"): suffix = ".tiff"
+                    elif lower_url.endswith(".bmp"): suffix = ".bmp"
+                    elif lower_url.endswith(".mp4"): suffix = ".mp4"
+                    elif lower_url.endswith(".mov"): suffix = ".mov"
+                
+                return content, f"downloaded_media{suffix}"
+        except aiohttp.ClientError as e:
+            raise HTTPException(status_code=400, detail=f"Error fetching image: {str(e)}")
+
 # ---- Detect endpoint ----
 @app.post("/detect", response_model=DetectionResponse)
 async def detect(
     request: Request, 
-    file: UploadFile = File(...),
-    trusted_metadata: Optional[str] = Form(None),
     device_id: str = Header(..., alias="X-Device-ID"),
-    turnstile_token: str = Header(..., alias="X-Turnstile-Token")
+    turnstile_token: Optional[str] = Header(None, alias="X-Turnstile-Token")
 ):
     """
     Detect AI-generated content in images/videos.
-    Guest Wallet Flow: Validates Turnstile, checks bans, and deducts credits from device wallet.
     
-    Args:
-        file: The media file to analyze (image or video)
-        trusted_metadata: Optional JSON string with device-extracted EXIF data.
-        device_id: The Guest Device ID (FingerprintJS)
-        turnstile_token: Cloudflare Turnstile token
+    Accepts:
+    1. Multipart/form-data with 'file' field (and optional 'trusted_metadata')
+    2. Multipart/form-data with 'url' field (and optional 'trusted_metadata')
+    3. JSON payload: { "url": "https://..." }
+    
+    Guest Wallet Flow: Validates Turnstile, checks bans, and deducts credits from device wallet.
     """
     
     # 1. Security & Wallet Check
-    # Verify Turnstile
+    ip = get_client_ip(request)
+    
+    # Require CAPTCHA unconditionally on this endpoint
+    if not turnstile_token:
+        raise HTTPException(
+            status_code=403, 
+            detail={"code": "CAPTCHA_REQUIRED", "message": "Verification needed"}
+        )
+    
     is_human = await verify_turnstile(turnstile_token)
     if not is_human:
-        raise HTTPException(status_code=403, detail="Turnstile validation failed")
+        raise HTTPException(status_code=403, detail="Invalid CAPTCHA")
+        
+    # Check IP limits but bypass internal CAPTCHA verification since we just did it
+    await check_ip_device_limit(ip, device_id, token_already_verified=True)
 
     # Check Ban Status
     if check_ban_status(device_id):
         raise HTTPException(status_code=403, detail="Device is banned")
 
-    # Deduct Credits (Atomic) - Raises 402 if insufficient
-    new_balance = deduct_guest_credits(device_id, cost=5)
-
-    # Parse trusted metadata sidecar if provided
+    # 2. Extract Content (File or URL)
+    file_content = None
+    filename = "unknown"
     sidecar_metadata = None
-    if trusted_metadata:
-        try:
-            sidecar_metadata = json.loads(trusted_metadata)
-            logger.info(f"[SIDECAR] Device {device_id} provided trusted metadata: {list(sidecar_metadata.keys())}")
-        except json.JSONDecodeError as e:
-            logger.warning(f"[SIDECAR] Invalid JSON in trusted_metadata from {device_id}: {e}")
     
+    content_type = request.headers.get("content-type", "")
+    
+    if "application/json" in content_type:
+        try:
+            payload = await request.json()
+            url = payload.get("url")
+            if not url:
+                raise HTTPException(status_code=400, detail="Missing 'url' in JSON body")
+            file_content, filename = await download_image(url)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+            
+    elif "multipart/form-data" in content_type:
+        form = await request.form()
+        file_obj = form.get("file")
+        url_obj = form.get("url")
+        trusted_metadata_obj = form.get("trusted_metadata")
+        
+        # Parse trusted metadata sidecar if provided
+        if trusted_metadata_obj and isinstance(trusted_metadata_obj, str):
+            try:
+                sidecar_metadata = json.loads(trusted_metadata_obj)
+                logger.info(f"[SIDECAR] Device {device_id} provided trusted metadata: {list(sidecar_metadata.keys())}")
+            except json.JSONDecodeError as e:
+                logger.warning(f"[SIDECAR] Invalid JSON in trusted_metadata from {device_id}: {e}")
+        
+        if file_obj:
+            # Handle standard file upload
+            if not isinstance(file_obj, UploadFile):
+                 # Should theoretically not happen with correct multipart parsing, but safety check
+                 if isinstance(file_obj, str): # Could happen if client sends string in file field?
+                     raise HTTPException(status_code=400, detail="Invalid file upload format")
+            
+            # Use Starlette's UploadFile methods
+            file_content = await file_obj.read()
+            filename = file_obj.filename or "uploaded_file"
+            
+        elif url_obj:
+             if isinstance(url_obj, str):
+                file_content, filename = await download_image(url_obj)
+             else:
+                raise HTTPException(status_code=400, detail="Invalid url field")
+        else:
+            raise HTTPException(status_code=400, detail="Must provide 'file' or 'url' in form data")
+            
+    else:
+        raise HTTPException(status_code=415, detail="Unsupported Media Type. Use multipart/form-data or application/json")
+
+    # 3. Process Content
     # Use Secure Wrapper for primary security checks
     # (Rate limiting + Type/Size validation + Content Deep Check)
-    file_content = await file.read()
     filesize = len(file_content)
-    suffix = os.path.splitext(file.filename)[1].lower()
+    suffix = os.path.splitext(filename)[1].lower()
+    
+    if not suffix:
+        # Fallback if no suffix found
+        suffix = ".jpg"
 
+    log_memory(f"Pre-Detect: {filename}")
+
+    # Explicit Validation (Check before charging)
+    # This validates extension, size, and magic bytes (if possible)
+    # We pass None for file_path here since we haven't saved it yet, 
+    # but validate_file will check extension/size.
+    # To check magic bytes properly, we'd need the file on disk or a BytesIO wrapper.
+    # However, creating the temp file is cheap, so we'll do that first, THEN validate, THEN charge.
+    
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
         tmp_file.write(file_content)
         temp_path = tmp_file.name
 
     try:
+        # Validate BEFORE charging
+        # Pass temp_path so it can check magic bytes (deep validation)
+        security_manager.validate_file(filename, filesize, temp_path)
+        
+        # 1. Check Balance First (Fast, Cheap)
+        # Deduct Credits (Atomic) - Raises 402 if insufficient
+        wallet = get_guest_wallet(device_id)
+        current_credits = wallet.get("credits", 0)
+        
+        if current_credits < 5:
+            logger.info(f"[BILLING] Insufficient credits for {device_id} (Has: {current_credits}, Need: 5)")
+            raise HTTPException(status_code=402, detail="Insufficient credits")
+
         start_time = time.time()
         
         # The wrapper handles security logic; we pass detect_ai_media as the worker function
         # Pass device_id for rate limiting
+        # Note: secure_execute calls validate_file again, which is fine (redundant safety)
         result = await security_manager.secure_execute(
-            request, file.filename, filesize, temp_path, 
+            request, filename, filesize, temp_path, 
             lambda path: detect_ai_media(path, trusted_metadata=sidecar_metadata),
             uid=device_id
         )
+
+        # 2. Deduct Credits ONLY on Success
+        # If secure_execute raises an error, this line is never reached.
+        # Also skip deduction if the result indicates a soft failure (Analysis Failed, File too large)
+        if result.get("summary") in ["Analysis Failed", "File too large to scan"]:
+            logger.info(f"[BILLING] Skipped deduction for {device_id} due to soft failure: {result.get('summary')}")
+            # Get current balance without deduction
+            wallet = get_guest_wallet(device_id)
+            new_balance = wallet.get("credits", 0)
+        else:
+            new_balance = deduct_guest_credits(device_id, cost=5)
         
         duration = time.time() - start_time
+        
+        log_memory(f"Post-Detect: {filename}")
         
         # Check explicit flags for Gemini and Cache usage
         is_gemini_used = result.get("is_gemini_used", False)
@@ -264,35 +472,35 @@ async def detect(
             method = "cached_result"
             gpu_sec, cpu_sec = 0, 0
             logger.info(f"[COST] Cache hit: $0.00")
-            log_transaction("CACHE", 0.0, {"file": file.filename, "device_id": device_id})
+            log_transaction("CACHE", 0.0, {"file": filename, "device_id": device_id})
         elif is_gemini_used:
             cost = GEMINI_FIXED_COST
             method = "detect_with_gemini"
             gpu_sec, cpu_sec = 0, duration
             logger.info(f"[COST] Gemini analysis: ${cost:.6f}")
             gemini_usage = result.get("usage", {})
-            log_transaction("GEMINI", -cost, {"file": file.filename, "device_id": device_id, "usage": gemini_usage})
+            log_transaction("GEMINI", -cost, {"file": filename, "device_id": device_id, "usage": gemini_usage})
         elif actual_gpu_sec > 0:
             # Cost based on actual GPU utilization, not network round-trip
             cost = actual_gpu_sec * GPU_RATE_PER_SEC
             method = "detect_with_gpu"
             gpu_sec, cpu_sec = actual_gpu_sec, duration - actual_gpu_sec
             logger.info(f"[COST] GPU: {actual_gpu_sec:.3f}s (actual) vs {duration:.3f}s (round-trip) | Cost: ${cost:.6f}")
-            log_transaction("GPU", -cost, {"file": file.filename, "device_id": device_id, "duration": actual_gpu_sec})
+            log_transaction("GPU", -cost, {"file": filename, "device_id": device_id, "duration": actual_gpu_sec})
         else:
             cost = duration * CPU_RATE_PER_SEC
             method = "detect_metadata_only"
             gpu_sec, cpu_sec = 0, duration
-            log_transaction("CPU", -cost, {"file": file.filename, "device_id": device_id, "duration": duration})
+            log_transaction("CPU", -cost, {"file": filename, "device_id": device_id, "duration": duration})
         # Remove internal fields before returning response
         result.pop("gpu_time_ms", None)
         result.pop("is_gemini_used", None)
-        result.pop("is_cached", None)
+        result.pop("is_cached", None) 
         
         # Attach new balance
         result["new_balance"] = new_balance
 
-        logger.info(f"[ROUTE] Final Response for {file.filename}: {json.dumps(result)}")
+        logger.info(f"[ROUTE] Final Response for {filename}: {json.dumps(result)}")
         return result
     finally:
         if os.path.exists(temp_path):
@@ -300,13 +508,22 @@ async def detect(
 
 # ---- Guest Balance Endpoint ----
 @app.get("/api/user/balance")
-async def get_balance(device_id: str = Header(..., alias="X-Device-ID")):
+async def get_balance(
+    request: Request,
+    device_id: str = Header(..., alias="X-Device-ID"),
+    turnstile_token: Optional[str] = Header(None, alias="X-Turnstile-Token")
+):
     """
     Get current credit balance for a guest device.
     Auto-creates wallet with 10 credits if it doesn't exist.
     """
+    ip = get_client_ip(request)
+    await check_ip_device_limit(ip, device_id, turnstile_token)
+
     wallet = get_guest_wallet(device_id)
-    return {"balance": wallet.get("credits", 0)}
+    balance = wallet.get("credits", 0)
+    logger.info(f"[BALANCE] Device: {device_id} | Credits: {balance}")
+    return {"balance": balance}
 
 # ---- Recharge Webhook ----
 class RechargeRequest(BaseModel):
@@ -367,56 +584,111 @@ async def add_credits_get(
 ):
     return perform_recharge(user_id, amount, key)
 
-# ---- Watermark removal ----
-@app.post("/remove-watermark")
-async def remove_watermark(request: Request, file: UploadFile = File(...)):
-    file_content = await file.read()
-    filesize = len(file_content)
-    suffix = os.path.splitext(file.filename)[1].lower()
-    content_type = file.content_type or ""
-    is_video = content_type.startswith("video/") or suffix in {".mp4", ".mov", ".avi"}
+# ---- Inpaint Endpoint (Sync/CPU Optimized) ----
+@app.post("/inpaint/image")
+async def inpaint_image(
+    request: Request,
+    image: UploadFile = File(...), 
+    mask: UploadFile = File(...),
+    device_id: str = Header(..., alias="X-Device-ID"),
+    turnstile_token: Optional[str] = Header(None, alias="X-Turnstile-Token")
+):
+    """
+    Remove objects from an image using the LaMA model (CPU optimized).
+    This endpoint is async to verify Turnstile, and offloads heavy work to threadpool.
+    """
+    request_id = str(uuid.uuid4())
+    logger.info(f"[INPAINT] Request {request_id} started. Image: {image.filename}, Device: {device_id}")
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
-        tmp_file.write(file_content)
-        temp_path = tmp_file.name
+    # 1. Security & Wallet Check
+    # Verify IP Device Limit and CAPTCHA
+    ip = get_client_ip(request)
+    await check_ip_device_limit(ip, device_id, turnstile_token)
+
+    if check_ban_status(device_id):
+        raise HTTPException(status_code=403, detail="Device is banned")
+
+    # [NEW] Free Retry Logic (Hash-Based)
+    # Check if this exact image was just paid for.
+    is_free_retry = False
+    image_bytes = await image.read()
+    image.file.seek(0) # Reset file pointer for later use
+    
+    img_hash = hashlib.sha256(image_bytes).hexdigest()
+    # Cache key: paid_image:{device_id}:{img_hash}
+    cache_key = f"paid_image:{device_id}:{img_hash}"
+    
+    # We need to access redis directly. Using security_manager logic style.
+    # Ideally import redis_client from app.security
+    from app.security import redis_client
+
+    if redis_client:
+        if redis_client.get(cache_key):
+            is_free_retry = True
+            logger.info(f"[INPAINT] Free retry for {device_id} on image {img_hash[:8]}")
+            # Delete key to consume the free retry (One free retry per payment)
+            redis_client.delete(cache_key)
+    
+    new_balance = -1 # Placeholder
+
+    if not is_free_retry:
+        # Deduct 2 Credits (Atomic) - Raises 402 if insufficient
+        try:
+            new_balance = deduct_guest_credits(device_id, cost=2)
+            
+            # Set flag for next time
+            if redis_client:
+                # Expire in 10 minutes (plenty of time to retry)
+                redis_client.set(cache_key, "1", ex=600) 
+        except HTTPException as e:
+            logger.warning(f"[INPAINT] Request {request_id} Insufficient funds for {device_id}")
+            raise e
+    else:
+        # Just get current balance for header
+        wallet = get_guest_wallet(device_id)
+        new_balance = wallet.get("credits", 0)
+
+    if not hasattr(app.state, "remover") or app.state.remover is None:
+        logger.error(f"[INPAINT] Service unavailable for request {request_id}")
+        raise HTTPException(status_code=503, detail="Inpainting service unavailable")
 
     try:
         start_time = time.time()
         
-        async def removal_worker(path):
-            if is_video:
-                return await run_video_removal(path)
-            else:
-                return {"status": "success", "method": "local_cheap", "filename": file.filename}
-
-        result = await security_manager.secure_execute(
-            request, file.filename, filesize, temp_path, removal_worker
-        )
+        # 1. READ (Async friendly)
+        read_start = time.time()
+        # image_bytes already read above for hashing
+        mask_bytes = await mask.read()
+        read_duration = time.time() - read_start
         
-        duration = time.time() - start_time
+        log_memory(f"Pre-Inpaint: {image.filename}")
         
-        if is_video:
-            cost = duration * GPU_RATE_PER_SEC
-            log_transaction("GPU", -cost, {"task": "remove_watermark", "file": file.filename})
-            return {
-                "status": "success", "method": "runpod_gpu",
-                "cost_usd": round(cost, 5), "gpu_seconds": round(duration, 2), "result": result,
-            }
-        else:
-            cost = duration * CPU_RATE_PER_SEC
-            log_transaction("CPU", -cost, {"task": "remove_watermark", "file": file.filename})
-            return {
-                "status": "success", "method": "local_cheap",
-                "cost_usd": round(cost, 5), "filename": file.filename,
-            }
+        image_size_mb = len(image_bytes) / (1024 * 1024)
+        logger.info(f"[INPAINT] Request {request_id}: Files read in {read_duration:.3f}s. Image size: {image_size_mb:.2f}MB")
+        
+        # 2. PROCESS (Offload CPU work to threadpool)
+        process_start = time.time()
+        # Run CPU-heavy task in threadpool so we don't block the async event loop
+        result = await run_in_threadpool(app.state.remover.process_image, image_bytes, mask_bytes)
+        process_duration = time.time() - process_start
+        
+        total_duration = time.time() - start_time
+        logger.info(f"[INPAINT] Request {request_id} COMPLETED in {total_duration:.3f}s (Processing: {process_duration:.3f}s)")
+        
+        log_memory(f"Post-Inpaint: {image.filename}")
+        
+        # 3. RETURN
+        # Add X-User-Balance header
+        headers = {"X-User-Balance": str(new_balance)}
+        return Response(content=result, media_type="image/png", headers=headers)
+        
+    except ValueError as e:
+        logger.warning(f"[INPAINT] Request {request_id} Validation Error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        # The wrapper might have already raised an HTTPException, but if not:
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        logger.error(f"[INPAINT] Request {request_id} FAILED: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal processing error")
+
 
 # ---- Lemon Squeezy Webhook ----
 LEMONSQUEEZY_WEBHOOK_SECRET = os.getenv("LEMONSQUEEZY_WEBHOOK_SECRET")

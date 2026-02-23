@@ -24,3 +24,9 @@ agent-tools/
 .cursor/
 node_modules/
 
+# Models (Local only, baked into Docker)
+models/big-lama.pt
+
+# Local AI Prompt Testing
+test_prompt_accuracy.py
+test_prompt_gold.json

@@ -13,8 +13,9 @@ from PIL.ExifTags import TAGS
 from typing import Optional, Union
 from app.c2pa_reader import get_c2pa_manifest
 from app.runpod_client import run_deep_forensics
-from gemini_client import analyze_image_pro_turbo, analyze_batch_images_pro_turbo
-from app.security import security_manager
+from gemini_client import analyze_image_pro_turbo, analyze_batch_images_pro_turbo, get_quality_context
+from app.security import security_manager, redis_client
+import hashlib
 
 logger = logging.getLogger(__name__)
 
@@ -45,26 +46,103 @@ TIER_2_TECH_TERMS = [
 # TIER 3: THE "RISK TAKER" GENERAL SEARCH (Low Precision)
 TIER_3_REGEX = r"(?i)\b(ai|gpt|bot|gen)\b"
 
-# LRU Cache implementation for forensic results
-class LRUCache:
-    def __init__(self, capacity: int = 1000):
-        self.cache = OrderedDict()
-        self.capacity = capacity
+def get_smart_file_hash(file_path: str) -> str:
+    """
+    Smart hashing for large video files.
+    Reads Start+Middle+End chunks to create a unique signature without reading 200MB.
+    """
+    if not os.path.exists(file_path):
+        return "missing_file"
+        
+    file_size = os.path.getsize(file_path)
+    
+    # Threshold: 10MB. If smaller, just hash the whole thing (fast enough).
+    if file_size < 10 * 1024 * 1024:
+        with open(file_path, 'rb') as f:
+            data = f.read()
+            h = security_manager.get_safe_hash(data)
+            logger.info(f"[HASH] Full file hash for {file_path} ({file_size} bytes): {h}")
+            return h
+            
+    # For large files: Sample 512KB chunks
+    chunk_size = 512 * 1024 
+    h = hashlib.sha256()
+    
+    with open(file_path, 'rb') as f:
+        # 1. Header (Metadata/Moov)
+        chunk1 = f.read(chunk_size)
+        h.update(chunk1)
+        
+        # 2. Middle (Content)
+        f.seek(file_size // 2)
+        chunk2 = f.read(chunk_size)
+        h.update(chunk2)
+        
+        # 3. Footer (End bytes)
+        f.seek(max(0, file_size - chunk_size), os.SEEK_SET)
+        chunk3 = f.read(chunk_size)
+        h.update(chunk3)
+        
+    # Mix in file size to prevent collisions
+    h.update(str(file_size).encode())
+    res = h.hexdigest()
+    logger.info(f"[HASH] Smart hash for {file_path} ({file_size} bytes): {res}")
+    return res
 
-    def get(self, key):
-        if key not in self.cache:
+
+# In-memory fallback cache with TTL
+local_cache = OrderedDict()
+MAX_LOCAL_CACHE_SIZE = 100
+LOCAL_CACHE_TTL = 3600  # 1 hour
+
+def get_cached_result(key: str):
+    """Retrieve result from Redis (preferred) or Local Memory (fallback)."""
+    if redis_client:
+        try:
+            data = redis_client.get(f"forensic:{key}")
+            if data:
+                logger.info(f"[CACHE] Redis HIT for key: {key}")
+                return json.loads(data)
+            else:
+                logger.info(f"[CACHE] Redis MISS for key: {key}")
+                return None
+        except Exception as e:
+            logger.warning(f"Redis get failed: {e}")
             return None
-        self.cache.move_to_end(key)
-        return self.cache[key]
+    else:
+        # Fallback to local memory with TTL
+        entry = local_cache.get(key)
+        if entry:
+            val, timestamp = entry
+            if time.time() - timestamp < LOCAL_CACHE_TTL:
+                logger.info(f"[CACHE] Local Memory HIT for key: {key}")
+                local_cache.move_to_end(key)  # Mark as recently used
+                return val
+            else:
+                logger.info(f"[CACHE] Local Memory EXPIRED for key: {key}")
+                del local_cache[key]
+                return None
+        else:
+             logger.info(f"[CACHE] Local Memory MISS for key: {key}")
+        return None
 
-    def put(self, key, value):
-        if key in self.cache:
-            self.cache.move_to_end(key)
-        self.cache[key] = value
-        if len(self.cache) > self.capacity:
-            self.cache.popitem(last=False)
-
-forensic_cache = LRUCache(capacity=1000)
+def set_cached_result(key: str, value: dict):
+    """Store result in Redis (24h TTL) or Local Memory (fallback)."""
+    if redis_client:
+        try:
+            # Cache for 24 hours (86400 seconds)
+            redis_client.set(f"forensic:{key}", json.dumps(value), ex=86400)
+        except Exception as e:
+            logger.warning(f"Redis set failed: {e}")
+    else:
+        # Fallback to local memory
+        if key in local_cache:
+            local_cache.move_to_end(key)
+        
+        local_cache[key] = (value, time.time())
+        
+        if len(local_cache) > MAX_LOCAL_CACHE_SIZE:
+            local_cache.popitem(last=False) # Remove oldest item (FIFO eviction for LRU cache)
 
 def get_tiered_signature_score(full_dump: str, clean_dump: str) -> tuple:
     """
@@ -85,12 +163,20 @@ def get_tiered_signature_score(full_dump: str, clean_dump: str) -> tuple:
             signals.append(f"Found definite generator signature: '{word}'")
             return 0.99, signals 
 
-    # --- TIER 2: STRONG INDICATORS (Checked in everything) ---
+    # --- TIER 2: STRONG INDICATORS (Regex/Safe Search) ---
     tier_2_hits = 0
     for word in TIER_2_TECH_TERMS:
-        if word in full_dump:
-            tier_2_hits += 1
-            signals.append(f"Found technical artifact: '{word}'")
+        # Avoid short substring matches in binary data
+        if len(word) <= 4:
+            # Short words (<=4 chars): Only search in clean_metadata with word boundaries
+            if re.search(r'\b' + re.escape(word) + r'\b', clean_dump):
+                tier_2_hits += 1
+                signals.append(f"Found technical artifact in metadata: '{word}'")
+        else:
+            # Long words: Safe to search in full_dump (binary + text)
+            if word in full_dump:
+                tier_2_hits += 1
+                signals.append(f"Found technical artifact: '{word}'")
     
     if tier_2_hits > 0:
         score += 0.90 + ((tier_2_hits - 1) * 0.40)
@@ -217,8 +303,16 @@ def extract_video_frames(video_path: str) -> tuple:
                 if not is_ok:
                     quality_rejected += 1
                     continue
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frames.append(Image.fromarray(frame_rgb))
+                
+                # --- OPTIMIZATION: Immediate JPEG encoding ---
+                # 1. We don't need to convert BGR to RGB if we use imencode
+                # 2. Encode to JPEG in memory instantly (quality 95 to preserve forensics)
+                encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 95]
+                success, encoded_image = cv2.imencode('.jpg', frame, encode_param)
+                
+                if success:
+                    # Append the raw byte string instead of a PIL object
+                    frames.append(encoded_image.tobytes())
         
         cap.release()
         
@@ -231,8 +325,10 @@ def extract_video_frames(video_path: str) -> tuple:
             cap.set(cv2.CAP_PROP_POS_FRAMES, int(total_frames * 0.5))
             ret, frame = cap.read()
             if ret:
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frames.append(Image.fromarray(frame_rgb))
+                encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 95]
+                success, encoded_image = cv2.imencode('.jpg', frame, encode_param)
+                if success:
+                    frames.append(encoded_image.tobytes())
             cap.release()
             
     except Exception as e:
@@ -242,6 +338,7 @@ def extract_video_frames(video_path: str) -> tuple:
 
 async def get_video_metadata(video_path: str) -> dict:
     """Extract video metadata using ffprobe (async to avoid blocking event loop)."""
+    proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
             'ffprobe', '-v', 'quiet', '-print_format', 'json',
@@ -254,13 +351,22 @@ async def get_video_metadata(video_path: str) -> dict:
             if proc.returncode == 0:
                 return json.loads(stdout.decode())
         except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            logger.warning("ffprobe timeout")
+            logger.warning(f"ffprobe timeout for {video_path}")
     except FileNotFoundError:
         logger.warning("ffprobe not installed")
     except Exception as e:
         logger.error(f"Error extracting video metadata: {e}")
+    finally:
+        # --- OPTIMIZATION: Guaranteed cleanup ---
+        if proc is not None:
+            try:
+                # Check if it's still running
+                if proc.returncode is None:
+                    proc.kill()
+                    await proc.wait()
+            except ProcessLookupError:
+                pass # Already dead
+                
     return {}
 
 def get_video_metadata_score(metadata: dict, filename: str = "", file_path: str = "") -> tuple:
@@ -729,6 +835,11 @@ def get_forensic_metadata_score(exif: dict) -> tuple:
          score += 0.15
          signals.append("ICC Color Profile detected")
 
+    # --- Tier X: Orientation Sensor ---
+    if "Orientation" in exif:
+        score += 0.10
+        signals.append("Physical orientation sensor data present")
+
     return round(score, 2), signals
 
 def get_ai_suspicion_score(exif: dict, width: int = 0, height: int = 0, file_size: int = 0) -> tuple:
@@ -778,8 +889,8 @@ def get_ai_suspicion_score(exif: dict, width: int = 0, height: int = 0, file_siz
 
     # 3. AI-typical dimensions (only if no camera info)
     if width > 0 and height > 0 and not has_camera_info:
-        # AI generators often use power-of-2 or specific widths
-        ai_typical_widths = [512, 768, 1024, 1536, 2048]
+        # AI generators often use power-of-2 or specific widths, exclude 2048 as it's often used for social media.
+        ai_typical_widths = [512, 768, 1024, 1536]
         if width in ai_typical_widths:
             score += 0.15
             signals.append(f"AI-typical width: {width}px")
@@ -808,9 +919,11 @@ def get_ai_suspicion_score(exif: dict, width: int = 0, height: int = 0, file_siz
         is_phone_aspect = 0.40 < aspect < 0.60  # Modern phones: 9:16 to 9:22
         
         if is_portrait and is_phone_width and is_phone_aspect:
-            # Likely a phone screenshot - reduce AI suspicion significantly
-            score -= 0.20
-            signals.append(f"Likely phone screenshot ({width}x{height}) - forcing GPU analysis")
+            # It's a screenshot - we want to analyze it with Gemini if stripped, or GPU if not.
+            # reducing score is fine to avoid "AI-typical dimensions" flag, 
+            # but we shouldn't explicitly force GPU if we want Gemini to have a look.
+            score -= 0.10
+            signals.append(f"Likely phone screenshot ({width}x{height})")
         elif not is_standard and aspect > 0:
             score += 0.05
             signals.append(f"Non-standard aspect ratio: {aspect:.2f}")
@@ -859,7 +972,7 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
 
     # --- 1️⃣ LAYER 1: C2PA ---
     t_c2pa = time.perf_counter()
-    manifest = get_c2pa_manifest(file_path)
+    manifest = await asyncio.to_thread(get_c2pa_manifest, file_path)
     c2pa_time_ms = (time.perf_counter() - t_c2pa) * 1000
     logger.info(f"[TIMING] Layer 1 - C2PA check: {c2pa_time_ms:.2f}ms")
     if manifest:
@@ -899,13 +1012,22 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
             ]
         }
 
-    is_video = file_path.lower().endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm'))
+    is_video = file_path.lower().endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm', '.gif'))
+    # Ensure HEIC/TIFF are treated as images (already covered by else, but good to be explicit mentally)
     
     if is_video:
         safe_path = security_manager.sanitize_log_message(file_path)
         filename = os.path.basename(file_path)
         logger.info(f"Detecting AI in video: {safe_path}")
         
+        # --- VIDEO CACHE CHECK (Smart Hash) ---
+        video_hash = await asyncio.to_thread(get_smart_file_hash, file_path)
+        cached_video_result = get_cached_result(video_hash)
+        
+        if cached_video_result:
+            logger.info(f"[CACHE] Hit for VIDEO scan: {video_hash[:8]}...")
+            return cached_video_result
+
         # --- VIDEO METADATA EARLY EXIT ---
         t_video_meta = time.perf_counter()
         video_metadata = await get_video_metadata(file_path)
@@ -919,7 +1041,7 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
         # Early exit: Strong human metadata (camera/phone recording)
         if early_exit == "human":
             logger.info(f"[VIDEO] Early exit: Verified Human via metadata (h={human_score:.2f}, ai={ai_meta_score:.2f})")
-            return {
+            res = {
                 "summary": "No AI Detected",
                 "confidence_score": 0.99,  # Max 99% without C2PA
                 "evidence_chain": [
@@ -931,11 +1053,16 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
                     }
                 ]
             }
+            # Cache the early exit result
+            cached_version = res.copy()
+            cached_version["is_cached"] = True
+            set_cached_result(video_hash, cached_version)
+            return res
         
         # Early exit: Strong AI metadata (known AI generator)
         if early_exit == "ai":
             logger.info(f"[VIDEO] Early exit: AI Generator detected via metadata (h={human_score:.2f}, ai={ai_meta_score:.2f})")
-            return {
+            res = {
                 "summary": "AI-Generated",
                 "confidence_score": 0.99,  # Max 99% without C2PA
                 "evidence_chain": [
@@ -947,6 +1074,11 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
                     }
                 ]
             }
+            # Cache the early exit result
+            cached_version = res.copy()
+            cached_version["is_cached"] = True
+            set_cached_result(video_hash, cached_version)
+            return res
         
         # No early exit - proceed to frame analysis (Tri-Frame Batch Strategy)
         logger.info(f"[VIDEO] No early exit, proceeding to tri-frame batch analysis...")
@@ -981,16 +1113,20 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
         
         confidence = gemini_result.get("confidence", 0.0)
         explanation = gemini_result.get("explanation", "Analysis completed.")
+        quality_context = gemini_result.get("quality_context", "Unknown")
         gpu_time_ms = 0 # No RunPod GPU used
         
-        logger.info(f"[VIDEO] Gemini Batch Result: confidence={confidence}, explanation='{explanation}'")
+        logger.info(f"[VIDEO] Gemini Batch Result: confidence={confidence}, explanation='{explanation}', quality_context='{quality_context}'")
 
         is_ai_likely = confidence > 0.5
         summary = "Likely AI-Generated" if is_ai_likely else "Likely Authentic"
+        
+        # Invert confidence for human results so 0.05 AI score becomes 0.95 Human Confidence
+        final_conf = confidence if is_ai_likely else (1.0 - confidence)
 
-        return {
+        final_video_result = {
             "summary": summary,
-            "confidence_score": confidence,
+            "confidence_score": final_conf,
             "gpu_time_ms": gpu_time_ms,
             "is_gemini_used": True,
             "evidence_chain": [
@@ -1004,10 +1140,18 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
                     "layer": "Layer 3: Visual Context",
                     "status": "flagged" if is_ai_likely else "passed",
                     "label": "Visual Inspection",
-                    "detail": explanation
+                    "detail": explanation,
+                    "context_quality": quality_context
                 }
             ]
         }
+        
+        # Store in Cache (Cached version sets is_cached=True)
+        cached_version = final_video_result.copy()
+        cached_version["is_cached"] = True
+        set_cached_result(video_hash, cached_version)
+        
+        return final_video_result
     else:
         return await detect_ai_media_image_logic(file_path, l1_data, trusted_metadata=trusted_metadata)
 
@@ -1018,7 +1162,8 @@ PROVENANCE_WHITELIST = {
     "Make", "Model", "ExposureTime", "ISOSpeedRatings", 
     "FNumber", "GPSLatitude", "GPSLongitude", "GPSAltitude",
     "BodySerialNumber", "LensSerialNumber", "LensModel", "Flash",
-    "SubSecTimeOriginal", "SubSecTimeDigitized"
+    "SubSecTimeOriginal", "SubSecTimeDigitized",
+    "Orientation", "ColorSpace", "ExifOffset"
 }
 
 async def detect_ai_media_image_logic(
@@ -1045,7 +1190,7 @@ async def detect_ai_media_image_logic(
         source_path = None
         width, height = img_for_res.size
     else:
-        exif = get_exif_data(file_path)
+        exif = await asyncio.to_thread(get_exif_data, file_path)
         try:
             with Image.open(file_path) as img:
                 width, height = img.size
@@ -1095,9 +1240,12 @@ async def detect_ai_media_image_logic(
     # 1. Raw Packet Scan (First 50KB) - Added to full_dump only
     if not frame and file_path and os.path.exists(file_path):
         try:
-            with open(file_path, 'rb') as f:
-                raw_header = f.read(50000)
-                full_dump += raw_header.decode('utf-8', errors='ignore')
+            def _read_header():
+                with open(file_path, 'rb') as f:
+                    return f.read(50000)
+            
+            raw_header = await asyncio.to_thread(_read_header)
+            full_dump += raw_header.decode('utf-8', errors='ignore')
         except Exception as e:
             logger.warning(f"Raw scan failed: {e}")
     
@@ -1204,10 +1352,17 @@ async def detect_ai_media_image_logic(
     # Determine if the image is truly stripped of hardware provenance
     # We ignore "Web Junk" tags (JFIF, DPI, etc.) and only look for the High Value Whitelist
     # Also skip Gemini if we found strong technical AI indicators (Tier 1 or Tier 2)
-    is_stripped = not any(tag in exif for tag in PROVENANCE_WHITELIST) and tiered_score < 0.50
+    # NOTE: Screenshots often have minimal metadata (like ColorSpace/ExifOffset) but NO hardware info.
+    # We should treat them as stripped if they lack MAJOR hardware tags (Make/Model).
+    
+    # Strict whitelist: tags that confirm physical camera hardware
+    HARDWARE_TAGS = {"Make", "Model", "ExposureTime", "ISOSpeedRatings", "FNumber", "BodySerialNumber", "LensModel", "GPSLatitude"}
+    has_hardware_provenance = any(tag in exif for tag in HARDWARE_TAGS)
+    
+    is_stripped = not has_hardware_provenance and tiered_score < 0.50
     
     if is_stripped:
-        logger.info(f"[META] Image classified as STRIPPED (No High-Value Provenance Tags found)")
+        logger.info(f"[META] Image classified as STRIPPED (No Hardware Provenance Tags found)")
     elif tiered_score >= 0.50:
         logger.info(f"[META] Image has technical AI signatures (score={tiered_score:.2f}) - bypassing stripped check")
     else:
@@ -1216,8 +1371,8 @@ async def detect_ai_media_image_logic(
         logger.info(f"[META] Image has PROVENANCE tags: {found_tags}")
 
     # Use fast_mode for video frames (smaller hash thumbnail for speed)
-    img_hash = get_image_hash(source_for_hash, fast_mode=(frame is not None))
-    cached_result = forensic_cache.get(img_hash)
+    img_hash = await asyncio.to_thread(get_image_hash, source_for_hash, fast_mode=(frame is not None))
+    cached_result = get_cached_result(img_hash)
     
     if cached_result is not None:
         logger.info(f"[CACHE] Hit for image scan")
@@ -1235,7 +1390,7 @@ async def detect_ai_media_image_logic(
             cached_explanation = cached_result.get("explanation", "Analyzed via second layer of AI analysis (Cached)")
             
             return {
-                "summary": "Likely AI-Generated" if is_ai_likely else "No AI Detected",
+                "summary": "AI-Generated" if final_conf > 0.99 else "Likely AI-Generated",
                 "confidence_score": round(final_conf, 2),
                 "is_gemini_used": True,
                 "is_cached": True,
@@ -1255,24 +1410,91 @@ async def detect_ai_media_image_logic(
                     }
                 ]
             }
+        else:
+            logger.info(f"[CACHE] Returning cached GPU result (ai_score={forensic_probability:.4f})")
+            # Return cached GPU result
+            l2_data = {
+                "status": "detected" if forensic_probability > 0.5 else "not_detected",
+                "probability": round(forensic_probability, 4),
+                "signals": ["Cached result"]
+            }
+            
+            is_ai_likely = forensic_probability > 0.5
+            raw_conf = forensic_probability if is_ai_likely else (1.0 - forensic_probability)
+            final_conf = boost_score(raw_conf, is_ai_likely=is_ai_likely)
+            
+            if final_conf > 0.99:
+                final_conf = 0.99
+
+            summary = "AI-Generated" if forensic_probability > 0.5 else "No AI Detected" # Simplify for cache
+
+            return {
+                "summary": summary,
+                "confidence_score": round(final_conf, 2),
+                "is_cached": True,
+                "gpu_time_ms": 0,
+                "evidence_chain": [
+                    {
+                        "layer": "Layer 1: Metadata Check",
+                        "status": "warning",
+                        "label": "Metadata Check",
+                        "detail": "No camera metadata found."
+                    },
+                    {
+                        "layer": "Layer 3: Deep Forensics",
+                        "status": "flagged" if is_ai_likely else "passed",
+                        "label": "Pixel Analysis",
+                        "detail": "Noise patterns consistent with generative AI." if is_ai_likely else "Sensor noise patterns consistent with optical lenses."
+                    }
+                ]
+            }
     else:
         # --- STRIPPED-JPEG ADAPTIVE POLICY (Gemini Gateway) ---
-        if total_pixels >= 260_000 and is_stripped:
-            logger.info(f"[GEMINI] Triggering Gemini Pro Turbo for Large Stripped JPEG ({total_pixels/1_000_000:.2f}MP)")
+        # Trigger Gemini if:
+        # 1. Image is Stripped (no metadata) OR
+        # 2. Metadata shows "uncertain" AI signals (0.3 < tiered_score < 0.8) - Double Check
+        # AND Image is large enough (>= 50k pixels, approx 224x224)
+        should_use_gemini = total_pixels >= 50_000 and (is_stripped or (0.3 < tiered_score < 0.8))
+        
+        if should_use_gemini:
+            logger.info(f"[GEMINI] Triggering Gemini Pro Turbo (Pixels: {total_pixels}, Stripped: {is_stripped}, Score: {tiered_score:.2f})")
             
-            gemini_res = analyze_image_pro_turbo(frame or file_path)
+            # --- OPTIMIZATION: Pre-calculate quality context to avoid redundant I/O ---
+            # We already have the file open (or logic to open it)
+            # If we have a frame, use it. If we have a path, open it once here.
+            pre_calc_context = None
+            source_for_gemini = frame or file_path
+            
+            try:
+                # Run quality check in thread pool to avoid blocking event loop
+                # Use standard PIL open for quality check (needs full image)
+                def _get_context_safe():
+                    if frame:
+                        return get_quality_context(frame)[0]
+                    else:
+                        with Image.open(file_path) as img:
+                            return get_quality_context(img)[0]
+                            
+                pre_calc_context = await asyncio.to_thread(_get_context_safe)
+            except Exception as e:
+                logger.warning(f"Failed to pre-calc quality context: {e}")
+            
+            # Pass pre-calculated context to Gemini Client
+            gemini_res = await asyncio.to_thread(analyze_image_pro_turbo, source_for_gemini, pre_calculated_quality_context=pre_calc_context)
             logger.info(f"[GEMINI] Raw response: {json.dumps(gemini_res)}")
             
             gemini_score = float(gemini_res.get("confidence", -1.0))
             gemini_explanation = gemini_res.get("explanation", "Analyzed via second layer of AI analysis")
+            quality_context = gemini_res.get("quality_context", "Unknown")
             
             if gemini_score >= 0.0:
                 # Cache the Gemini result too!
-                forensic_cache.put(img_hash, {
+                set_cached_result(img_hash, {
                     "ai_score": gemini_score,
                     "explanation": gemini_explanation,
                     "is_gemini_used": True,
-                    "gpu_time_ms": 0
+                    "gpu_time_ms": 0,
+                    "quality_context": quality_context
                 })
                 
                 is_ai_likely = gemini_score > 0.5
@@ -1280,7 +1502,7 @@ async def detect_ai_media_image_logic(
                 final_conf = boost_score(raw_conf, is_ai_likely=is_ai_likely)
 
                 return {
-                    "summary": "Likely AI-Generated" if is_ai_likely else "Likely No AI Detected",
+                    "summary": "AI-Generated" if final_conf > 0.99 else ("Likely AI-Generated" if is_ai_likely else "Likely No AI Detected"),
                     "confidence_score": round(final_conf, 2),
                     "is_gemini_used": True,
                     "gpu_time_ms": 0,
@@ -1295,7 +1517,8 @@ async def detect_ai_media_image_logic(
                             "layer": "Layer 3: Visual Context",
                             "status": "flagged" if is_ai_likely else "passed",
                             "label": "Visual Inspection",
-                            "detail": gemini_explanation
+                            "detail": gemini_explanation,
+                            "context_quality": quality_context
                         }
                     ]
                 }
@@ -1323,7 +1546,7 @@ async def detect_ai_media_image_logic(
     forensic_result = await run_deep_forensics(source_for_hash, width, height)
     forensic_probability = forensic_result.get("ai_score", 0.0)
     actual_gpu_time_ms = forensic_result.get("gpu_time_ms", 0.0)
-    forensic_cache.put(img_hash, forensic_result)
+    set_cached_result(img_hash, forensic_result)
     roundtrip_ms = (time.perf_counter() - t_gpu) * 1000
     logger.info(f"[TIMING] Layer 2 - GPU scan (RunPod): {roundtrip_ms:.2f}ms | Actual GPU: {actual_gpu_time_ms:.2f}ms")
     
@@ -1349,13 +1572,17 @@ async def detect_ai_media_image_logic(
         "signals": final_signals
     }
     
-    if forensic_probability > 0.5: summary = "AI-Generated"
-    else: summary = "No AI Detected"
-    
     # Boost the overall confidence score (only for AI-likely results)
     is_ai_likely = forensic_probability > 0.5
     raw_conf = forensic_probability if is_ai_likely else (1.0 - forensic_probability)
     final_conf = boost_score(raw_conf, is_ai_likely=is_ai_likely)
+
+    if forensic_probability > 0.5: 
+        if final_conf > 0.99:
+            summary = "AI-Generated"
+        else:
+            summary = "Likely AI-Generated"
+    else: summary = "No AI Detected"
     
     # Cap probabilistic scores at 0.99 to avoid "fake" 100% look, unless it's a hard metadata match
     if final_conf > 0.99:

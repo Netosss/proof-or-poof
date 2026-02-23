@@ -71,6 +71,69 @@ async def verify_turnstile(token: str) -> bool:
         # Let's fail closed for now as it's a security feature.
         return False
 
+def get_client_ip(request: Request) -> str:
+    """Extracts the real client IP from headers, falling back to host."""
+    cf_ip = request.headers.get("cf-connecting-ip")
+    if cf_ip:
+        return cf_ip
+    
+    x_forwarded = request.headers.get("x-forwarded-for")
+    if x_forwarded:
+        return x_forwarded.split(",")[0].strip()
+        
+    return request.client.host if request.client else "127.0.0.1"
+
+# Constants for the New Device Limit
+MAX_NEW_DEVICES_PER_IP = 3
+IP_DEVICE_WINDOW = 86400  # 24 hours in seconds
+
+async def check_ip_device_limit(ip_address: str, device_id: str, turnstile_token: Optional[str] = None, token_already_verified: bool = False):
+    """
+    Checks if this IP has created too many unique device IDs.
+    If limit exceeded, requires a valid Turnstile token.
+    """
+    if not redis_client:
+        return # Fail open if Redis is down
+        
+    ip_key = f"ip_devices:{ip_address}"
+    
+    # 1 & 2. Check known device and current count in one network trip
+    pipeline = redis_client.pipeline()
+    pipeline.sismember(ip_key, device_id)
+    pipeline.scard(ip_key)
+    results = pipeline.exec()
+    
+    is_known = results[0]
+    current_count = results[1]
+    
+    if is_known:
+        return # Known device, let them through
+    
+    # 3. If the fingerprint is a "fallback" one, we are more suspicious
+    is_fallback = device_id.startswith("mobile-fallback")
+    limit = 1 if is_fallback else MAX_NEW_DEVICES_PER_IP
+
+    if current_count >= limit:
+        if not token_already_verified:
+            # Limit reached! Is there a CAPTCHA token?
+            if not turnstile_token:
+                logger.warning(f"IP {ip_address} reached device limit. STRICT CAPTCHA required.")
+                raise HTTPException(
+                    status_code=403, 
+                    detail={"code": "STRICT_CAPTCHA_REQUIRED", "message": "High activity detected. Strict verification needed."}
+                )
+            
+            # 4. Verify the CAPTCHA
+            is_human = await verify_turnstile(turnstile_token)
+            if not is_human:
+                raise HTTPException(status_code=403, detail="Invalid CAPTCHA")
+            
+    # 5. Register the new device to this IP using a pipeline
+    write_pipeline = redis_client.pipeline()
+    write_pipeline.sadd(ip_key, device_id)
+    write_pipeline.expire(ip_key, IP_DEVICE_WINDOW)
+    write_pipeline.exec()
+
 # ---- Guest Wallet Logic ----
 
 def get_guest_wallet(device_id: str) -> dict:
@@ -241,7 +304,7 @@ class SecurityManager:
         ext = os.path.splitext(filename)[1].lower()
         
         # 1. Size & Extension Check
-        if ext in ['.jpg', '.jpeg', '.png', '.webp']:
+        if ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic', '.heif', '.tiff', '.tif', '.bmp']:
             if filesize > self.MAX_IMAGE_SIZE:
                 raise HTTPException(status_code=413, detail=f"Image too large. Max {self.MAX_IMAGE_SIZE//1024//1024}MB allowed.")
         elif ext in ['.mp4', '.mov', '.avi', '.mkv', '.webm']:
@@ -253,7 +316,7 @@ class SecurityManager:
         # 2. Deep Content Validation (Magic Bytes)
         if file_path:
             try:
-                if ext in ['.jpg', '.jpeg', '.png', '.webp']:
+                if ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic', '.heif', '.tiff', '.tif', '.bmp']:
                     with Image.open(file_path) as img:
                         img.verify() # Verify structure
                         # Re-open to check format consistency
@@ -261,7 +324,9 @@ class SecurityManager:
                             actual_format = img2.format.lower()
                             if actual_format == 'jpeg': actual_format = 'jpg'
                             # Relaxed check: as long as it's a valid image format we support
-                            if actual_format not in ['jpg', 'jpeg', 'png', 'webp']:
+                            # HEIC might register as 'heic' or 'heif' depending on the library
+                            # TIFF as 'tiff'
+                            if actual_format not in ['jpg', 'jpeg', 'png', 'webp', 'gif', 'heic', 'heif', 'tiff', 'tif', 'bmp']:
                                 raise Exception(f"Format mismatch: {actual_format}")
                 else:
                     # Video validation: Try to read first frame
