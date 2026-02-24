@@ -1419,9 +1419,10 @@ async def detect_ai_media_image_logic(
             final_conf = boost_score(raw_conf, is_ai_likely=is_ai_likely)
             
             cached_explanation = cached_result.get("explanation", "Analyzed via second layer of AI analysis (Cached)")
+            cached_quality_context = cached_result.get("quality_context", "Unknown")
             
             return {
-                "summary": "AI-Generated" if final_conf > 0.99 else "Likely AI-Generated",
+                "summary": "Likely AI-Generated" if is_ai_likely else "Likely Authentic",
                 "confidence_score": round(final_conf, 2),
                 "is_gemini_used": True,
                 "is_cached": True,
@@ -1437,7 +1438,8 @@ async def detect_ai_media_image_logic(
                         "layer": "Layer 3: Visual Context",
                         "status": "flagged" if is_ai_likely else "passed",
                         "label": "Visual Inspection",
-                        "detail": cached_explanation
+                        "detail": cached_explanation,
+                        "context_quality": cached_quality_context
                     }
                 ]
             }
@@ -1527,7 +1529,7 @@ async def detect_ai_media_image_logic(
             final_conf = boost_score(raw_conf, is_ai_likely=is_ai_likely)
 
             return {
-                "summary": "AI-Generated" if final_conf > 0.99 else ("Likely AI-Generated" if is_ai_likely else "Likely No AI Detected"),
+                "summary": "Likely AI-Generated" if is_ai_likely else "Likely Authentic",
                 "confidence_score": round(final_conf, 2),
                 "is_gemini_used": True,
                 "gpu_time_ms": 0,
