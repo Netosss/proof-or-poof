@@ -43,8 +43,8 @@ class FauxLensRemover:
             _ = self.model(dummy_img, dummy_mask)
         logger.info("Warmup complete. Worker ready.")
 
-    # API FIX: Renamed back to process_image to match handler.py
-    def process_image(self, image_bytes: bytes, mask_bytes: bytes) -> bytes:
+    # Renaming process_image to process to match handler.py's expected method name
+    def process(self, image_bytes: bytes, mask_bytes: bytes) -> bytes:
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         mask = Image.open(io.BytesIO(mask_bytes)).convert("L")
 
@@ -65,8 +65,10 @@ class FauxLensRemover:
              mask = mask.resize(img.size, Image.Resampling.NEAREST)
 
         # RTX 4090 Inference in Float32 (Accurate, no black boxes)
+        logger.info(f"Running inference on size {img.size}")
         with torch.inference_mode():
             result = self.model(img, mask)
+        logger.info("Inference complete")
 
         # Removed the manual Tensor conversion block. 
         # The SimpleLama wrapper natively returns a PIL Image.

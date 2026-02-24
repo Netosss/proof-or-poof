@@ -44,8 +44,10 @@ def handler(job):
             mask_bytes = base64.b64decode(item["mask"])
             
             t0 = time.perf_counter()
+            logger.info(f"Processing image {item.get('image', '')[:20]}...")
             out_bytes = remover.process(img_bytes, mask_bytes)
             inf_time = (time.perf_counter() - t0) * 1000
+            logger.info(f"Processed in {inf_time:.2f}ms")
             
             results.append({
                 "image_base64": base64.b64encode(out_bytes).decode('utf-8'),
