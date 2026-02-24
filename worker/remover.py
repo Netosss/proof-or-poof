@@ -7,6 +7,14 @@ import pillow_heif
 from PIL import Image
 from simple_lama_inpainting import SimpleLama
 
+# ------------------------------------------------------------------------
+# [CRITICAL FIX] Disable JIT profiling and executor.
+# This prevents the C++ backend from throwing a Segmentation Fault (SIGSEGV)
+# when a user uploads an image with different dimensions than the warmup image.
+# ------------------------------------------------------------------------
+torch._C._jit_set_profiling_mode(False)
+torch._C._jit_set_profiling_executor(False)
+
 logger = logging.getLogger(__name__)
 pillow_heif.register_heif_opener()
 
