@@ -21,6 +21,7 @@ class OptimizedLama(SimpleLama):
             
         self.model = torch.jit.load(model_path, map_location=self.device)
         self.model.eval()
+        self.model.to(self.device) # Explicitly ensure all sub-modules are on GPU
 
 class FauxLensRemover:
     def __init__(self):
@@ -37,17 +38,19 @@ class FauxLensRemover:
         dummy_img = Image.new('RGB', (512, 512), (0, 0, 0))
         dummy_mask = Image.new('L', (512, 512), 0)
         
-        # Revert to Float32 to avoid NaN/Black image issues
+        # Kept the developer's Float32 fix to prevent NaN/Black screens
         with torch.inference_mode():
             _ = self.model(dummy_img, dummy_mask)
         logger.info("Warmup complete. Worker ready.")
 
-    def process(self, image_bytes: bytes, mask_bytes: bytes) -> bytes:
+    # API FIX: Renamed back to process_image to match handler.py
+    def process_image(self, image_bytes: bytes, mask_bytes: bytes) -> bytes:
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         mask = Image.open(io.BytesIO(mask_bytes)).convert("L")
 
-        # Memory Fix: 2048px cap + 64px bucketing
-        MAX_SIZE = 2048 
+        # THE MEMORY FIX: 1536px cap for Float32
+        # Float32 uses double the VRAM. 2048px will exceed 24GB and cause GPU freezing/swapping.
+        MAX_SIZE = 1536 
         BUCKET = 64
         w, h = img.size
         scale = min(1.0, MAX_SIZE / max(w, h))
@@ -61,11 +64,12 @@ class FauxLensRemover:
         if img.size != mask.size:
              mask = mask.resize(img.size, Image.Resampling.NEAREST)
 
-        # RTX 4090 Inference
-        # Revert to Float32 to avoid NaN/Black image issues
+        # RTX 4090 Inference in Float32 (Accurate, no black boxes)
         with torch.inference_mode():
             result = self.model(img, mask)
 
+        # Removed the manual Tensor conversion block. 
+        # The SimpleLama wrapper natively returns a PIL Image.
 
         out_io = io.BytesIO()
         result.save(out_io, format="PNG")
