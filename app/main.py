@@ -5,6 +5,7 @@ import time
 import uuid
 import hashlib
 import json
+import base64
 from typing import Optional, Union
 import hmac
 import aiohttp
@@ -259,7 +260,44 @@ async def runpod_webhook(request: Request):
 
 
 async def download_image(url: str, max_size: int = 50 * 1024 * 1024) -> tuple[bytes, str]:
-    """Helper to download image from URL."""
+    """Helper to download image from URL or decode data URI."""
+    # 1. Handle Data URIs (Base64)
+    if url.startswith("data:"):
+        try:
+            # Parse header and data
+            header, data_str = url.split(",", 1)
+            
+            # Check if base64 encoded
+            if ";base64" not in header:
+                raise HTTPException(status_code=400, detail="Only base64 data URIs are supported")
+                
+            # Decode
+            content = base64.b64decode(data_str)
+            
+            # Check size
+            if len(content) > max_size:
+                raise HTTPException(status_code=400, detail="Image too large (max 50MB)")
+            
+            # Determine extension from header (e.g., data:image/png;base64)
+            mime_type = header.split(":")[1].split(";")[0]
+            
+            suffix = ".jpg" # Default
+            if "png" in mime_type: suffix = ".png"
+            elif "jpeg" in mime_type or "jpg" in mime_type: suffix = ".jpg"
+            elif "webp" in mime_type: suffix = ".webp"
+            elif "gif" in mime_type: suffix = ".gif"
+            elif "heic" in mime_type: suffix = ".heic"
+            elif "heif" in mime_type: suffix = ".heif"
+            elif "tiff" in mime_type: suffix = ".tiff"
+            elif "bmp" in mime_type: suffix = ".bmp"
+            
+            return content, f"pasted_image{suffix}"
+            
+        except Exception as e:
+            logger.error(f"Error decoding data URI: {e}")
+            raise HTTPException(status_code=400, detail="Invalid data URI")
+
+    # 2. Handle HTTP URLs (Existing logic)
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(url) as response:
