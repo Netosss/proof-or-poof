@@ -1559,7 +1559,7 @@ async def detect_ai_media_image_logic(
                     "layer": "System",
                     "status": "warning",
                     "label": "Service Error",
-                    "detail": "Gemini analysis failed."
+                    "detail": "Advanced analysis service unavailable."
                 }
             ]
         }
