@@ -11,4 +11,5 @@ class DetectionResponse(BaseModel):
     summary: str
     confidence_score: float
     new_balance: Optional[int] = None
+    is_short_circuited: bool = False
     evidence_chain: List[EvidenceItem]
