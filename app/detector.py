@@ -1033,9 +1033,10 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
         return {
             "summary": "AI-Generated" if is_generative_ai else "No AI Detected",
             "confidence_score": 1.0,
+            "is_short_circuited": True,
             "evidence_chain": [
                 {
-                    "layer": "Layer 1: Metadata Check",
+                    "layer": "Metadata Check",
                     "status": "flagged" if is_generative_ai else "passed",
                     "label": "Digital Signature",
                     "detail": f"Content Credentials confirm {'AI origin' if is_generative_ai else 'authentic origin'} ({generator})."
@@ -1075,9 +1076,10 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
             res = {
                 "summary": "No AI Detected",
                 "confidence_score": 0.99,  # Max 99% without C2PA
+                "is_short_circuited": True,
                 "evidence_chain": [
                     {
-                        "layer": "Layer 1: Metadata Check",
+                        "layer": "Metadata Check",
                         "status": "passed",
                         "label": "Device Metadata",
                         "detail": f"Valid video metadata found ({meta_signals[0] if meta_signals else 'Camera/Phone'})."
@@ -1096,9 +1098,10 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
             res = {
                 "summary": "AI-Generated",
                 "confidence_score": 0.99,  # Max 99% without C2PA
+                "is_short_circuited": True,
                 "evidence_chain": [
                     {
-                        "layer": "Layer 1: Metadata Check",
+                        "layer": "Metadata Check",
                         "status": "flagged",
                         "label": "Software Signature",
                         "detail": f"AI generator signature detected in metadata ({meta_signals[0] if meta_signals else 'Unknown'})."
@@ -1123,6 +1126,7 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
             return {
                 "summary": "Analysis Failed",
                 "confidence_score": 0.0,
+                "is_short_circuited": False,
                 "evidence_chain": [
                     {
                         "layer": "System",
@@ -1160,15 +1164,16 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
             "confidence_score": final_conf,
             "gpu_time_ms": gpu_time_ms,
             "is_gemini_used": True,
+            "is_short_circuited": False,
             "evidence_chain": [
                 {
-                    "layer": "Layer 1: Metadata Check",
+                    "layer": "Metadata Check",
                     "status": "warning",
                     "label": "Metadata Check",
                     "detail": "No definitive camera metadata found."
                 },
                 {
-                    "layer": "Layer 3: Visual Context",
+                    "layer": "Visual Context",
                     "status": "flagged" if is_ai_likely else "passed",
                     "label": "Visual Inspection",
                     "detail": explanation,
@@ -1232,6 +1237,7 @@ async def detect_ai_media_image_logic(
             return {
                 "summary": "Analysis Failed",
                 "confidence_score": 0.0,
+                "is_short_circuited": False,
                 "evidence_chain": [
                     {
                         "layer": "System",
@@ -1309,9 +1315,10 @@ async def detect_ai_media_image_logic(
             "summary": "Likely Authentic",
             "confidence_score": 0.99,  # Max 99% without C2PA
             "gpu_time_ms": 0,  # $0.00 cost
+            "is_short_circuited": True,
             "evidence_chain": [
                 {
-                    "layer": "Layer 1: Metadata Check",
+                    "layer": "Metadata Check",
                     "status": "passed",
                     "label": "Device Metadata",
                     "detail": f"Valid camera metadata found ({exif.get('Make', 'Unknown')})."
@@ -1326,9 +1333,10 @@ async def detect_ai_media_image_logic(
             "summary": "Likely Authentic",
             "confidence_score": 0.9,
             "gpu_time_ms": 0,  # $0.00 cost
+            "is_short_circuited": True,
             "evidence_chain": [
                 {
-                    "layer": "Layer 1: Metadata Check",
+                    "layer": "Metadata Check",
                     "status": "passed",
                     "label": "Device Metadata",
                     "detail": f"Heuristic analysis suggests authentic origin ({exif.get('Make', 'Unknown')})."
@@ -1343,9 +1351,10 @@ async def detect_ai_media_image_logic(
             "summary": "Likely AI-Generated",
             "confidence_score": 0.95,
             "gpu_time_ms": 0,  # $0.00 cost
+            "is_short_circuited": True,
             "evidence_chain": [
                 {
-                    "layer": "Layer 1: Metadata Check",
+                    "layer": "Metadata Check",
                     "status": "flagged",
                     "label": "Software Signature",
                     "detail": f"AI generation software detected ({exif.get('Software', 'AI Generator')})."
@@ -1361,15 +1370,16 @@ async def detect_ai_media_image_logic(
             "summary": "AI-Generated",
             "confidence_score": suspicious_confidence,
             "gpu_time_ms": 0,  # $0.00 cost
+            "is_short_circuited": True,
             "evidence_chain": [
                 {
-                    "layer": "Layer 1: Metadata Check",
+                    "layer": "Metadata Check",
                     "status": "warning",
                     "label": "Metadata Check",
                     "detail": "No camera metadata found."
                 },
                 {
-                    "layer": "Layer 2: Technical Heuristics",
+                    "layer": "Technical Heuristics",
                     "status": "flagged",
                     "label": "Image Structure",
                     "detail": "Dimensions typical of AI generation."
@@ -1427,15 +1437,16 @@ async def detect_ai_media_image_logic(
                 "is_gemini_used": True,
                 "is_cached": True,
                 "gpu_time_ms": 0,
+                "is_short_circuited": False,
                 "evidence_chain": [
                     {
-                        "layer": "Layer 1: Metadata Check",
+                        "layer": "Metadata Check",
                         "status": "warning",
                         "label": "Metadata Check",
                         "detail": "No camera metadata found."
                     },
                     {
-                        "layer": "Layer 3: Visual Context",
+                        "layer": "Visual Context",
                         "status": "flagged" if is_ai_likely else "passed",
                         "label": "Visual Inspection",
                         "detail": cached_explanation,
@@ -1466,15 +1477,16 @@ async def detect_ai_media_image_logic(
                 "confidence_score": round(final_conf, 2),
                 "is_cached": True,
                 "gpu_time_ms": 0,
+                "is_short_circuited": False,
                 "evidence_chain": [
                     {
-                        "layer": "Layer 1: Metadata Check",
+                        "layer": "Metadata Check",
                         "status": "warning",
                         "label": "Metadata Check",
                         "detail": "No camera metadata found."
                     },
                     {
-                        "layer": "Layer 3: Deep Forensics",
+                        "layer": "Deep Forensics",
                         "status": "flagged" if is_ai_likely else "passed",
                         "label": "Pixel Analysis",
                         "detail": "Noise patterns consistent with generative AI." if is_ai_likely else "Sensor noise patterns consistent with optical lenses."
@@ -1533,15 +1545,16 @@ async def detect_ai_media_image_logic(
                 "confidence_score": round(final_conf, 2),
                 "is_gemini_used": True,
                 "gpu_time_ms": 0,
+                "is_short_circuited": False,
                 "evidence_chain": [
                     {
-                        "layer": "Layer 1: Metadata Check",
+                        "layer": "Metadata Check",
                         "status": "warning",
                         "label": "Metadata Check",
                         "detail": "No camera metadata found."
                     },
                     {
-                        "layer": "Layer 3: Visual Context",
+                        "layer": "Visual Context",
                         "status": "flagged" if is_ai_likely else "passed",
                         "label": "Visual Inspection",
                         "detail": gemini_explanation,
@@ -1554,6 +1567,7 @@ async def detect_ai_media_image_logic(
         return {
             "summary": "Analysis Failed",
             "confidence_score": 0.0,
+            "is_short_circuited": False,
             "evidence_chain": [
                 {
                     "layer": "System",
