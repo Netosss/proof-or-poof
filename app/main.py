@@ -14,7 +14,7 @@ import hmac
 import aiohttp
 from app.finance_logger import log_transaction
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header, Query
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header, Query, BackgroundTasks
 from firebase_admin import firestore
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
@@ -808,12 +808,32 @@ async def create_share_link(request: ShareRequest):
     return {"report_id": request.short_id}
 
 
+def _extend_report_ttl(report_id: str, new_expiry: datetime):
+    """Background task: extends a viral report's Firestore TTL by 14 days.
+    Atomic set(nx=True, ex=60) acquires the lock and sets its TTL in one operation,
+    preventing duplicate writes under concurrent traffic."""
+    if redis_client and redis_client.set(f"extending:{report_id}", "1", nx=True, ex=60):
+        db.collection("shared_reports").document(report_id).update({
+            "expires_at": new_expiry
+        })
+
+
 @app.get("/api/v1/reports/share/{report_id}")
-async def get_shared_report(report_id: str):
+async def get_shared_report(report_id: str, background_tasks: BackgroundTasks):
     doc = db.collection("shared_reports").document(report_id).get()
     if not doc.exists:
         raise HTTPException(status_code=404, detail="Report not found or expired.")
+
     data = doc.to_dict()
+    expires_at = data.get("expires_at")
+
+    # Extend TTL for viral links: if fewer than 3 days remain, reset to 14 days
+    if expires_at:
+        now = datetime.now(timezone.utc)
+        time_left = expires_at - now
+        if time_left.days < 3:
+            background_tasks.add_task(_extend_report_ttl, report_id, now + timedelta(days=14))
+
     data.pop("created_at", None)
     data.pop("expires_at", None)
     return data
