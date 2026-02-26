@@ -53,9 +53,6 @@ def get_quality_context(image_source: Union[str, Image.Image, bytes]) -> tuple[s
             filename = os.path.basename(image_source)
         elif isinstance(image_source, bytes):
             try:
-                # Decode bytes to PIL for consistency
-                # We use cv2 for decoding as it might be faster for the subsequent cv2 ops, 
-                # but PIL is needed for DQT check. Let's just use BytesIO -> PIL.
                 img_pil = Image.open(io.BytesIO(image_source))
             except Exception:
                 return "**CONTEXT: QUALITY UNKNOWN (Could not decode bytes).**", 0
@@ -328,7 +325,6 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image], pre_calculate
                 "total_tokens": response.usage_metadata.total_token_count
             }
         
-        # result["quality_score"] = quality_score # Already added above
         result["quality_context"] = quality_context
         return result
 
@@ -348,23 +344,19 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image, b
         idx_to_scan = 1 if len(image_sources) > 1 else 0
 
         for i, src in enumerate(image_sources):
-            # Check for quality context on the selected frame
             if i == idx_to_scan:
-                # This works for bytes too now!
                 try:
                     quality_context, _ = get_quality_context(src)
                 except Exception as e:
                     print(f"Failed to get quality context for video frame: {e}")
 
-            # Optimization: Direct bytes (Video Frame)
             if isinstance(src, bytes):
-                # We assume it's already a valid JPEG from cv2.imencode
                 image_parts.append(
                     types.Part.from_bytes(data=src, mime_type="image/jpeg")
                 )
                 continue
 
-            img_to_close = [] # Track objects for this specific image in the loop
+            img_to_close = []
             
             if isinstance(src, str):
                 img_original = Image.open(src)
@@ -373,8 +365,6 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image, b
                 img_original = src
 
             if i == idx_to_scan and not quality_context:
-                 # Fallback if src was PIL/Path and loop order logic requires it here
-                 # (Though we moved it up, so this is just safety)
                 quality_context, _ = get_quality_context(img_original)
 
             img_working = _resize_if_needed(img_original)
@@ -393,13 +383,11 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image, b
                 types.Part.from_bytes(data=img_byte_arr.getvalue(), mime_type="image/jpeg")
             )
 
-            # Clean up immediately after byte extraction
             for img_obj in img_to_close:
                 img_obj.close()
                 
         if not quality_context:
-             # Fallback if no quality context could be determined (e.g. decoding failed)
-             quality_context = "**CONTEXT: QUALITY UNKNOWN.**"
+            quality_context = "**CONTEXT: QUALITY UNKNOWN.**"
 
         # --- CONFIGURATION ---
         config = types.GenerateContentConfig(
@@ -424,7 +412,7 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image, b
         raw_results = response.parsed
         
         if not raw_results:
-             return {"confidence": 0.5, "explanation": "Suspicious: No clear analysis returned."}
+            return {"confidence": 0.5, "explanation": "Suspicious: No clear analysis returned."}
 
         ai_votes = [r for r in raw_results if r.confidence > settings.gemini_ai_vote_threshold]
         not_ai_votes = [r for r in raw_results if r.confidence <= settings.gemini_ai_vote_threshold]

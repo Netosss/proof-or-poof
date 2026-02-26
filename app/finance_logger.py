@@ -14,10 +14,7 @@ def log_transaction(category: str, cost: float, meta: dict = {}):
         meta: Additional metadata (request_id, user_id, etc.)
     """
     try:
-        # Determine type based on cost sign
-        # Income is positive, Expense is negative
         transaction_type = "INCOME" if cost >= 0 else "EXPENSE"
-        
         event = {
             "timestamp": datetime.datetime.utcnow(),
             "type": transaction_type,
@@ -25,13 +22,7 @@ def log_transaction(category: str, cost: float, meta: dict = {}):
             "amount": float(cost),
             "meta": meta
         }
-        
-        # Add to Firestore
-        # Using .add() to create a new document with auto-generated ID
         db.collection("financial_events").add(event)
-        
         logger.info(f"💰 [FINANCE] {category}: ${cost:.4f} ({transaction_type})")
-        
     except Exception as e:
-        # Fault tolerance: Log error but do not crash the app
         logger.error(f"❌ [FINANCE LOG ERROR] Failed to log transaction: {e}")
