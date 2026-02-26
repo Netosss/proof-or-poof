@@ -15,6 +15,7 @@ from app.c2pa_reader import get_c2pa_manifest
 from app.runpod_client import run_deep_forensics
 from gemini_client import analyze_image_pro_turbo, analyze_batch_images_pro_turbo, get_quality_context
 from app.security import security_manager, redis_client
+from app.config import settings
 import hashlib
 
 logger = logging.getLogger(__name__)
@@ -56,16 +57,14 @@ def get_smart_file_hash(file_path: str) -> str:
         
     file_size = os.path.getsize(file_path)
     
-    # Threshold: 10MB. If smaller, just hash the whole thing (fast enough).
-    if file_size < 10 * 1024 * 1024:
+    if file_size < settings.hash_chunk_threshold_bytes:
         with open(file_path, 'rb') as f:
             data = f.read()
             h = security_manager.get_safe_hash(data)
             logger.info(f"[HASH] Full file hash for {file_path} ({file_size} bytes): {h}")
             return h
             
-    # For large files: Sample 512KB chunks
-    chunk_size = 512 * 1024 
+    chunk_size = settings.hash_chunk_size_bytes
     h = hashlib.sha256()
     
     with open(file_path, 'rb') as f:
@@ -92,8 +91,6 @@ def get_smart_file_hash(file_path: str) -> str:
 
 # In-memory fallback cache with TTL
 local_cache = OrderedDict()
-MAX_LOCAL_CACHE_SIZE = 100
-LOCAL_CACHE_TTL = 3600  # 1 hour
 
 def get_cached_result(key: str):
     """Retrieve result from Redis (preferred) or Local Memory (fallback)."""
@@ -114,7 +111,7 @@ def get_cached_result(key: str):
         entry = local_cache.get(key)
         if entry:
             val, timestamp = entry
-            if time.time() - timestamp < LOCAL_CACHE_TTL:
+            if time.time() - timestamp < settings.local_cache_ttl_sec:
                 logger.info(f"[CACHE] Local Memory HIT for key: {key}")
                 local_cache.move_to_end(key)  # Mark as recently used
                 return val
@@ -130,8 +127,7 @@ def set_cached_result(key: str, value: dict):
     """Store result in Redis (24h TTL) or Local Memory (fallback)."""
     if redis_client:
         try:
-            # Cache for 24 hours (86400 seconds)
-            redis_client.set(f"forensic:{key}", json.dumps(value), ex=86400)
+            redis_client.set(f"forensic:{key}", json.dumps(value), ex=settings.deepfake_cache_ttl_sec)
         except Exception as e:
             logger.warning(f"Redis set failed: {e}")
     else:
@@ -141,7 +137,7 @@ def set_cached_result(key: str, value: dict):
         
         local_cache[key] = (value, time.time())
         
-        if len(local_cache) > MAX_LOCAL_CACHE_SIZE:
+        if len(local_cache) > settings.local_cache_max_size:
             local_cache.popitem(last=False) # Remove oldest item (FIFO eviction for LRU cache)
 
 def get_tiered_signature_score(full_dump: str, clean_dump: str) -> tuple:
@@ -199,13 +195,11 @@ def get_image_hash(source: Union[str, Image.Image], fast_mode: bool = False) -> 
     """
     if isinstance(source, str):
         with open(source, 'rb') as f:
-            # Hash first 2MB for speed, but use secure method
-            return security_manager.get_safe_hash(f.read(2048 * 1024))
+            return security_manager.get_safe_hash(f.read(settings.image_hash_header_bytes))
     else:
         # For PIL Images: hash raw pixel bytes (no JPEG artifacts)
         thumb = source.copy()
-        # Use 32x32 for video frames (fast_mode), 64x64 for standalone images
-        size = (32, 32) if fast_mode else (64, 64)
+        size = settings.image_hash_thumb_fast if fast_mode else settings.image_hash_thumb_full
         thumb.thumbnail(size)
         thumb = thumb.convert("L")  # Grayscale reduces data while preserving uniqueness
         # Hash raw pixel bytes directly (faster, no compression artifacts)
@@ -244,7 +238,7 @@ def get_exif_data(file_path: str) -> dict:
     except Exception:
         return {}
 
-def is_frame_quality_ok(frame: np.ndarray, min_brightness: float = 20, min_sharpness: float = 50) -> tuple:
+def is_frame_quality_ok(frame: np.ndarray, min_brightness: float = settings.frame_min_brightness, min_sharpness: float = settings.frame_min_sharpness) -> tuple:
     """
     Check if frame is not too dark or blurry for reliable AI detection.
     Returns (is_ok, brightness, sharpness) for potential weighted aggregation.
@@ -307,11 +301,10 @@ def extract_video_frames(video_path: str) -> tuple:
                 # --- OPTIMIZATION: Immediate JPEG encoding ---
                 # 1. We don't need to convert BGR to RGB if we use imencode
                 # 2. Encode to JPEG in memory instantly (quality 95 to preserve forensics)
-                encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 95]
+                encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), settings.video_jpeg_quality]
                 success, encoded_image = cv2.imencode('.jpg', frame, encode_param)
                 
                 if success:
-                    # Append the raw byte string instead of a PIL object
                     frames.append(encoded_image.tobytes())
         
         cap.release()
@@ -325,7 +318,7 @@ def extract_video_frames(video_path: str) -> tuple:
             cap.set(cv2.CAP_PROP_POS_FRAMES, int(total_frames * 0.5))
             ret, frame = cap.read()
             if ret:
-                encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 95]
+                encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), settings.video_jpeg_quality]
                 success, encoded_image = cv2.imencode('.jpg', frame, encode_param)
                 if success:
                     frames.append(encoded_image.tobytes())
@@ -347,7 +340,7 @@ async def get_video_metadata(video_path: str) -> dict:
             stderr=asyncio.subprocess.PIPE
         )
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=settings.ffprobe_timeout_sec)
             if proc.returncode == 0:
                 return json.loads(stdout.decode())
         except asyncio.TimeoutError:
@@ -442,7 +435,7 @@ def get_video_metadata_score(metadata: dict, filename: str = "", file_path: str 
         try:
             with open(file_path, 'rb') as f:
                 # Read first 1MB (encoder string is usually near the start)
-                chunk = f.read(1024 * 1024)
+                chunk = f.read(settings.video_header_read_bytes)
                 if b'x264' in chunk:
                     has_x264 = True
         except:
@@ -1153,7 +1146,7 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
         
         logger.info(f"[VIDEO] Gemini Batch Result: confidence={confidence}, explanation='{explanation}', quality_context='{quality_context}'")
 
-        is_ai_likely = confidence > 0.5
+        is_ai_likely = confidence > settings.ai_confidence_threshold
         summary = "Likely AI-Generated" if is_ai_likely else "Likely Authentic"
         
         # Invert confidence for human results so 0.05 AI score becomes 0.95 Human Confidence
@@ -1345,7 +1338,7 @@ async def detect_ai_media_image_logic(
         }
 
     # 3. LIKELY AI (Early Exit) - Strong AI signals in metadata
-    if ai_score >= 0.50:
+    if ai_score >= settings.ai_confidence_threshold:
         logger.info(f"[EARLY EXIT] Skipping GPU scan: High AI suspicion in metadata ({ai_score:.2f})")
         return {
             "summary": "Likely AI-Generated",
@@ -1400,11 +1393,11 @@ async def detect_ai_media_image_logic(
     HARDWARE_TAGS = {"Make", "Model", "ExposureTime", "ISOSpeedRatings", "FNumber", "BodySerialNumber", "LensModel", "GPSLatitude"}
     has_hardware_provenance = any(tag in exif for tag in HARDWARE_TAGS)
     
-    is_stripped = not has_hardware_provenance and tiered_score < 0.50
+    is_stripped = not has_hardware_provenance and tiered_score < settings.ai_confidence_threshold
     
     if is_stripped:
         logger.info(f"[META] Image classified as STRIPPED (No Hardware Provenance Tags found)")
-    elif tiered_score >= 0.50:
+    elif tiered_score >= settings.ai_confidence_threshold:
         logger.info(f"[META] Image has technical AI signatures (score={tiered_score:.2f}) - bypassing stripped check")
     else:
         # Log which provenance tags were actually found
@@ -1424,7 +1417,7 @@ async def detect_ai_media_image_logic(
         is_gemini_used = cached_result.get("is_gemini_used", False)
         
         if is_gemini_used:
-            is_ai_likely = forensic_probability > 0.5
+            is_ai_likely = forensic_probability > settings.ai_confidence_threshold
             raw_conf = forensic_probability if is_ai_likely else (1.0 - forensic_probability)
             final_conf = boost_score(raw_conf, is_ai_likely=is_ai_likely)
             
@@ -1458,19 +1451,19 @@ async def detect_ai_media_image_logic(
             logger.info(f"[CACHE] Returning cached GPU result (ai_score={forensic_probability:.4f})")
             # Return cached GPU result
             l2_data = {
-                "status": "detected" if forensic_probability > 0.5 else "not_detected",
+                "status": "detected" if forensic_probability > settings.ai_confidence_threshold else "not_detected",
                 "probability": round(forensic_probability, 4),
                 "signals": ["Cached result"]
             }
             
-            is_ai_likely = forensic_probability > 0.5
+            is_ai_likely = forensic_probability > settings.ai_confidence_threshold
             raw_conf = forensic_probability if is_ai_likely else (1.0 - forensic_probability)
             final_conf = boost_score(raw_conf, is_ai_likely=is_ai_likely)
             
             if final_conf > 0.99:
                 final_conf = 0.99
 
-            summary = "AI-Generated" if forensic_probability > 0.5 else "No AI Detected" # Simplify for cache
+            summary = "AI-Generated" if forensic_probability > settings.ai_confidence_threshold else "No AI Detected"
 
             return {
                 "summary": summary,
@@ -1536,7 +1529,7 @@ async def detect_ai_media_image_logic(
                 "quality_context": quality_context
             })
             
-            is_ai_likely = gemini_score > 0.5
+            is_ai_likely = gemini_score > settings.ai_confidence_threshold
             raw_conf = gemini_score if is_ai_likely else (1.0 - gemini_score)
             final_conf = boost_score(raw_conf, is_ai_likely=is_ai_likely)
 

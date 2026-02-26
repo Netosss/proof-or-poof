@@ -9,6 +9,7 @@ from google import genai
 from google.genai import types
 from typing import Union
 from pydantic import BaseModel, Field
+from app.config import settings
 
 # Enable loading truncated images globally
 Image.MAX_IMAGE_PIXELS = None
@@ -17,13 +18,13 @@ Image.MAX_IMAGE_PIXELS = None
 client = genai.Client(
     api_key=os.getenv("GEMINI_API_KEY"),
     http_options=types.HttpOptions(
-        timeout=15000,
+        timeout=settings.gemini_http_timeout_ms,
         retry_options=types.HttpRetryOptions(
-            attempts=2, # Try up to 2 times
-            initial_delay=1.0, # Wait 1 second before first retry
-            max_delay=5.0, # Never wait more than 5 seconds between retries
-            exp_base=2.0, # Exponential backoff (1s, 2s, 4s...)
-            http_status_codes=[408, 429, 500, 502, 503, 504] # Only retry on these specific errors
+            attempts=settings.gemini_max_retries,
+            initial_delay=settings.gemini_retry_initial_delay,
+            max_delay=settings.gemini_retry_max_delay,
+            exp_base=settings.gemini_retry_exp_base,
+            http_status_codes=[408, 429, 500, 502, 503, 504]
         )
     )
 )
@@ -37,9 +38,9 @@ def get_quality_context(image_source: Union[str, Image.Image, bytes]) -> tuple[s
     Analyzes image quality using a weighted scoring system (DQT, Resolution, Blur).
     Returns a tuple of (context string for Gemini, quality score).
     """
-    score = 100
+    score = settings.quality_score_init
     issues = []
-    avg_q_val = 0 # Default to 0 (High Quality/No Compression Artifacts)
+    avg_q_val = 0
     
     try:
         # 1. Standardize Input (Handle Path vs PIL vs Bytes)
@@ -71,11 +72,11 @@ def get_quality_context(image_source: Union[str, Image.Image, bytes]) -> tuple[s
                 table = img_pil.quantization.get(0) # Luminance table
                 if table:
                     avg_q_val = sum(table) / len(table)
-                    if avg_q_val > 30: # Very heavy compression (Q < 40)
-                        score -= 40
+                    if avg_q_val > settings.quality_dqt_severe_threshold:
+                        score -= settings.quality_dqt_severe_penalty
                         issues.append(f"Severe Compression (~Q{int(100 - avg_q_val*2)})")
-                    elif avg_q_val > 20: # Moderate compression (Q < 60)
-                        score -= 20
+                    elif avg_q_val > settings.quality_dqt_moderate_threshold:
+                        score -= settings.quality_dqt_moderate_penalty
                         issues.append(f"Compression Artifacts (~Q{int(100 - avg_q_val*2)})")
         except Exception:
             pass
@@ -89,52 +90,49 @@ def get_quality_context(image_source: Union[str, Image.Image, bytes]) -> tuple[s
             pixels = h * w
             
             # Resolution Penalties
-            if pixels < 250_000: # Very small (< 500x500)
-                score -= 50
+            if pixels < settings.quality_pixels_tiny:
+                score -= settings.quality_pixels_tiny_penalty
                 issues.append(f"Tiny Resolution ({w}x{h})")
-            elif pixels < 800_000: # Small-ish (< 1000x800)
-                score -= 40
-                issues.append(f"Tiny Resolution ({w}x{h})")
-            elif pixels < 800_000: # Small-ish (< 1000x800)
-                score -= 40
+            elif pixels < settings.quality_pixels_small:
+                score -= settings.quality_pixels_small_penalty
                 issues.append(f"Low Resolution ({w}x{h})")
 
             # Blur Penalties (Laplacian Variance)
             blur_score = cv2.Laplacian(gray, cv2.CV_64F).var()
             
-            if blur_score < 10: # Almost no edges / Solid color / severe blur
-                score -= 60
+            if blur_score < settings.quality_blur_zero_threshold:
+                score -= settings.quality_blur_zero_penalty
                 issues.append(f"Near Zero Detail (Score: {blur_score:.0f})")
-            elif blur_score < 25: # Unusable / Very Blurry
-                score -= 25
+            elif blur_score < settings.quality_blur_extreme_threshold:
+                score -= settings.quality_blur_extreme_penalty
                 issues.append(f"Extreme Blur (Score: {blur_score:.0f})")
-            elif blur_score < 50: # Soft / Slightly Out of Focus (or Smooth AI)
-                score -= 10
+            elif blur_score < settings.quality_blur_soft_threshold:
+                score -= settings.quality_blur_soft_penalty
                 issues.append(f"Soft Focus/Smooth (Score: {blur_score:.0f})")
-            elif blur_score > 2000: # Exceptionally Sharp (Override compression)
-                score += 20
+            elif blur_score > settings.quality_sharp_high_threshold:
+                score += settings.quality_sharp_high_bonus
                 issues.append(f"Exceptional Sharpness (Score: {blur_score:.0f})")
-            elif blur_score > 1500: # Very Sharp (Override compression)
-                score += 15
+            elif blur_score > settings.quality_sharp_med_threshold:
+                score += settings.quality_sharp_med_bonus
                 issues.append(f"High Sharpness (Score: {blur_score:.0f})")
-            elif blur_score > 600 and avg_q_val < 20: # Very Sharp AND NOT Compressed
-                score += 20
+            elif blur_score > settings.quality_sharp_uncomp_threshold and avg_q_val < settings.quality_dqt_moderate_threshold:
+                score += settings.quality_sharp_uncomp_bonus
                 issues.append(f"High Sharpness (Score: {blur_score:.0f})")
-            elif blur_score > 300 and avg_q_val < 20: # Sharp AND NOT Compressed
-                score += 10
-                
+            elif blur_score > settings.quality_sharp_ok_threshold and avg_q_val < settings.quality_dqt_moderate_threshold:
+                score += settings.quality_sharp_ok_bonus
+
         except Exception:
-            pass 
+            pass
 
         if was_path:
             img_pil.close()
 
         # --- FINAL VERDICT ---
-        score = max(0, score) 
-        
-        if score < 50:
+        score = max(0, score)
+
+        if score < settings.quality_low_threshold:
             return f"**CRITICAL CONTEXT: LOW QUALITY IMAGE ({', '.join(issues)}).** INSTRUCTION: This image is heavily compressed/low-res. Warning: This quality naturally causes **WAXY SKIN**, **SMOOTH TEXTURES**, distorted faces, and blur. **IGNORE** any 'waxy' or 'smooth' appearance—it is due to low quality, not AI. Only flag **STRUCTURAL IMPOSSIBILITIES** that compression CANNOT explain (e.g., gibberish text, extra limbs). If unsure, assume it is compression.", score
-        elif score < 80:
+        elif score < settings.quality_medium_threshold:
              return f"**CONTEXT: MEDIUM QUALITY ({', '.join(issues)}).** INSTRUCTION: Image has reduced quality. Do NOT flag soft edges or indistinct textures as AI. However, compression does NOT explain structural impossibilities (like extra fingers, gibberish text, or impossible physics). If you see these CLEAR logic errors, FLAG THEM.", score
         
         return "**CONTEXT: HIGH QUALITY IMAGE.** Image is sharp and clean. Any visual anomaly is likely a sign of manipulation.", score
@@ -241,13 +239,11 @@ def _resize_if_needed(img: Image.Image) -> Image.Image:
     Resizes image if it exceeds 4MP (~2048x2048) to limit token usage and avoid payload errors.
     Keeps aspect ratio.
     """
-    MAX_PIXELS = 4_194_304 # 2048 x 2048
-    
     w, h = img.size
     pixels = w * h
     
-    if pixels > MAX_PIXELS:
-        scale = (MAX_PIXELS / pixels) ** 0.5
+    if pixels > settings.gemini_max_pixels:
+        scale = (settings.gemini_max_pixels / pixels) ** 0.5
         new_w = int(w * scale)
         new_h = int(h * scale)
         return img.resize((new_w, new_h), Image.Resampling.LANCZOS)
@@ -287,8 +283,7 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image], pre_calculate
         
         # 4. Save to bytes
         img_byte_arr = io.BytesIO()
-        # Use Q=95 for maximum fidelity (forensic analysis)
-        img_working.save(img_byte_arr, format='JPEG', quality=95)
+        img_working.save(img_byte_arr, format='JPEG', quality=settings.gemini_jpeg_quality)
         image_bytes = img_byte_arr.getvalue()
 
         # 5. Clean up ALL intermediate objects immediately
@@ -300,7 +295,7 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image], pre_calculate
             system_instruction=get_system_instruction(quality_context),
             media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
             thinking_config=types.ThinkingConfig(thinking_level="LOW"),
-            temperature=1.0, 
+            temperature=settings.gemini_temperature,
             response_mime_type="application/json",
             response_schema=DetectionResult,
         )
@@ -392,7 +387,7 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image, b
                 img_working = img_rgb
             
             img_byte_arr = io.BytesIO()
-            img_working.save(img_byte_arr, format='JPEG', quality=85)
+            img_working.save(img_byte_arr, format='JPEG', quality=settings.gemini_batch_jpeg_quality)
             
             image_parts.append(
                 types.Part.from_bytes(data=img_byte_arr.getvalue(), mime_type="image/jpeg")
@@ -411,7 +406,7 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image, b
             system_instruction=get_system_instruction(quality_context),
             media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
             thinking_config=types.ThinkingConfig(thinking_level="LOW"),
-            temperature=1.0, 
+            temperature=settings.gemini_temperature,
             response_mime_type="application/json",
             response_schema=list[DetectionResult],
         )
@@ -431,8 +426,8 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image, b
         if not raw_results:
              return {"confidence": 0.5, "explanation": "Suspicious: No clear analysis returned."}
 
-        ai_votes = [r for r in raw_results if r.confidence > 0.5]
-        not_ai_votes = [r for r in raw_results if r.confidence <= 0.5]
+        ai_votes = [r for r in raw_results if r.confidence > settings.gemini_ai_vote_threshold]
+        not_ai_votes = [r for r in raw_results if r.confidence <= settings.gemini_ai_vote_threshold]
 
         final_result = {}
 

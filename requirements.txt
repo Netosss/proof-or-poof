@@ -4,6 +4,7 @@ python-multipart
 c2pa-python==0.27.1
 aiohttp
 pydantic
+pydantic-settings
 runpod
 python-dotenv
 opencv-python-headless

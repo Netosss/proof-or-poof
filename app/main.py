@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 from app.detector import detect_ai_media
 from app.schemas import DetectionResponse, ShareRequest, ShareResponse
+from app.config import settings
 from app.runpod_client import run_video_removal, pending_jobs, webhook_result_buffer, cleanup_stale_jobs, run_gpu_inpainting
 from app.security import (
     security_manager, 
@@ -62,7 +63,7 @@ RECHARGE_SECRET_KEY = os.getenv("RECHARGE_SECRET_KEY", "")
 # Background cleanup task
 cleanup_task = None
 
-def _generate_short_id(length: int = 8) -> str:
+def _generate_short_id(length: int = settings.short_id_length) -> str:
     alphabet = string.ascii_letters + string.digits
     return ''.join(random.choices(alphabet, k=length))
 
@@ -84,7 +85,7 @@ async def periodic_cleanup():
     """Background task to clean up stale pending jobs every 30 seconds."""
     while True:
         try:
-            await asyncio.sleep(30)
+            await asyncio.sleep(settings.cleanup_interval_sec)
             cleanup_stale_jobs()
             logger.debug("[CLEANUP] Periodic cleanup completed")
         except asyncio.CancelledError:
@@ -151,12 +152,7 @@ async def custom_http_exception_handler(request: Request, exc: StarletteHTTPExce
         headers=headers
     )
 
-# ---- Pricing Constants (USD per unit) ----
-GPU_RATE_PER_SEC = 0.0019  # RunPod A5000/L4 rate (Detection)
-INPAINT_COST_PER_SEC = 0.00031 # RunPod RTX 4090 rate (Inpainting)
-CPU_RATE_PER_SEC = 0.0001  # Estimated Railway CPU rate
-GEMINI_FIXED_COST = 0.0024  # Cost per Gemini 3.0 Pro analysis
-AD_REVENUE_PER_REWARD = 0.015  # Avg eCPM for verified view
+# Pricing constants imported from app.config
 
 # ---- CORS ----
 app.add_middleware(
@@ -268,7 +264,7 @@ async def runpod_webhook(request: Request):
         return {"status": "error", "message": str(e)}
 
 
-async def download_image(url: str, max_size: int = 50 * 1024 * 1024) -> tuple[bytes, str]:
+async def download_image(url: str, max_size: int = settings.max_image_download_bytes) -> tuple[bytes, str]:
     """Helper to download image from URL or decode data URI."""
     # 1. Handle Data URIs (Base64)
     if url.startswith("data:"):
@@ -285,7 +281,7 @@ async def download_image(url: str, max_size: int = 50 * 1024 * 1024) -> tuple[by
             
             # Check size
             if len(content) > max_size:
-                raise HTTPException(status_code=400, detail="Image too large (max 50MB)")
+                raise HTTPException(status_code=400, detail=f"Image too large (max {max_size // (1024*1024)}MB)")
             
             # Determine extension from header (e.g., data:image/png;base64)
             mime_type = header.split(":")[1].split(";")[0]
@@ -315,7 +311,7 @@ async def download_image(url: str, max_size: int = 50 * 1024 * 1024) -> tuple[by
                 
                 content = await response.read()
                 if len(content) > max_size:
-                    raise HTTPException(status_code=400, detail="Image too large (max 50MB)")
+                    raise HTTPException(status_code=400, detail=f"Image too large (max {max_size // (1024*1024)}MB)")
                 
                 # Determine filename/extension
                 content_type = response.headers.get("Content-Type", "")
@@ -473,8 +469,8 @@ async def detect(
         wallet = get_guest_wallet(device_id)
         current_credits = wallet.get("credits", 0)
         
-        if current_credits < 5:
-            logger.info(f"[BILLING] Insufficient credits for {device_id} (Has: {current_credits}, Need: 5)")
+        if current_credits < settings.detect_credit_cost:
+            logger.info(f"[BILLING] Insufficient credits for {device_id} (Has: {current_credits}, Need: {settings.detect_credit_cost})")
             raise HTTPException(status_code=402, detail="Insufficient credits")
 
         start_time = time.time()
@@ -497,7 +493,7 @@ async def detect(
             wallet = get_guest_wallet(device_id)
             new_balance = wallet.get("credits", 0)
         else:
-            new_balance = deduct_guest_credits(device_id, cost=5)
+            new_balance = deduct_guest_credits(device_id, cost=settings.detect_credit_cost)
         
         duration = time.time() - start_time
         
@@ -518,7 +514,7 @@ async def detect(
             logger.info(f"[COST] Cache hit: $0.00")
             log_transaction("CACHE", 0.0, {"file": filename, "device_id": device_id})
         elif is_gemini_used:
-            cost = GEMINI_FIXED_COST
+            cost = settings.gemini_fixed_cost
             method = "detect_with_gemini"
             gpu_sec, cpu_sec = 0, duration
             logger.info(f"[COST] Gemini analysis: ${cost:.6f}")
@@ -526,13 +522,13 @@ async def detect(
             log_transaction("GEMINI", -cost, {"file": filename, "device_id": device_id, "usage": gemini_usage})
         elif actual_gpu_sec > 0:
             # Cost based on actual GPU utilization, not network round-trip
-            cost = actual_gpu_sec * GPU_RATE_PER_SEC
+            cost = actual_gpu_sec * settings.gpu_rate_per_sec
             method = "detect_with_gpu"
             gpu_sec, cpu_sec = actual_gpu_sec, duration - actual_gpu_sec
             logger.info(f"[COST] GPU: {actual_gpu_sec:.3f}s (actual) vs {duration:.3f}s (round-trip) | Cost: ${cost:.6f}")
             log_transaction("GPU", -cost, {"file": filename, "device_id": device_id, "duration": actual_gpu_sec})
         else:
-            cost = duration * CPU_RATE_PER_SEC
+            cost = duration * settings.cpu_rate_per_sec
             method = "detect_metadata_only"
             gpu_sec, cpu_sec = 0, duration
             log_transaction("CPU", -cost, {"file": filename, "device_id": device_id, "duration": duration})
@@ -548,7 +544,7 @@ async def detect(
         short_id = _generate_short_id()
         if redis_client:
             shareable = {k: v for k, v in result.items() if k != "new_balance"}
-            redis_client.setex(f"report:{short_id}", 86400, json.dumps(shareable))
+            redis_client.setex(f"report:{short_id}", settings.report_cache_ttl_sec, json.dumps(shareable))
         result["short_id"] = short_id
 
         logger.info(f"[ROUTE] Final Response for {filename}: {json.dumps(result)}")
@@ -579,7 +575,7 @@ async def get_balance(
 # ---- Recharge Webhook ----
 class RechargeRequest(BaseModel):
     device_id: str
-    amount: int = 5
+    amount: int = settings.default_recharge_amount
     secret_key: str
 
 def perform_recharge(device_id: str, amount: int, secret_key: str):
@@ -597,16 +593,18 @@ def perform_recharge(device_id: str, amount: int, secret_key: str):
             if not snapshot.exists:
                 # If user doesn't exist yet, give them Welcome Bonus (10) + Reward (amount)
                 transaction.set(ref, {
-                    "credits": 10 + amount,
+                    "credits": settings.welcome_credits + amount,
                     "last_active": firestore.SERVER_TIMESTAMP,
-                    "is_banned": False
+                    "is_banned": False,
+                    "expires_at": datetime.now(timezone.utc) + timedelta(days=settings.wallet_ttl_days),
                 })
-                return 10 + amount
+                return settings.welcome_credits + amount
             else:
                 current = snapshot.get("credits") or 0
                 transaction.update(ref, {
                     "credits": current + amount,
-                    "last_active": firestore.SERVER_TIMESTAMP
+                    "last_active": firestore.SERVER_TIMESTAMP,
+                    "expires_at": datetime.now(timezone.utc) + timedelta(days=settings.wallet_ttl_days),
                 })
                 return current + amount
 
@@ -614,7 +612,7 @@ def perform_recharge(device_id: str, amount: int, secret_key: str):
         new_balance = recharge_transaction(transaction, doc_ref)
         
         logger.info(f"💰 Recharged {amount} credits for {device_id}. New balance: {new_balance}")
-        log_transaction("AD_REWARD", AD_REVENUE_PER_REWARD, {"device_id": device_id, "credits": amount})
+        log_transaction("AD_REWARD", settings.ad_revenue_per_reward, {"device_id": device_id, "credits": amount})
         return {"status": "success", "new_balance": new_balance}
 
     except HTTPException:
@@ -630,7 +628,7 @@ async def add_credits_post(payload: RechargeRequest):
 @app.get("/api/credits/webhook")
 async def add_credits_get(
     user_id: str = Query(..., alias="device_id"), # Supports ?user_id= or ?device_id=
-    amount: int = 5,
+    amount: int = settings.default_recharge_amount,
     key: str = Query(..., alias="secret_key")
 ):
     return perform_recharge(user_id, amount, key)
@@ -693,8 +691,8 @@ async def inpaint_image(
     wallet = get_guest_wallet(device_id)
     current_credits = wallet.get("credits", 0)
     
-    if not is_free_retry and current_credits < 2:
-        logger.info(f"[BILLING] Insufficient credits for {device_id} (Has: {current_credits}, Need: 2)")
+    if not is_free_retry and current_credits < settings.inpaint_credit_cost:
+        logger.info(f"[BILLING] Insufficient credits for {device_id} (Has: {current_credits}, Need: {settings.inpaint_credit_cost})")
         raise HTTPException(status_code=402, detail="Insufficient credits")
 
     # 3. Process Content (GPU Only)
@@ -709,7 +707,7 @@ async def inpaint_image(
         logger.info(f"[INPAINT] GPU Request {request_id} COMPLETED in {duration:.3f}s")
         
         # Log Cost (USD)
-        usd_cost = duration * INPAINT_COST_PER_SEC
+        usd_cost = duration * settings.inpaint_rate_per_sec
         log_transaction("INPAINT", -usd_cost, {"device_id": device_id, "duration": duration, "request_id": request_id})
         
         # 4. Settlement (On Success)
@@ -721,10 +719,10 @@ async def inpaint_image(
             new_balance = current_credits
         else:
             # Deduct 2 Credits
-            new_balance = deduct_guest_credits(device_id, cost=2)
+            new_balance = deduct_guest_credits(device_id, cost=settings.inpaint_credit_cost)
             # Grant free retry for 10 minutes (in case user needs to regenerate/download again immediately)
             if redis_client:
-                redis_client.set(cache_key, "1", ex=600)
+                redis_client.set(cache_key, "1", ex=settings.deepfake_dedupe_ttl_sec)
         
         # 5. Return Response
         headers = {"X-User-Balance": str(new_balance)}
@@ -796,23 +794,23 @@ async def create_share_link(request: ShareRequest):
     now = datetime.now(timezone.utc)
     # Native datetime objects required — ISO strings are silently ignored by Firestore TTL engine
     payload["created_at"] = now
-    payload["expires_at"] = now + timedelta(days=14)
+    payload["expires_at"] = now + timedelta(days=settings.report_ttl_days)
 
     # short_id is the Firestore doc ID → fauxlens.com/report/{short_id}
     db.collection("shared_reports").document(request.short_id).set(payload)
 
     # Lock: prevent duplicate DB writes for 24h (set after write so failed writes remain retryable)
     if redis_client:
-        redis_client.setex(f"is_shared:{request.short_id}", 86400, "1")
+        redis_client.setex(f"is_shared:{request.short_id}", settings.share_lock_ttl_sec, "1")
 
     return {"report_id": request.short_id}
 
 
 def _extend_report_ttl(report_id: str, new_expiry: datetime):
     """Background task: extends a viral report's Firestore TTL by 14 days.
-    Atomic set(nx=True, ex=60) acquires the lock and sets its TTL in one operation,
+    Atomic set(nx=True, ex=settings.extend_lock_ttl_sec) acquires the lock and sets its TTL in one operation,
     preventing duplicate writes under concurrent traffic."""
-    if redis_client and redis_client.set(f"extending:{report_id}", "1", nx=True, ex=60):
+    if redis_client and redis_client.set(f"extending:{report_id}", "1", nx=True, ex=settings.extend_lock_ttl_sec):
         db.collection("shared_reports").document(report_id).update({
             "expires_at": new_expiry
         })
@@ -831,8 +829,8 @@ async def get_shared_report(report_id: str, background_tasks: BackgroundTasks):
     if expires_at:
         now = datetime.now(timezone.utc)
         time_left = expires_at - now
-        if time_left.days < 3:
-            background_tasks.add_task(_extend_report_ttl, report_id, now + timedelta(days=14))
+        if time_left.days < settings.report_extend_threshold_days:
+            background_tasks.add_task(_extend_report_ttl, report_id, now + timedelta(days=settings.report_extend_days))
 
     data.pop("created_at", None)
     data.pop("expires_at", None)

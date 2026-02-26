@@ -5,8 +5,9 @@ import logging
 import pillow_heif
 from PIL import Image, ImageOps
 from simple_lama_inpainting import SimpleLama
-import gc  # Added for explicit garbage collection
+import gc
 import psutil
+from app.config import settings
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -70,13 +71,9 @@ class FauxLensRemover:
         
         # [THE COMPLETE FIX]
         if self.device == "cpu":
-            # 1. Limit math threads to 4 (Sweet spot for 1280px)
-            torch.set_num_threads(4)
-            
-            # 2. Limit graph threads to 1 (Prevents the '48 threads' overhead)
-            torch.set_num_interop_threads(1) 
-            
-            logger.info("🔧 CPU Optimization: Applied 4/1 Thread Limit")
+            torch.set_num_threads(settings.torch_num_threads)
+            torch.set_num_interop_threads(settings.torch_num_interop_threads)
+            logger.info(f"🔧 CPU Optimization: Applied {settings.torch_num_threads}/{settings.torch_num_interop_threads} Thread Limit")
 
         logger.info(f"🚀 FauxLensRemover initializing on device: {self.device}")
         
@@ -113,14 +110,11 @@ class FauxLensRemover:
             mask = mask.convert("L")
 
         # --- STAGE 2: SMART RESIZE & BUCKETING (The Memory Fix) ---
-        MAX_SIZE = 2048 
-        BUCKET_STEP = 64  # Round dimensions to nearest 64px to prevent JIT cache explosion
-
         w, h = image.size
         scale = 1.0
 
-        if max(w, h) > MAX_SIZE:
-            scale = MAX_SIZE / max(w, h)
+        if max(w, h) > settings.max_inpaint_dimension:
+            scale = settings.max_inpaint_dimension / max(w, h)
         
         # Calculate new dimensions with bucketing
         # 1. Apply scale
@@ -129,8 +123,8 @@ class FauxLensRemover:
         
         # 2. Snap to grid (Bucket Step)
         # We ensure at least one bucket step size (never 0)
-        new_w = max(BUCKET_STEP, (new_w // BUCKET_STEP) * BUCKET_STEP)
-        new_h = max(BUCKET_STEP, (new_h // BUCKET_STEP) * BUCKET_STEP)
+        new_w = max(settings.inpaint_bucket_step, (new_w // settings.inpaint_bucket_step) * settings.inpaint_bucket_step)
+        new_h = max(settings.inpaint_bucket_step, (new_h // settings.inpaint_bucket_step) * settings.inpaint_bucket_step)
         
         # Only resize if dimensions actually changed
         if (new_w, new_h) != (w, h):

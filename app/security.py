@@ -3,6 +3,7 @@ import time
 import logging
 import hashlib
 import re
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Callable, Any, Optional
 import aiohttp
 import json
@@ -12,10 +13,11 @@ from PIL import Image
 import cv2
 from firebase_admin import auth, firestore
 from app.firebase_config import db
+from app.config import settings
 from upstash_redis import Redis
 
-# Set PIL safety limit to prevent decompression bombs (20MP)
-Image.MAX_IMAGE_PIXELS = 20_000_000 
+# Prevent decompression-bomb attacks
+Image.MAX_IMAGE_PIXELS = settings.pil_max_image_pixels
 
 logger = logging.getLogger(__name__)
 
@@ -83,9 +85,8 @@ def get_client_ip(request: Request) -> str:
         
     return request.client.host if request.client else "127.0.0.1"
 
-# Constants for the New Device Limit
-MAX_NEW_DEVICES_PER_IP = 3
-IP_DEVICE_WINDOW = 86400  # 24 hours in seconds
+# Constants for the New Device Limit (aliases for readability in this module)
+IP_DEVICE_WINDOW = settings.rate_limit_window_sec
 
 async def check_ip_device_limit(ip_address: str, device_id: str, turnstile_token: Optional[str] = None, token_already_verified: bool = False):
     """
@@ -111,7 +112,7 @@ async def check_ip_device_limit(ip_address: str, device_id: str, turnstile_token
     
     # 3. If the fingerprint is a "fallback" one, we are more suspicious
     is_fallback = device_id.startswith("mobile-fallback")
-    limit = 1 if is_fallback else MAX_NEW_DEVICES_PER_IP
+    limit = 1 if is_fallback else settings.max_new_devices_per_ip
 
     if current_count >= limit:
         if not token_already_verified:
@@ -146,13 +147,12 @@ def get_guest_wallet(device_id: str) -> dict:
     else:
         # Create new wallet with 10 free credits
         new_wallet = {
-            "credits": 10, 
+            "credits": settings.welcome_credits,
             "last_active": firestore.SERVER_TIMESTAMP,
-            "is_banned": False
+            "is_banned": False,
+            "expires_at": datetime.now(timezone.utc) + timedelta(days=settings.wallet_ttl_days),
         }
         doc_ref.set(new_wallet)
-        # Return with integer timestamp for immediate use if needed, or just dict
-        # Firestore timestamp might need conversion if used immediately, but for now just returning dict is fine.
         return new_wallet
 
 def check_ban_status(device_id: str) -> bool:
@@ -174,8 +174,13 @@ def deduct_guest_credits(device_id: str, cost: int = 5) -> int:
         if not snapshot.exists:
             # Should have been created by get_guest_wallet or logic check
             # Create it now if missing (edge case)
-            transaction.set(ref, {"credits": 10, "last_active": firestore.SERVER_TIMESTAMP, "is_banned": False})
-            current_credits = 10
+            transaction.set(ref, {
+                "credits": settings.welcome_credits,
+                "last_active": firestore.SERVER_TIMESTAMP,
+                "is_banned": False,
+                "expires_at": datetime.now(timezone.utc) + timedelta(days=settings.wallet_ttl_days),
+            })
+            current_credits = settings.welcome_credits
         else:
             current_credits = snapshot.get("credits")
             if current_credits is None:
@@ -187,7 +192,11 @@ def deduct_guest_credits(device_id: str, cost: int = 5) -> int:
                 detail="Insufficient credits"
             )
             
-        transaction.update(ref, {"credits": current_credits - cost, "last_active": firestore.SERVER_TIMESTAMP})
+        transaction.update(ref, {
+            "credits": current_credits - cost,
+            "last_active": firestore.SERVER_TIMESTAMP,
+            "expires_at": datetime.now(timezone.utc) + timedelta(days=settings.wallet_ttl_days),
+        })
         return current_credits - cost
 
     transaction = db.transaction()
@@ -242,10 +251,10 @@ class SecurityManager:
     def __init__(self):
         # Memory fallback (optional, if Redis fails)
         self.rate_limits: Dict[str, list] = {}
-        self.MAX_IMAGE_SIZE = 20 * 1024 * 1024  # 20MB
-        self.MAX_VIDEO_SIZE = 200 * 1024 * 1024 # 200MB
-        self.RATE_LIMIT_WINDOW = 60 # seconds
-        self.MAX_REQUESTS_PER_WINDOW = 10 # 10 requests per minute (Guest Policy)
+        self.MAX_IMAGE_SIZE = settings.max_image_upload_bytes
+        self.MAX_VIDEO_SIZE = settings.max_video_upload_bytes
+        self.RATE_LIMIT_WINDOW = settings.rate_limit_request_window_sec
+        self.MAX_REQUESTS_PER_WINDOW = settings.rate_limit_max_requests
 
     def check_rate_limit(self, identifier: str):
         """Rate limiting using Redis (preferred) or Memory (fallback)."""
@@ -275,7 +284,7 @@ class SecurityManager:
         """Simple memory-based rate limiting per IP/Identifier with periodic cleanup."""
         now = time.time()
         
-        if len(self.rate_limits) > 1000:
+        if len(self.rate_limits) > settings.rate_limit_memory_limit:
             self._cleanup_all_limits(now)
 
         if identifier not in self.rate_limits:
