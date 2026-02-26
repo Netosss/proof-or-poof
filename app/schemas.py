@@ -13,3 +13,10 @@ class DetectionResponse(BaseModel):
     new_balance: Optional[int] = None
     is_short_circuited: bool = False
     evidence_chain: List[EvidenceItem]
+    short_id: Optional[str] = None
+
+class ShareRequest(BaseModel):
+    short_id: str
+
+class ShareResponse(BaseModel):
+    report_id: str

@@ -6,6 +6,9 @@ import uuid
 import hashlib
 import json
 import base64
+import string
+import random
+from datetime import datetime, timezone, timedelta
 from typing import Optional, Union
 import hmac
 import aiohttp
@@ -26,7 +29,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 from app.detector import detect_ai_media
-from app.schemas import DetectionResponse
+from app.schemas import DetectionResponse, ShareRequest, ShareResponse
 from app.runpod_client import run_video_removal, pending_jobs, webhook_result_buffer, cleanup_stale_jobs, run_gpu_inpainting
 from app.security import (
     security_manager, 
@@ -37,7 +40,8 @@ from app.security import (
     get_guest_wallet,
     check_ip_device_limit,
     get_client_ip,
-    db
+    db,
+    redis_client
 )
 from fastapi import Depends
 from fastapi.concurrency import run_in_threadpool
@@ -57,6 +61,11 @@ RECHARGE_SECRET_KEY = os.getenv("RECHARGE_SECRET_KEY", "")
 
 # Background cleanup task
 cleanup_task = None
+
+def _generate_short_id(length: int = 8) -> str:
+    alphabet = string.ascii_letters + string.digits
+    return ''.join(random.choices(alphabet, k=length))
+
 
 def log_memory(stage: str):
     """Log current memory usage."""
@@ -535,6 +544,13 @@ async def detect(
         # Attach new balance
         result["new_balance"] = new_balance
 
+        # Generate share short_id and cache the clean, shareable payload in Redis
+        short_id = _generate_short_id()
+        if redis_client:
+            shareable = {k: v for k, v in result.items() if k != "new_balance"}
+            redis_client.setex(f"report:{short_id}", 86400, json.dumps(shareable))
+        result["short_id"] = short_id
+
         logger.info(f"[ROUTE] Final Response for {filename}: {json.dumps(result)}")
         return result
     finally:
@@ -761,3 +777,43 @@ async def lemonsqueezy_webhook(request: Request, x_signature: str = Header(None,
         logger.info(f"💰 [LEMONSQUEEZY] Processed order {data.get('id')}: ${total_usd}")
         
     return {"status": "ok"}
+
+
+# ---- Report Sharing Endpoints ----
+
+@app.post("/api/v1/reports/share", response_model=ShareResponse, status_code=201)
+async def create_share_link(request: ShareRequest):
+    # Idempotency: already promoted to Firestore — return report_id, skip DB write
+    if redis_client and redis_client.get(f"is_shared:{request.short_id}"):
+        return {"report_id": request.short_id}
+
+    # Fetch the server-side payload — client never uploads JSON (zero spoofing)
+    raw = redis_client.get(f"report:{request.short_id}") if redis_client else None
+    if not raw:
+        raise HTTPException(status_code=404, detail="Share link expired or invalid.")
+
+    payload = json.loads(raw) if isinstance(raw, str) else raw
+    now = datetime.now(timezone.utc)
+    # Native datetime objects required — ISO strings are silently ignored by Firestore TTL engine
+    payload["created_at"] = now
+    payload["expires_at"] = now + timedelta(days=14)
+
+    # short_id is the Firestore doc ID → fauxlens.com/report/{short_id}
+    db.collection("shared_reports").document(request.short_id).set(payload)
+
+    # Lock: prevent duplicate DB writes for 24h (set after write so failed writes remain retryable)
+    if redis_client:
+        redis_client.setex(f"is_shared:{request.short_id}", 86400, "1")
+
+    return {"report_id": request.short_id}
+
+
+@app.get("/api/v1/reports/share/{report_id}")
+async def get_shared_report(report_id: str):
+    doc = db.collection("shared_reports").document(report_id).get()
+    if not doc.exists:
+        raise HTTPException(status_code=404, detail="Report not found or expired.")
+    data = doc.to_dict()
+    data.pop("created_at", None)
+    data.pop("expires_at", None)
+    return data
