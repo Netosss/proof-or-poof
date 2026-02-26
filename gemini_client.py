@@ -176,6 +176,7 @@ def get_system_instruction(quality_context: str) -> str:
     * Do not dismiss flawless skin or smooth backgrounds as mere "retouching." You must inspect the physical logic of the subject.
     * FABRIC PHYSICS: Inspect clothing collars, necklines, and hems. AI consistently fails to render 3D fabric thickness, physical seams, or the micro-shadows where cloth rests on skin. Look for necklines that look mathematically "painted" flat onto the 2D surface of the body.
     * EDGE DISSOLVING: Inspect where stray hairs meet a heavily blurred background. Real hair simply goes out of focus (optical blur); AI-generated hair structurally melts, smudges, or bleeds directly into the background colors.
+    * SMALL OBJECTS & TRANSPARENCY: Inspect glass and small items (e.g., keys, jewelry). AI often fuses small mechanical parts into a single meaningless lump, or renders internal glass mechanisms (like tubes) without 3D thickness, causing them to physically dissolve into the base.
 
     6. MANDATORY SELF-VERIFICATION & ANTI-HALLUCINATION:
     * AI models frequently hallucinate anatomical errors (like extra fingers) by misinterpreting shadows or overlapping objects.
