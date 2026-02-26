@@ -8,7 +8,9 @@ on:
 
 env:
   TESTING: "true"
-  # Stub values — services are fully mocked, no real connections made
+  # Stub values — services are fully mocked, no real connections are ever made.
+  # GEMINI_API_KEY must be non-empty: the SDK validates at import time, not at call time.
+  GEMINI_API_KEY: "stub-key-for-ci"
   RECHARGE_SECRET_KEY: "ci-secret"
   TURNSTILE_SECRET_KEY: ""
   UPSTASH_REDIS_HOST: ""

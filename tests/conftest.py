@@ -9,6 +9,10 @@ import io
 import os
 
 os.environ["TESTING"] = "true"
+# Gemini client is instantiated at module import time; a non-empty stub prevents
+# the SDK from raising ValueError before our mocks are in place.
+# Real API calls never happen in tests — all Gemini functions are mocked.
+os.environ.setdefault("GEMINI_API_KEY", "stub-key-for-tests")
 
 from unittest.mock import patch
 
