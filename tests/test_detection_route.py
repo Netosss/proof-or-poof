@@ -30,7 +30,8 @@ def _patches(
 ):
     """Return an ExitStack with all common detection route patches applied."""
     if wallet is None:
-        wallet = WALLET_ENOUGH
+        # When ban=True use WALLET_BANNED so the route's is_banned check fires.
+        wallet = WALLET_BANNED if ban else WALLET_ENOUGH
     if detect_result is None:
         detect_result = dict(MOCK_DETECT_RESULT)
 
@@ -40,9 +41,6 @@ def _patches(
     )
     stack.enter_context(
         patch("app.api.detection.check_ip_device_limit", new_callable=AsyncMock)
-    )
-    stack.enter_context(
-        patch("app.api.detection.check_ban_status", return_value=ban)
     )
     stack.enter_context(
         patch("app.api.detection.get_guest_wallet", return_value=wallet)

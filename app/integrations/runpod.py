@@ -104,7 +104,7 @@ async def _run_with_webhook(
     """
     import aiohttp
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     future = loop.create_future()
     start_time = time.time()
 
@@ -197,11 +197,15 @@ async def _wait_with_buffer_check(future: asyncio.Future, job_id: str, timeout_s
 
 
 async def _run_with_polling(endpoint, payload: dict, timeout_seconds: int = 90) -> Dict[str, Any]:
-    """Fallback polling mode when webhooks are not configured."""
+    """Fallback polling mode when webhooks are not configured.
+
+    Uses exponential backoff (0.1 s → 2 s) to avoid hammering the RunPod API.
+    """
     t_api = time.perf_counter()
     job = endpoint.run(payload)
     job_id = job.job_id
     poll_count = 0
+    poll_delay = 0.1  # start at 100 ms, doubles each iteration, caps at 2 s
     while True:
         status = job.status()
         poll_count += 1
@@ -217,7 +221,8 @@ async def _run_with_polling(endpoint, payload: dict, timeout_seconds: int = 90) 
             error_msg = f"RunPod job {job_id} timed out after {timeout_seconds}s"
             logger.error(f"[POLLING] {error_msg}")
             return {"ai_score": 0.0, "gpu_time_ms": 0.0, "error": error_msg}
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(poll_delay)
+        poll_delay = min(poll_delay * 2, 2.0)
 
 
 async def run_gpu_inpainting(image_bytes: bytes, mask_bytes: bytes) -> bytes:

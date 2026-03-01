@@ -17,12 +17,12 @@ from typing import Optional
 from fastapi import APIRouter, Header, HTTPException, Request, UploadFile
 
 from app.config import settings
-from app.core.auth import check_ip_device_limit, get_client_ip, verify_turnstile
+from app.core.auth import check_ip_device_limit, get_client_ip, validate_device_id, verify_turnstile
 from app.core.dependencies import security_manager
 from app.detection.pipeline import detect_ai_media
 from app.integrations import redis_client as redis_module
 from app.schemas.detection import DetectionResponse
-from app.services.credits_service import check_ban_status, deduct_guest_credits, get_guest_wallet
+from app.services.credits_service import deduct_guest_credits, get_guest_wallet
 from app.services.detection_service import _generate_short_id, download_image, log_memory
 from app.services.finance_service import log_transaction
 
@@ -40,6 +40,7 @@ async def detect(
     """
     Detect AI-generated content in images/videos.
     """
+    validate_device_id(device_id)
     ip = get_client_ip(request)
 
     if not turnstile_token:
@@ -54,7 +55,9 @@ async def detect(
 
     await check_ip_device_limit(ip, device_id, token_already_verified=True)
 
-    if check_ban_status(device_id):
+    # Single Firestore read — covers both ban check and credit check below.
+    wallet = get_guest_wallet(device_id)
+    if wallet.get("is_banned"):
         raise HTTPException(status_code=403, detail="Device is banned")
 
     file_content = None
@@ -109,16 +112,15 @@ async def detect(
     filesize = len(file_content)
     suffix = os.path.splitext(filename)[1].lower() or ".jpg"
 
-    log_memory(f"Pre-Detect: {filename}")
-
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
         tmp_file.write(file_content)
         temp_path = tmp_file.name
+    del file_content  # bytes now on disk — free RAM early for large uploads
 
     try:
         security_manager.validate_file(filename, filesize, temp_path)
 
-        wallet = get_guest_wallet(device_id)
+        # Reuse the wallet fetched at the top — avoids a second Firestore round-trip.
         current_credits = wallet.get("credits", 0)
 
         if current_credits < settings.detect_credit_cost:
@@ -146,7 +148,6 @@ async def detect(
             new_balance = deduct_guest_credits(device_id, cost=settings.detect_credit_cost)
 
         duration = time.time() - start_time
-        log_memory(f"Post-Detect: {filename}")
 
         is_gemini_used = result.get("is_gemini_used", False)
         is_cached = result.get("is_cached", False)

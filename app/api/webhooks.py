@@ -26,23 +26,18 @@ LEMONSQUEEZY_WEBHOOK_SECRET = os.getenv("LEMONSQUEEZY_WEBHOOK_SECRET")
 async def runpod_webhook(request: Request):
     """
     Receives webhook callbacks from RunPod when jobs complete.
-    Validates X-Runpod-Signature header if RUNPOD_WEBHOOK_SECRET is set.
+
+    Auth: RunPod does not send custom headers, so the secret is embedded in
+    RUNPOD_WEBHOOK_URL as a query parameter, e.g.:
+        https://your-app.railway.app/webhook/runpod?secret=<RUNPOD_WEBHOOK_SECRET>
+    If RUNPOD_WEBHOOK_SECRET is set, requests without a matching ?secret= are rejected.
     """
     try:
-        logger.info(f"[WEBHOOK] Headers received: {dict(request.headers)}")
-
         if RUNPOD_WEBHOOK_SECRET:
-            signature = (
-                request.headers.get("X-Runpod-Signature", "") or
-                request.headers.get("Authorization", "").replace("Bearer ", "") or
-                request.headers.get("X-Webhook-Secret", "")
-            )
-            if signature != RUNPOD_WEBHOOK_SECRET:
-                logger.warning(
-                    f"[WEBHOOK] Signature mismatch. Got: '{signature[:20]}...' "
-                    f"Expected: '{RUNPOD_WEBHOOK_SECRET[:20]}...'"
-                )
-                # TODO: Enable strict auth once RunPod's header format is confirmed
+            secret = request.query_params.get("secret", "")
+            if not secret or not hmac.compare_digest(secret, RUNPOD_WEBHOOK_SECRET):
+                logger.warning("[WEBHOOK] RunPod secret mismatch — rejecting request.")
+                raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
         payload = await request.json()
         job_id = payload.get("id")

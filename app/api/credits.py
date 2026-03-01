@@ -7,7 +7,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Header, Query, Request
 
-from app.core.auth import check_ip_device_limit, get_client_ip
+from app.core.auth import check_ip_device_limit, get_client_ip, validate_device_id
 from app.schemas.credits import RechargeRequest
 from app.services.credits_service import get_guest_wallet, perform_recharge
 from app.services.finance_service import log_transaction
@@ -28,6 +28,7 @@ async def get_balance(
     Returns the current credit balance for a guest device.
     Auto-creates a wallet with welcome credits if one does not exist.
     """
+    validate_device_id(device_id)
     ip = get_client_ip(request)
     await check_ip_device_limit(ip, device_id, turnstile_token)
     wallet = get_guest_wallet(device_id)

@@ -23,6 +23,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api import credits, detection, inpainting, reports, system, webhooks
 from app.integrations import firebase as firebase_module
+from app.integrations import http_client as http_module
 from app.integrations import redis_client as redis_module
 from app.integrations.runpod import cleanup_stale_jobs
 
@@ -51,10 +52,11 @@ async def lifespan(app: FastAPI):
     # --- Startup ---
     firebase_module.initialize()
     redis_module.initialize()
+    await http_module.initialize()
     cleanup_task = None
     if not os.getenv("TESTING"):
         cleanup_task = asyncio.create_task(_periodic_cleanup())
-    logger.info("[STARTUP] Firebase, Redis initialised. Background cleanup task started.")
+    logger.info("[STARTUP] Firebase, Redis, HTTP session initialised.")
 
     yield
 
@@ -65,6 +67,7 @@ async def lifespan(app: FastAPI):
             await cleanup_task
         except asyncio.CancelledError:
             pass
+    await http_module.close()
     logger.info("[SHUTDOWN] Background cleanup task stopped.")
 
 

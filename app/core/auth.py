@@ -7,21 +7,35 @@ so they pick up the instance initialized during the FastAPI lifespan.
 
 import os
 import logging
+import re
 from typing import Optional
 
-import aiohttp
 from fastapi import HTTPException, Request
 
 from app.config import settings
+from app.integrations import http_client as http_module
 from app.integrations import redis_client as redis_module
 
 logger = logging.getLogger(__name__)
 
 IP_DEVICE_WINDOW = settings.rate_limit_window_sec
 
+_DEVICE_ID_MAX_LEN = 128
+_DEVICE_ID_RE = re.compile(r"^[a-zA-Z0-9\-_.]+$")
+
+
+def validate_device_id(device_id: str) -> None:
+    """
+    Raises HTTP 400 if device_id is longer than 128 characters or contains
+    characters outside [a-zA-Z0-9-_.].  Prevents Firestore key injection and
+    Redis key-prefix abuse.
+    """
+    if len(device_id) > _DEVICE_ID_MAX_LEN or not _DEVICE_ID_RE.match(device_id):
+        raise HTTPException(status_code=400, detail="Invalid X-Device-ID")
+
 
 async def verify_turnstile(token: str) -> bool:
-    """Verifies a Cloudflare Turnstile token."""
+    """Verifies a Cloudflare Turnstile token using the shared HTTP session."""
     secret = os.getenv("TURNSTILE_SECRET_KEY")
     if not secret:
         logger.warning("TURNSTILE_SECRET_KEY not set. Skipping validation (DEV MODE).")
@@ -31,8 +45,8 @@ async def verify_turnstile(token: str) -> bool:
     payload = {"secret": secret, "response": token}
 
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=payload) as response:
+        async with http_module.request_session() as sess:
+            async with sess.post(url, data=payload) as response:
                 result = await response.json()
                 if not result.get("success"):
                     logger.warning(f"Turnstile validation failed: {result}")

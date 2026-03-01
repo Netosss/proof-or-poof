@@ -8,6 +8,7 @@ aiohttp is mocked so no real network calls are made.
 import base64
 import io
 import string
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -76,6 +77,7 @@ async def test_download_image_base64_too_large():
 
 
 def _make_mock_session(status=200, content=b"image_bytes", content_type="image/jpeg"):
+    """Build a mock aiohttp session whose .get() returns a context-manager response."""
     mock_resp = MagicMock()
     mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
     mock_resp.__aexit__ = AsyncMock(return_value=None)
@@ -84,15 +86,28 @@ def _make_mock_session(status=200, content=b"image_bytes", content_type="image/j
     mock_resp.headers = {"Content-Type": content_type}
 
     mock_session = MagicMock()
-    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-    mock_session.__aexit__ = AsyncMock(return_value=None)
     mock_session.get = MagicMock(return_value=mock_resp)
     return mock_session
 
 
+def _patch_session(mock_session):
+    """
+    Patch http_client.request_session to yield mock_session directly,
+    bypassing aiohttp.ClientSession construction entirely.
+    """
+    @asynccontextmanager
+    async def _fake_request_session():
+        yield mock_session
+
+    return patch(
+        "app.integrations.http_client.request_session",
+        side_effect=_fake_request_session,
+    )
+
+
 async def test_download_image_url_success():
     session = _make_mock_session(status=200, content=b"fake_img", content_type="image/jpeg")
-    with patch("aiohttp.ClientSession", return_value=session):
+    with _patch_session(session):
         content, name = await download_image("https://example.com/photo.jpg")
 
     assert content == b"fake_img"
@@ -101,7 +116,7 @@ async def test_download_image_url_success():
 
 async def test_download_image_url_not_found():
     session = _make_mock_session(status=404)
-    with patch("aiohttp.ClientSession", return_value=session):
+    with _patch_session(session):
         with pytest.raises(HTTPException) as exc:
             await download_image("https://example.com/missing.jpg")
     assert exc.value.status_code == 400
@@ -110,7 +125,7 @@ async def test_download_image_url_not_found():
 async def test_download_image_url_too_large():
     big = b"X" * 10
     session = _make_mock_session(status=200, content=big, content_type="image/jpeg")
-    with patch("aiohttp.ClientSession", return_value=session):
+    with _patch_session(session):
         with pytest.raises(HTTPException) as exc:
             await download_image("https://example.com/big.jpg", max_size=5)
     assert exc.value.status_code == 400
@@ -120,11 +135,9 @@ async def test_download_image_url_client_error():
     import aiohttp
 
     mock_session = MagicMock()
-    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-    mock_session.__aexit__ = AsyncMock(return_value=None)
     mock_session.get = MagicMock(side_effect=aiohttp.ClientError("connection refused"))
 
-    with patch("aiohttp.ClientSession", return_value=mock_session):
+    with _patch_session(mock_session):
         with pytest.raises(HTTPException) as exc:
             await download_image("https://unreachable.example.com/img.jpg")
     assert exc.value.status_code == 400

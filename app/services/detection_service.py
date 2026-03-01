@@ -6,7 +6,7 @@ and memory usage logging.
 import base64
 import logging
 import os
-import random
+import secrets
 import string
 
 import aiohttp
@@ -14,21 +14,24 @@ import psutil
 from fastapi import HTTPException
 
 from app.config import settings
+from app.integrations import http_client as http_module
 
 logger = logging.getLogger(__name__)
 
 
 def _generate_short_id(length: int = settings.short_id_length) -> str:
     alphabet = string.ascii_letters + string.digits
-    return ''.join(random.choices(alphabet, k=length))
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
 
 
 def log_memory(stage: str) -> None:
-    """Log current process and system memory usage."""
+    """Log current process and system memory usage. Only runs when DEBUG logging is active."""
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
     process = psutil.Process(os.getpid())
     mem_info = process.memory_info()
     sys_mem = psutil.virtual_memory()
-    logger.info(
+    logger.debug(
         f"[MEMORY] {stage} | "
         f"PID: {os.getpid()} | "
         f"Process RSS: {mem_info.rss / 1024 / 1024:.2f} MB | "
@@ -71,7 +74,7 @@ async def download_image(url: str, max_size: int = settings.max_image_download_b
             logger.error(f"Error decoding data URI: {e}")
             raise HTTPException(status_code=400, detail="Invalid data URI")
 
-    async with aiohttp.ClientSession() as session:
+    async with http_module.request_session() as session:
         try:
             async with session.get(url) as response:
                 if response.status != 200:

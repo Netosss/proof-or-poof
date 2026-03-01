@@ -109,6 +109,39 @@ def test_runpod_webhook_status_update_acknowledged(client):
         pending_jobs.pop(job_id, None)
 
 
+def test_runpod_webhook_invalid_signature_rejected(client):
+    """When RUNPOD_WEBHOOK_SECRET is set, a missing/wrong ?secret= param → 401."""
+    with patch("app.api.webhooks.RUNPOD_WEBHOOK_SECRET", "real-runpod-secret"):
+        # No ?secret= query param → 401
+        response = client.post(
+            "/webhook/runpod",
+            json={"id": "fake-job", "status": "COMPLETED", "output": {"ai_score": 0.99}},
+        )
+    assert response.status_code == 401
+
+
+def test_runpod_webhook_wrong_secret_rejected(client):
+    """Wrong ?secret= value → 401."""
+    with patch("app.api.webhooks.RUNPOD_WEBHOOK_SECRET", "real-runpod-secret"):
+        response = client.post(
+            "/webhook/runpod?secret=wrong-value",
+            json={"id": "fake-job", "status": "COMPLETED", "output": {"ai_score": 0.99}},
+        )
+    assert response.status_code == 401
+
+
+def test_runpod_webhook_valid_signature_accepted(client):
+    """Correct ?secret= query param → request is processed (not 401)."""
+    secret = "real-runpod-secret"
+    with patch("app.api.webhooks.RUNPOD_WEBHOOK_SECRET", secret):
+        response = client.post(
+            f"/webhook/runpod?secret={secret}",
+            json={"id": "legit-job", "status": "COMPLETED", "output": None},
+        )
+    # Job not in pending_jobs → logs a warning but still returns ok (not 401)
+    assert response.status_code == 200
+
+
 # ---------------------------------------------------------------------------
 # LemonSqueezy webhook
 # ---------------------------------------------------------------------------

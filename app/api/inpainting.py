@@ -16,10 +16,10 @@ from fastapi import APIRouter, File, Header, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 
 from app.config import settings
-from app.core.auth import check_ip_device_limit, get_client_ip
+from app.core.auth import check_ip_device_limit, get_client_ip, validate_device_id, verify_turnstile
 from app.integrations import redis_client as redis_module
 from app.integrations.runpod import run_gpu_inpainting
-from app.services.credits_service import check_ban_status, deduct_guest_credits, get_guest_wallet
+from app.services.credits_service import deduct_guest_credits, get_guest_wallet
 from app.services.finance_service import log_transaction
 
 logger = logging.getLogger(__name__)
@@ -43,10 +43,25 @@ async def inpaint_image(
     request_id = str(uuid.uuid4())
     logger.info(f"[INPAINT] Request {request_id} started. Image: {image.filename}, Device: {device_id}")
 
+    validate_device_id(device_id)
     ip = get_client_ip(request)
-    await check_ip_device_limit(ip, device_id, turnstile_token)
 
-    if check_ban_status(device_id):
+    if not turnstile_token:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "CAPTCHA_REQUIRED", "message": "Verification needed"}
+        )
+    is_human = await verify_turnstile(turnstile_token)
+    if not is_human:
+        raise HTTPException(status_code=403, detail="Invalid CAPTCHA")
+
+    # token_already_verified=True prevents check_ip_device_limit from calling
+    # verify_turnstile a second time when the IP hits its device limit.
+    await check_ip_device_limit(ip, device_id, token_already_verified=True)
+
+    # Single Firestore read — covers both ban check and credit check below.
+    wallet = get_guest_wallet(device_id)
+    if wallet.get("is_banned"):
         raise HTTPException(status_code=403, detail="Device is banned")
 
     try:
@@ -66,7 +81,7 @@ async def inpaint_image(
     if is_free_retry:
         logger.info(f"[INPAINT] Free retry available for {device_id} on image {img_hash[:8]}")
 
-    wallet = get_guest_wallet(device_id)
+    # Reuse the wallet fetched at the top — avoids a second Firestore round-trip.
     current_credits = wallet.get("credits", 0)
 
     if not is_free_retry and current_credits < settings.inpaint_credit_cost:

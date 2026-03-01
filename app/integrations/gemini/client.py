@@ -140,7 +140,7 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image], pre_calculate
         return result
 
     except Exception as e:
-        print(f"Gemini Error: {e}")
+        logger.error(f"[GEMINI] analyze_image_pro_turbo error: {e}")
         return {"confidence": -1.0}
 
 
@@ -160,7 +160,7 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image, b
                 try:
                     quality_context, _ = get_quality_context(src)
                 except Exception as e:
-                    print(f"Failed to get quality context for video frame: {e}")
+                    logger.error(f"[GEMINI] Failed to get quality context for video frame: {e}")
 
             if isinstance(src, bytes):
                 image_parts.append(
@@ -264,7 +264,7 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image, b
         return final_result
 
     except Exception as e:
-        print(f"Gemini Error: {e}")
+        logger.error(f"[GEMINI] analyze_batch_images_pro_turbo error: {e}")
         return {"confidence": -1.0}
 
 
