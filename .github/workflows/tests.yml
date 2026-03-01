@@ -1,0 +1,49 @@
+name: Unit Tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+env:
+  TESTING: "true"
+  # Stub values — services are fully mocked, no real connections are ever made.
+  # GEMINI_API_KEY must be non-empty: the SDK validates at import time, not at call time.
+  GEMINI_API_KEY: "stub-key-for-ci"
+  RECHARGE_SECRET_KEY: "ci-secret"
+  TURNSTILE_SECRET_KEY: ""
+  UPSTASH_REDIS_HOST: ""
+  UPSTASH_REDIS_PASSWORD: ""
+  FIREBASE_SERVICE_ACCOUNT: ""
+
+jobs:
+  test:
+    name: Run unit tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt', 'requirements-test.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-test.txt
+
+      - name: Run tests
+        run: pytest tests/ -v --tb=short -q

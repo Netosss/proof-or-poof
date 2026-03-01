@@ -1,7 +1,7 @@
 import os
 import json
 from dotenv import load_dotenv
-from gemini_client import analyze_image_pro_turbo
+from app.integrations.gemini.client import analyze_image_pro_turbo
 
 # Load environment variables
 load_dotenv()
