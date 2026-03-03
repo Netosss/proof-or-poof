@@ -1,21 +1,36 @@
 """
-Credit management routes: balance check, top-up (POST & GET webhook).
+Credit management routes: balance check, top-up (POST & GET webhook), ads reward.
 """
 
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Header, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from pydantic import BaseModel
+from firebase_admin import firestore
 
+from app.config import settings
 from app.core.auth import check_ip_device_limit, get_client_ip, validate_device_id
+from app.core.firebase_auth import get_current_user
+from app.integrations import firebase as firebase_module
 from app.schemas.credits import RechargeRequest
+from app.services.credit_engine import grant_credits
 from app.services.credits_service import get_guest_wallet, perform_recharge
 from app.services.finance_service import log_transaction
-from app.config import settings
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Credits"])
+
+AD_REWARD_CREDITS = 5
+AD_REWARD_DAILY_LIMIT = 3
+
+
+class AdRewardResponse(BaseModel):
+    credits_granted: int
+    new_balance: int
+    rewards_today: int
 
 
 @router.get("/api/user/balance")
@@ -61,3 +76,75 @@ async def add_credits_get(
         {"device_id": user_id, "credits": amount}
     )
     return result
+
+
+@router.post("/api/ads/reward", response_model=AdRewardResponse)
+async def ads_reward(
+    user: dict = Depends(get_current_user),
+):
+    """
+    Grant credits to an authenticated user for watching an ad.
+
+    - Maximum 3 rewards per UTC day (server-side date, never client-provided).
+    - Each reward grants 5 credits.
+    - Idempotency enforced via Firestore ad_rewards/{uid}_{date} document.
+
+    Requires:
+      Authorization: Bearer <firebase_id_token>
+    """
+    uid = user["uid"]
+    db = firebase_module.db
+    if not db:
+        raise HTTPException(status_code=503, detail="Database service unavailable.")
+
+    # Server-side UTC date — never trust client time
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    doc_id = f"{uid}_{today}"
+    reward_ref = db.collection("ad_rewards").document(doc_id)
+
+    @firestore.transactional
+    def _check_and_grant(transaction, ref):
+        snap = ref.get(transaction=transaction)
+        count = snap.to_dict().get("count", 0) if snap.exists else 0
+
+        if count >= AD_REWARD_DAILY_LIMIT:
+            return None, count
+
+        transaction.set(ref, {
+            "user_id": uid,
+            "date": today,
+            "count": count + 1,
+            "last_reward_at": firestore.SERVER_TIMESTAMP,
+        }, merge=True)
+        return AD_REWARD_CREDITS, count + 1
+
+    try:
+        txn = db.transaction()
+        credits_to_grant, new_count = _check_and_grant(txn, reward_ref)
+    except Exception as e:
+        logger.error(f"[ADS] ad_rewards transaction failed for uid={uid}: {e}")
+        raise HTTPException(status_code=500, detail="Ad reward failed")
+
+    if credits_to_grant is None:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Daily ad reward limit reached ({AD_REWARD_DAILY_LIMIT} per day)"
+        )
+
+    new_balance = grant_credits(uid, credits_to_grant, "ad_reward", doc_id)
+    log_transaction(
+        "AD_REWARD",
+        settings.ad_revenue_per_reward,
+        {"uid": uid, "credits": credits_to_grant, "rewards_today": new_count}
+    )
+
+    logger.info(
+        f"[ADS] Granted {credits_to_grant} credits to uid={uid} "
+        f"(reward {new_count}/{AD_REWARD_DAILY_LIMIT} today). Balance: {new_balance}"
+    )
+
+    return AdRewardResponse(
+        credits_granted=credits_to_grant,
+        new_balance=new_balance,
+        rewards_today=new_count,
+    )

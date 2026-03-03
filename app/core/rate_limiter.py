@@ -41,9 +41,12 @@ def _check_rate_limit_redis(rc, identifier: str) -> None:
 
         if current_count > MAX_REQUESTS_PER_WINDOW:
             logger.warning(f"Redis Rate limit exceeded for {identifier}")
+            ttl = rc.ttl(key)
+            retry_after = max(ttl, 1) if ttl and ttl > 0 else RATE_LIMIT_WINDOW
             raise HTTPException(
                 status_code=429,
-                detail="Too many requests. Please try again in a minute."
+                detail="Too many requests. Please try again later.",
+                headers={"Retry-After": str(retry_after)},
             )
     except HTTPException:
         raise

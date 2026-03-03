@@ -21,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.api import credits, detection, inpainting, reports, system, webhooks
+from app.api import auth, checkout, credits, detection, inpainting, reports, system, webhooks
 from app.integrations import firebase as firebase_module
 from app.integrations import http_client as http_module
 from app.integrations import redis_client as redis_module
@@ -115,8 +115,10 @@ app.add_middleware(
 # Routers
 # ---------------------------------------------------------------------------
 app.include_router(system.router)
+app.include_router(auth.router)
 app.include_router(detection.router)
 app.include_router(credits.router)
+app.include_router(checkout.router)
 app.include_router(reports.router)
 app.include_router(inpainting.router)
 app.include_router(webhooks.router)

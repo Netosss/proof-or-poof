@@ -11,7 +11,9 @@ same name (case-insensitive), e.g.:
 A `.env` file at the project root is loaded automatically.
 """
 
-from pydantic import Field
+import json
+
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -65,17 +67,72 @@ class Settings(BaseSettings):
     # Credits & Billing                                                   #
     # ------------------------------------------------------------------ #
     welcome_credits: int = Field(
-        10, description="Credits granted to every brand-new wallet"
+        40, description="Credits granted to every brand-new wallet"
     )
     detect_credit_cost: int = Field(
-        5, description="Credits charged per /detect call"
+        10, description="Credits charged per /detect call"
     )
     inpaint_credit_cost: int = Field(
-        2, description="Credits charged per /inpaint call"
+        30, description="Credits charged per /inpaint call"
     )
     default_recharge_amount: int = Field(
         5, description="Default credits per ad-reward recharge"
     )
+
+    # ------------------------------------------------------------------ #
+    # Lemon Squeezy variant → credit mapping                             #
+    # The backend is the single source of truth for credit amounts.      #
+    # Never trust the webhook payload for credit amounts — look up here. #
+    #                                                                    #
+    # APP_ENV=prod (default) → uses lemon_squeezy_variants +            #
+    #                           LEMONSQUEEZY_API_KEY (live)              #
+    # APP_ENV=dev            → uses lemon_squeezy_test_variants +        #
+    #                           LEMONSQUEEZY_API_KEY_TEST_MODE           #
+    # ------------------------------------------------------------------ #
+    app_env: str = Field(
+        "prod",
+        description="Runtime environment: 'prod' or 'dev'. Controls which LS keys are used.",
+    )
+
+    lemon_squeezy_variants: dict = Field(
+        default_factory=dict,
+        description="Live variant ID (str) → credits (int). Used when app_env=prod.",
+    )
+
+    lemon_squeezy_test_variants: dict = Field(
+        default_factory=dict,
+        description="Test variant ID (str) → credits (int). Used when app_env=dev.",
+    )
+
+    @field_validator("lemon_squeezy_variants", "lemon_squeezy_test_variants", mode="before")
+    @classmethod
+    def parse_variants(cls, v):
+        """
+        Handles all formats Railway/shell might produce:
+          - Already a dict              → use as-is
+          - '{"1360784": 100, ...}'     → parse JSON directly
+          - '"{\"1360784\": 100, ...}"' → strip outer quotes, unescape, parse
+        """
+        if not v:
+            return {}
+        if isinstance(v, dict):
+            return v
+        if isinstance(v, str):
+            s = v.strip()
+            if s.startswith('"') and s.endswith('"'):
+                s = s[1:-1]
+            s = s.replace('\\"', '"')
+            return json.loads(s)
+        return v
+
+    @property
+    def is_dev(self) -> bool:
+        return self.app_env == "dev"
+
+    @property
+    def active_ls_variants(self) -> dict:
+        """Returns the correct variant map for the current environment."""
+        return self.lemon_squeezy_test_variants if self.is_dev else self.lemon_squeezy_variants
 
     # ------------------------------------------------------------------ #
     # Pricing (USD per unit)                                              #
