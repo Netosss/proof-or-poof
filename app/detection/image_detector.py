@@ -146,8 +146,8 @@ async def detect_ai_media_image_logic(
                 {
                     "layer": "Metadata Check",
                     "status": "passed",
-                    "label": "Device Metadata",
-                    "detail": f"Valid camera metadata found ({exif.get('Make', 'Unknown')})."
+                    "label": "Origin Check",
+                    "detail": f"Confirmed authentic — captured by {exif.get('Make', 'your camera')}."
                 }
             ]
         }
@@ -164,8 +164,8 @@ async def detect_ai_media_image_logic(
                 {
                     "layer": "Metadata Check",
                     "status": "passed",
-                    "label": "Device Metadata",
-                    "detail": f"Heuristic analysis suggests authentic origin ({exif.get('Make', 'Unknown')})."
+                    "label": "Origin Check",
+                    "detail": f"Origin analysis indicates authentic capture ({exif.get('Make', 'your camera')})."
                 }
             ]
         }
@@ -182,8 +182,8 @@ async def detect_ai_media_image_logic(
                 {
                     "layer": "Metadata Check",
                     "status": "flagged",
-                    "label": "Software Signature",
-                    "detail": f"AI generation software detected ({exif.get('Software', 'AI Generator')})."
+                    "label": "Origin Check",
+                    "detail": f"AI creation tool identified ({exif.get('Software', 'Unknown tool')})."
                 }
             ]
         }
@@ -201,14 +201,14 @@ async def detect_ai_media_image_logic(
                 {
                     "layer": "Metadata Check",
                     "status": "warning",
-                    "label": "Metadata Check",
-                    "detail": "No camera metadata found."
+                    "label": "Origin Check",
+                    "detail": "No camera fingerprint found."
                 },
                 {
                     "layer": "Technical Heuristics",
                     "status": "flagged",
-                    "label": "Image Structure",
-                    "detail": "Dimensions typical of AI generation."
+                    "label": "Image Analysis",
+                    "detail": "Image characteristics consistent with AI generation."
                 }
             ]
         }
@@ -254,8 +254,8 @@ async def detect_ai_media_image_logic(
                     {
                         "layer": "Metadata Check",
                         "status": "warning",
-                        "label": "Metadata Check",
-                        "detail": "No camera metadata found."
+                        "label": "Origin Check",
+                        "detail": "No camera fingerprint found."
                     },
                     {
                         "layer": "Visual Context",
@@ -287,13 +287,13 @@ async def detect_ai_media_image_logic(
                     {
                         "layer": "Metadata Check",
                         "status": "warning",
-                        "label": "Metadata Check",
-                        "detail": "No camera metadata found."
+                        "label": "Origin Check",
+                        "detail": "No camera fingerprint found."
                     },
                     {
                         "layer": "Deep Forensics",
                         "status": "flagged" if is_ai_likely else "passed",
-                        "label": "Pixel Analysis",
+                        "label": "Structural Analysis",
                         "detail": "Noise patterns consistent with generative AI." if is_ai_likely else "Sensor noise patterns consistent with optical lenses."
                     }
                 ]
@@ -350,8 +350,8 @@ async def detect_ai_media_image_logic(
                 {
                     "layer": "Metadata Check",
                     "status": "warning",
-                    "label": "Metadata Check",
-                    "detail": "No camera metadata found."
+                    "label": "Origin Check",
+                    "detail": "No camera fingerprint found."
                 },
                 {
                     "layer": "Visual Context",
