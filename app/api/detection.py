@@ -14,14 +14,17 @@ import tempfile
 import time
 from typing import Optional
 
-from fastapi import APIRouter, Header, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, UploadFile
 
 from app.config import settings
 from app.core.auth import check_ip_device_limit, get_client_ip, validate_device_id, verify_turnstile
 from app.core.dependencies import security_manager
+from app.core.firebase_auth import get_optional_user
+from app.core.rate_limiter import check_rate_limit
 from app.detection.pipeline import detect_ai_media
 from app.integrations import redis_client as redis_module
 from app.schemas.detection import DetectionResponse
+from app.services.credit_engine import consume_credits, get_user_balance
 from app.services.credits_service import deduct_guest_credits, get_guest_wallet
 from app.services.detection_service import _generate_short_id, download_image, log_memory
 from app.services.finance_service import log_transaction
@@ -35,30 +38,56 @@ router = APIRouter(tags=["Detection"])
 async def detect(
     request: Request,
     device_id: str = Header(..., alias="X-Device-ID"),
-    turnstile_token: Optional[str] = Header(None, alias="X-Turnstile-Token")
+    turnstile_token: Optional[str] = Header(None, alias="X-Turnstile-Token"),
+    auth_user: Optional[dict] = Depends(get_optional_user),
 ):
     """
     Detect AI-generated content in images/videos.
+
+    Supports two billing paths:
+      - Authenticated (Authorization: Bearer token present): deducts from
+        the user's account via credit_engine. device_id / guest_wallets
+        are ignored entirely.
+      - Guest (no Authorization header): deducts from the guest wallet
+        identified by X-Device-ID as before.
     """
-    validate_device_id(device_id)
     ip = get_client_ip(request)
 
-    if not turnstile_token:
-        raise HTTPException(
-            status_code=403,
-            detail={"code": "CAPTCHA_REQUIRED", "message": "Verification needed"}
-        )
+    if auth_user:
+        # --- Authenticated path ---
+        uid = auth_user["uid"]
+        # Rate-limit check fires BEFORE Firestore transaction
+        check_rate_limit(f"uid:{uid}")
 
-    is_human = await verify_turnstile(turnstile_token)
-    if not is_human:
-        raise HTTPException(status_code=403, detail="Invalid CAPTCHA")
+        if not turnstile_token:
+            raise HTTPException(
+                status_code=403,
+                detail={"code": "CAPTCHA_REQUIRED", "message": "Verification needed"}
+            )
+        is_human = await verify_turnstile(turnstile_token)
+        if not is_human:
+            raise HTTPException(status_code=403, detail="Invalid CAPTCHA")
 
-    await check_ip_device_limit(ip, device_id, token_already_verified=True)
+    else:
+        # --- Guest path ---
+        validate_device_id(device_id)
 
-    # Single Firestore read — covers both ban check and credit check below.
-    wallet = get_guest_wallet(device_id)
-    if wallet.get("is_banned"):
-        raise HTTPException(status_code=403, detail="Device is banned")
+        if not turnstile_token:
+            raise HTTPException(
+                status_code=403,
+                detail={"code": "CAPTCHA_REQUIRED", "message": "Verification needed"}
+            )
+
+        is_human = await verify_turnstile(turnstile_token)
+        if not is_human:
+            raise HTTPException(status_code=403, detail="Invalid CAPTCHA")
+
+        await check_ip_device_limit(ip, device_id, token_already_verified=True)
+
+        # Single Firestore read — covers both ban check and credit check.
+        wallet = get_guest_wallet(device_id)
+        if wallet.get("is_banned"):
+            raise HTTPException(status_code=403, detail="Device is banned")
 
     file_content = None
     filename = "unknown"
@@ -120,32 +149,63 @@ async def detect(
     try:
         security_manager.validate_file(filename, filesize, temp_path)
 
-        # Reuse the wallet fetched at the top — avoids a second Firestore round-trip.
-        current_credits = wallet.get("credits", 0)
+        if auth_user:
+            # Authenticated path
+            uid = auth_user["uid"]
 
-        if current_credits < settings.detect_credit_cost:
-            logger.info(
-                f"[BILLING] Insufficient credits for {device_id} "
-                f"(Has: {current_credits}, Need: {settings.detect_credit_cost})"
+            # Pre-check balance BEFORE running the AI — prevents burning
+            # Gemini/RunPod compute for users who can't pay.
+            current_balance = get_user_balance(uid)
+            if current_balance < settings.detect_credit_cost:
+                logger.info(
+                    f"[BILLING] Insufficient credits for uid={uid} "
+                    f"(Has: {current_balance}, Need: {settings.detect_credit_cost})"
+                )
+                raise HTTPException(status_code=402, detail="Insufficient credits")
+
+            start_time = time.time()
+
+            result = await security_manager.secure_execute(
+                request, filename, filesize, temp_path,
+                lambda path: detect_ai_media(path, trusted_metadata=sidecar_metadata),
+                uid=uid
             )
-            raise HTTPException(status_code=402, detail="Insufficient credits")
 
-        start_time = time.time()
+            if result.get("summary") in ["Analysis Failed", "File too large to scan"]:
+                logger.info(
+                    f"[BILLING] Skipped deduction for uid={uid} due to soft failure: {result.get('summary')}"
+                )
+                new_balance = get_user_balance(uid)
+            else:
+                new_balance = consume_credits(uid, settings.detect_credit_cost, "detect", filename)
 
-        result = await security_manager.secure_execute(
-            request, filename, filesize, temp_path,
-            lambda path: detect_ai_media(path, trusted_metadata=sidecar_metadata),
-            uid=device_id
-        )
-
-        if result.get("summary") in ["Analysis Failed", "File too large to scan"]:
-            logger.info(
-                f"[BILLING] Skipped deduction for {device_id} due to soft failure: {result.get('summary')}"
-            )
-            wallet = get_guest_wallet(device_id)
-            new_balance = wallet.get("credits", 0)
         else:
-            new_balance = deduct_guest_credits(device_id, cost=settings.detect_credit_cost)
+            # Guest path: reuse wallet fetched above — avoids a second Firestore round-trip.
+            current_credits = wallet.get("credits", 0)
+
+            if current_credits < settings.detect_credit_cost:
+                logger.info(
+                    f"[BILLING] Insufficient credits for {device_id} "
+                    f"(Has: {current_credits}, Need: {settings.detect_credit_cost})"
+                )
+                raise HTTPException(status_code=402, detail="Insufficient credits")
+
+            start_time = time.time()
+
+            result = await security_manager.secure_execute(
+                request, filename, filesize, temp_path,
+                lambda path: detect_ai_media(path, trusted_metadata=sidecar_metadata),
+                uid=device_id
+            )
+
+            if result.get("summary") in ["Analysis Failed", "File too large to scan"]:
+                logger.info(
+                    f"[BILLING] Skipped deduction for {device_id} due to soft failure: {result.get('summary')}"
+                )
+                wallet = get_guest_wallet(device_id)
+                new_balance = wallet.get("credits", 0)
+            else:
+                new_balance = deduct_guest_credits(device_id, cost=settings.detect_credit_cost)
 
         duration = time.time() - start_time
 

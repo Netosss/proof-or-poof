@@ -11,7 +11,9 @@ same name (case-insensitive), e.g.:
 A `.env` file at the project root is loaded automatically.
 """
 
-from pydantic import Field
+import json
+
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -65,17 +67,50 @@ class Settings(BaseSettings):
     # Credits & Billing                                                   #
     # ------------------------------------------------------------------ #
     welcome_credits: int = Field(
-        10, description="Credits granted to every brand-new wallet"
+        40, description="Credits granted to every brand-new wallet"
     )
     detect_credit_cost: int = Field(
-        5, description="Credits charged per /detect call"
+        10, description="Credits charged per /detect call"
     )
     inpaint_credit_cost: int = Field(
-        2, description="Credits charged per /inpaint call"
+        30, description="Credits charged per /inpaint call"
     )
     default_recharge_amount: int = Field(
         5, description="Default credits per ad-reward recharge"
     )
+
+    # ------------------------------------------------------------------ #
+    # Lemon Squeezy variant → credit mapping                             #
+    # The backend is the single source of truth for credit amounts.      #
+    # Never trust the webhook payload for credit amounts — look up here. #
+    # Keys are LS variant IDs (strings), values are credit amounts.      #
+    # Fill these in after running GET /api/debug/variants.               #
+    # ------------------------------------------------------------------ #
+    lemon_squeezy_variants: dict = Field(
+        default_factory=dict,
+        description="Map of Lemon Squeezy variant ID (str) → credits (int)",
+    )
+
+    @field_validator("lemon_squeezy_variants", mode="before")
+    @classmethod
+    def parse_variants(cls, v):
+        """
+        Handles all formats Railway/shell might produce:
+          - Already a dict              → use as-is
+          - '{"1360784": 100, ...}'     → parse JSON directly
+          - '"{\"1360784\": 100, ...}"' → strip outer quotes, unescape, parse
+        """
+        if isinstance(v, dict):
+            return v
+        if isinstance(v, str):
+            s = v.strip()
+            # Strip wrapping double-quotes if present (Railway edge case)
+            if s.startswith('"') and s.endswith('"'):
+                s = s[1:-1]
+            # Unescape any escaped inner quotes
+            s = s.replace('\\"', '"')
+            return json.loads(s)
+        return v
 
     # ------------------------------------------------------------------ #
     # Pricing (USD per unit)                                              #
