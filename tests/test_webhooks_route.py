@@ -147,14 +147,17 @@ def test_runpod_webhook_valid_signature_accepted(client):
 # ---------------------------------------------------------------------------
 
 
-def test_lemonsqueezy_no_secret_ignored(client):
+def test_lemonsqueezy_no_secret_returns_500(client):
+    # When LEMONSQUEEZY_WEBHOOK_SECRET is unset, the server must fail loudly
+    # with 500 (not silently swallow webhooks with 200) so a misconfigured
+    # deployment is immediately visible and Lemon Squeezy retries automatically.
     with patch("app.api.webhooks.LEMONSQUEEZY_WEBHOOK_SECRET", None):
         response = client.post(
             "/webhooks/lemonsqueezy",
             json={"meta": {"event_name": "order_created"}},
         )
-    assert response.status_code == 200
-    assert response.json()["status"] == "ignored"
+    assert response.status_code == 500
+    assert "secret" in response.json()["detail"].lower()
 
 
 def test_lemonsqueezy_invalid_signature(client):
@@ -167,7 +170,9 @@ def test_lemonsqueezy_invalid_signature(client):
     assert response.status_code == 401
 
 
-def test_lemonsqueezy_valid_order_created(client):
+def test_lemonsqueezy_order_created_not_paid_is_skipped(client):
+    # order_created with status != "paid" must be skipped silently.
+    # Credits are only granted on order_created with status == "paid".
     secret = "lemon-test-secret"
     payload = {
         "meta": {
@@ -176,7 +181,7 @@ def test_lemonsqueezy_valid_order_created(client):
         },
         "data": {
             "id": "order-001",
-            "attributes": {"total": 999},
+            "attributes": {"total": 999, "status": "pending"},
         },
     }
     payload_bytes = json.dumps(payload).encode()
@@ -193,8 +198,7 @@ def test_lemonsqueezy_valid_order_created(client):
         )
 
     assert response.status_code == 200
-    assert response.json()["status"] == "ok"
-    mock_log.assert_called_once()
-    args = mock_log.call_args[0]
-    assert args[0] == "LEMONSQUEEZY"
-    assert abs(args[1] - 9.99) < 0.01  # 999 cents → $9.99
+    data = response.json()
+    assert data["status"] == "ok"
+    assert "skipped" in data
+    mock_log.assert_not_called()  # no transaction logged for non-paid orders
