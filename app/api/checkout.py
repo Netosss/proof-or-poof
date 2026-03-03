@@ -74,7 +74,7 @@ async def create_checkout(
             "attributes": {
                 "custom_price": None,
                 "product_options": {},
-                "checkout_options": {},
+                "checkout_options": {"embed": True},
                 "checkout_data": {
                     "custom": {
                         "user_id": uid,
