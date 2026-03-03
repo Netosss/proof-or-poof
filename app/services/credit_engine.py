@@ -70,7 +70,10 @@ def consume_credits(user_id: str, cost: int, reason: str,
         if not snapshot.exists:
             raise HTTPException(status_code=404, detail="User account not found")
 
-        current = snapshot.get("credits_balance") or 0
+        # Use to_dict().get() — snapshot.get() raises KeyError if the field is
+        # absent (e.g. users created before the payment system was added).
+        data = snapshot.to_dict() or {}
+        current = data.get("credits_balance") or 0
         if current < cost:
             raise HTTPException(status_code=402, detail="Insufficient credits")
 
@@ -113,7 +116,10 @@ def grant_credits(user_id: str, amount: int, reason: str,
         if not snapshot.exists:
             raise HTTPException(status_code=404, detail="User account not found")
 
-        current = snapshot.get("credits_balance") or 0
+        # Use to_dict().get() — snapshot.get() raises KeyError if the field is
+        # absent (e.g. users created before the payment system was added).
+        data = snapshot.to_dict() or {}
+        current = data.get("credits_balance") or 0
         new_balance = current + amount
         transaction.update(ref, {
             "credits_balance": new_balance,
