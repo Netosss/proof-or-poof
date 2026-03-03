@@ -175,15 +175,28 @@ async def lemonsqueezy_webhook(
 async def _handle_order_paid(payload, meta, data, attributes, order_id, custom_data):
     """Grants credits exactly once when a Lemon Squeezy payment is confirmed."""
 
-    # 1. Test mode guard — must be first, before any DB work
-    if meta.get("test_mode") is True:
-        logger.info(f"[LEMONSQUEEZY] Skipping test-mode order_paid: order={order_id}")
-        return {"status": "ok", "skipped": "test_mode"}
+    # 1. Environment + test mode guard — must be first, before any DB work.
+    #    In dev, LS sends test_mode=true. In prod, we only process env="prod".
+    #    This prevents cross-contamination in both directions.
+    payload_env = custom_data.get("env", "")
+    is_test_payload = meta.get("test_mode") is True
 
-    env = custom_data.get("env", "")
-    if env != "prod":
-        logger.info(f"[LEMONSQUEEZY] Skipping non-prod order_paid (env={env}): order={order_id}")
-        return {"status": "ok", "skipped": f"env={env}"}
+    if settings.is_dev:
+        # Dev server: only process test-mode payloads tagged env="dev"
+        if not is_test_payload or payload_env != "dev":
+            logger.info(
+                f"[LEMONSQUEEZY] Dev server skipping non-dev payload "
+                f"(test_mode={is_test_payload}, env={payload_env}): order={order_id}"
+            )
+            return {"status": "ok", "skipped": "wrong_env_for_dev_server"}
+    else:
+        # Prod server: only process live payloads tagged env="prod"
+        if is_test_payload or payload_env != "prod":
+            logger.info(
+                f"[LEMONSQUEEZY] Prod server skipping test/non-prod payload "
+                f"(test_mode={is_test_payload}, env={payload_env}): order={order_id}"
+            )
+            return {"status": "ok", "skipped": "wrong_env_for_prod_server"}
 
     # 2. Validate required fields
     user_id = custom_data.get("user_id")
@@ -196,12 +209,13 @@ async def _handle_order_paid(payload, meta, data, attributes, order_id, custom_d
     first_item = (attributes.get("first_order_item") or {})
     variant_id = str(first_item.get("variant_id", ""))
 
-    credits = settings.lemon_squeezy_variants.get(variant_id)
+    credits = settings.active_ls_variants.get(variant_id)
     if not credits:
         logger.error(
             f"[LEMONSQUEEZY] order_paid: variant_id={variant_id} not found in "
-            f"LEMON_SQUEEZY_VARIANTS config. order={order_id}. "
-            f"Known variants: {list(settings.lemon_squeezy_variants.keys())}"
+            f"{'LEMON_SQUEEZY_TEST_VARIANTS' if settings.is_dev else 'LEMON_SQUEEZY_VARIANTS'} "
+            f"config (APP_ENV={settings.app_env}). order={order_id}. "
+            f"Known variants: {list(settings.active_ls_variants.keys())}"
         )
         # Return 500 so Lemon Squeezy retries the webhook automatically.
         # Once you update LEMON_SQUEEZY_VARIANTS in config, the retry succeeds.

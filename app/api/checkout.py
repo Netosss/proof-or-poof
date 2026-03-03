@@ -19,20 +19,33 @@ import os
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from app.config import settings
 from app.core.firebase_auth import get_current_user
 from app.integrations.http_client import request_session
-from app.config import settings
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Checkout"])
 
-LEMONSQUEEZY_API_KEY = os.getenv("LEMONSQUEEZY_API_KEY", "")
 LEMONSQUEEZY_STORE_ID = os.getenv("LEMONSQUEEZY_STORE_ID", "")
 LEMONSQUEEZY_CHECKOUT_URL = "https://api.lemonsqueezy.com/v1/checkouts"
 
-# Set to "test" when running in a staging/test environment
-APP_ENV = os.getenv("APP_ENV", "prod")
+# Resolved at startup — picks the right API key for the current environment.
+# APP_ENV=dev  → LEMONSQUEEZY_API_KEY_TEST_MODE (LS test mode key)
+# APP_ENV=prod → LEMONSQUEEZY_API_KEY           (LS live key)
+# The live key is NEVER loaded when APP_ENV=dev, preventing accidental
+# real charges during development.
+def _resolve_api_key() -> str:
+    if settings.is_dev:
+        key = os.getenv("LEMONSQUEEZY_API_KEY_TEST_MODE", "")
+        if not key:
+            logger.warning(
+                "[CHECKOUT] APP_ENV=dev but LEMONSQUEEZY_API_KEY_TEST_MODE is not set"
+            )
+        return key
+    return os.getenv("LEMONSQUEEZY_API_KEY", "")
+
+LEMONSQUEEZY_API_KEY = _resolve_api_key()
 
 
 class CheckoutRequest(BaseModel):
@@ -59,7 +72,8 @@ async def create_checkout(
       { "checkout_url": "https://..." }
     """
     if not LEMONSQUEEZY_API_KEY:
-        logger.error("[CHECKOUT] LEMONSQUEEZY_API_KEY is not set")
+        key_name = "LEMONSQUEEZY_API_KEY_TEST_MODE" if settings.is_dev else "LEMONSQUEEZY_API_KEY"
+        logger.error(f"[CHECKOUT] {key_name} is not set (APP_ENV={settings.app_env})")
         raise HTTPException(status_code=503, detail="Payment service not configured")
 
     if not LEMONSQUEEZY_STORE_ID:
@@ -78,7 +92,7 @@ async def create_checkout(
                 "checkout_data": {
                     "custom": {
                         "user_id": uid,
-                        "env": APP_ENV,
+                        "env": settings.app_env,
                     }
                 },
             },
