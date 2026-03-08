@@ -1,56 +1,34 @@
 """
 RunPod GPU worker integration.
 
-Supports both webhook-driven (fast) and polling (fallback) modes.
+Supports webhook-driven (fast, default) and polling (fallback) modes.
 
-Note: `pending_jobs` and `webhook_result_buffer` are in-memory only.
-      NOT safe for multi-instance deployments — use Redis for scale-out.
+Webhook mode uses Redis Pub/Sub for job delivery:
+  - Route subscribes to runpod:result:{job_id} before submitting
+  - Webhook handler writes result to key + publishes to channel
+  - Subscriber wakes immediately — zero polling, 5 Redis ops per job total
+  - Race condition handled by a GET check after subscribing
+
+Job state lives in Redis, not in memory — safe across Railway redeploys
+and horizontally scaled instances.
 """
 
 import runpod
 import os
 import asyncio
 import base64
+import json
 import logging
 import io
 import time
 from PIL import Image
 from typing import Dict, Any, Union
 
+from app.config import settings
+from app.integrations import redis_client as redis_module
+from app.integrations import http_client as http_module
+
 logger = logging.getLogger(__name__)
-
-# In-memory job tracking — {job_id: (asyncio.Future, start_time)}
-pending_jobs: Dict[str, tuple] = {}
-
-# Buffers webhook results arriving before pending_jobs is registered (race-condition fix)
-# {job_id: (result, timestamp)}
-webhook_result_buffer: Dict[str, tuple] = {}
-
-PENDING_JOB_TTL = 120
-WEBHOOK_BUFFER_TTL = 30
-
-
-def cleanup_stale_jobs():
-    """Remove stale pending jobs and buffered results to prevent memory leaks."""
-    now = time.time()
-
-    stale_jobs = [
-        job_id for job_id, (_, start_time) in pending_jobs.items()
-        if now - start_time > PENDING_JOB_TTL
-    ]
-    for job_id in stale_jobs:
-        future, _ = pending_jobs.pop(job_id, (None, None))
-        if future and not future.done():
-            future.set_exception(TimeoutError(f"Job {job_id} expired after {PENDING_JOB_TTL}s"))
-        logger.warning(f"[CLEANUP] Removed stale pending job: {job_id}")
-
-    stale_buffer = [
-        job_id for job_id, (_, timestamp) in webhook_result_buffer.items()
-        if now - timestamp > WEBHOOK_BUFFER_TTL
-    ]
-    for job_id in stale_buffer:
-        webhook_result_buffer.pop(job_id, None)
-        logger.warning(f"[CLEANUP] Removed stale buffered result: {job_id}")
 
 
 def get_config():
@@ -88,7 +66,10 @@ def optimize_image(source: Union[str, Image.Image], max_size: int = 512) -> tupl
         encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
         return encoded, orig_w, orig_h
     except Exception as e:
-        logger.error(f"Optimization failed: {e}")
+        logger.error("runpod_optimization_failed", extra={
+            "action": "runpod_optimization_failed",
+            "error": str(e),
+        })
         return "", 0, 0
 
 
@@ -96,25 +77,19 @@ async def _run_with_webhook(
     endpoint, payload: dict, webhook_url: str, timeout_seconds: int = 90
 ) -> Dict[str, Any]:
     """
-    Submit job with webhook and wait for callback. Much faster than polling!
-    Includes buffer polling to handle race conditions.
+    Submit job with webhook and wait for result via Redis Pub/Sub.
 
-    Uses raw HTTP request to include webhook in payload per RunPod docs:
-    https://docs.runpod.io/serverless/endpoints/send-requests#webhook-notifications
+    Flow:
+      1. Subscribe to runpod:result:{job_id}
+      2. Submit job to RunPod API (using shared aiohttp session)
+      3. GET check — if webhook already arrived before subscribe, use it
+      4. Await Pub/Sub message — coroutine yields; event loop free for others
+      5. Webhook handler writes SET + PUBLISH; subscriber wakes immediately
+
+    Redis ops per job: 1 SUBSCRIBE + 1 GET + 1 UNSUBSCRIBE = 3 reads
+    Webhook handler:   1 SET + 1 PUBLISH                   = 2 writes
+    Total: 5 ops regardless of GPU duration (vs ~450 GETs with 200ms polling).
     """
-    import aiohttp
-
-    loop = asyncio.get_running_loop()
-    future = loop.create_future()
-    start_time = time.time()
-
-    cleanup_stale_jobs()
-
-    request_payload = {
-        "input": payload,
-        "webhook": webhook_url
-    }
-
     config = get_config()
     endpoint_id = config["endpoint_id"]
     api_key = config["api_key"]
@@ -122,105 +97,138 @@ async def _run_with_webhook(
     url = f"https://api.runpod.ai/v2/{endpoint_id}/run"
     headers = {
         "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+    }
+    request_payload = {
+        "input": payload,
+        "webhook": webhook_url,
     }
 
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=request_payload, headers=headers) as response:
+    # Submit the job using the shared session (avoids per-request TCP overhead)
+    async with http_module.request_session() as sess:
+        async with sess.post(url, json=request_payload, headers=headers) as response:
             if response.status != 200:
                 error_text = await response.text()
-                logger.error(f"[WEBHOOK] RunPod API error: {response.status} - {error_text}")
+                logger.error("runpod_api_error", extra={
+                    "action": "runpod_api_error",
+                    "status_code": response.status,
+                    "error": error_text[:200],
+                })
                 return {"ai_score": 0.0, "gpu_time_ms": 0.0, "error": f"API error: {response.status}"}
 
-            result = await response.json()
-            job_id = result.get("id")
+            result_data = await response.json()
+            job_id = result_data.get("id")
 
     if not job_id:
-        logger.error("[WEBHOOK] No job_id returned from RunPod")
+        logger.error("runpod_no_job_id", extra={"action": "runpod_no_job_id"})
         return {"ai_score": 0.0, "gpu_time_ms": 0.0, "error": "No job_id returned"}
 
-    logger.info(f"[WEBHOOK] Submitted job {job_id}, waiting for callback...")
+    logger.info("runpod_job_submitted", extra={
+        "action": "runpod_job_submitted",
+        "job_id": job_id,
+        "mode": "webhook_pubsub",
+    })
 
-    pending_jobs[job_id] = (future, start_time)
+    rc = redis_module.client
+    if not rc:
+        logger.warning("runpod_no_redis_fallback_polling", extra={
+            "action": "runpod_no_redis_fallback_polling",
+            "job_id": job_id,
+        })
+        runpod.api_key = api_key
+        ep = runpod.Endpoint(endpoint_id)
+        return await _run_with_polling(ep, payload, timeout_seconds)
 
-    if job_id in webhook_result_buffer:
-        result, _ = webhook_result_buffer.pop(job_id)
-        elapsed_ms = (time.time() - start_time) * 1000
-        logger.info(f"[WEBHOOK] Job {job_id} found in buffer (arrived early) in {elapsed_ms:.2f}ms")
-        return result
+    channel = f"runpod:result:{job_id}"
+    start_time = time.time()
+
+    # Create a dedicated pubsub connection for this job
+    pubsub = rc.pubsub()
+    await pubsub.subscribe(channel)
 
     try:
-        result = await _wait_with_buffer_check(future, job_id, timeout_seconds)
-        elapsed_ms = (time.time() - start_time) * 1000
-        logger.info(f"[WEBHOOK] Job {job_id} completed via webhook in {elapsed_ms:.2f}ms")
-        return result
+        # Race check: webhook may have arrived in the tiny window before subscribe
+        early = await rc.get(channel)
+        if early:
+            elapsed_ms = (time.time() - start_time) * 1000
+            logger.info("runpod_job_completed", extra={
+                "action": "runpod_job_completed",
+                "job_id": job_id,
+                "elapsed_ms": round(elapsed_ms, 2),
+                "mode": "webhook_race_hit",
+            })
+            return json.loads(early)
+
+        # Await Pub/Sub message — coroutine yields; event loop free for others
+        async with asyncio.timeout(timeout_seconds):
+            async for message in pubsub.listen():
+                if message["type"] == "message":
+                    elapsed_ms = (time.time() - start_time) * 1000
+                    logger.info("runpod_job_completed", extra={
+                        "action": "runpod_job_completed",
+                        "job_id": job_id,
+                        "elapsed_ms": round(elapsed_ms, 2),
+                        "mode": "webhook_pubsub",
+                    })
+                    return json.loads(message["data"])
+
     except asyncio.TimeoutError:
-        logger.error(f"[WEBHOOK] Job {job_id} timed out after {timeout_seconds}s, falling back to status check")
-        try:
-            status_url = f"https://api.runpod.ai/v2/{endpoint_id}/status/{job_id}"
-            async with aiohttp.ClientSession() as session:
-                async with session.get(status_url, headers=headers) as response:
-                    if response.status == 200:
-                        status_result = await response.json()
-                        if status_result.get("status") == "COMPLETED":
-                            return status_result.get("output", {})
-        except Exception as e:
-            logger.error(f"[WEBHOOK] Fallback status check failed: {e}")
+        logger.error("runpod_job_timeout", extra={
+            "action": "runpod_job_timeout",
+            "job_id": job_id,
+            "timeout_seconds": timeout_seconds,
+        })
         return {"error": "Webhook timeout", "ai_score": 0.0, "gpu_time_ms": 0.0}
+
     finally:
-        pending_jobs.pop(job_id, None)
-        webhook_result_buffer.pop(job_id, None)
-
-
-async def _wait_with_buffer_check(future: asyncio.Future, job_id: str, timeout_seconds: int):
-    """
-    Wait for future with periodic buffer checks to handle race conditions.
-    Checks buffer every 100ms in case webhook arrived but future wasn't set.
-    """
-    deadline = time.time() + timeout_seconds
-
-    while time.time() < deadline:
-        if future.done():
-            return future.result()
-
-        if job_id in webhook_result_buffer:
-            result, _ = webhook_result_buffer.pop(job_id)
-            logger.info(f"[WEBHOOK] Job {job_id} found in buffer during wait")
-            return result
-
         try:
-            return await asyncio.wait_for(asyncio.shield(future), timeout=0.1)
-        except asyncio.TimeoutError:
-            continue
+            await pubsub.unsubscribe(channel)
+            await pubsub.aclose()
+        except Exception:
+            pass
 
-    raise asyncio.TimeoutError(f"Job {job_id} timed out")
+    return {"error": "Pub/Sub exhausted", "ai_score": 0.0, "gpu_time_ms": 0.0}
 
 
 async def _run_with_polling(endpoint, payload: dict, timeout_seconds: int = 90) -> Dict[str, Any]:
     """Fallback polling mode when webhooks are not configured.
 
     Uses exponential backoff (0.1 s → 2 s) to avoid hammering the RunPod API.
+    job.status() is synchronous (RunPod SDK) so it runs in a thread.
     """
-    t_api = time.perf_counter()
-    job = endpoint.run(payload)
+    job = await asyncio.to_thread(endpoint.run, payload)
     job_id = job.job_id
     poll_count = 0
-    poll_delay = 0.1  # start at 100 ms, doubles each iteration, caps at 2 s
+    poll_delay = 0.1
+    t_start = time.perf_counter()
+
     while True:
-        status = job.status()
+        status = await asyncio.to_thread(job.status)
         poll_count += 1
         if status == "COMPLETED":
-            job_result = job.output()
-            logger.info(f"[POLLING] Completed after {poll_count} polls")
+            job_result = await asyncio.to_thread(job.output)
+            logger.info("runpod_polling_completed", extra={
+                "action": "runpod_polling_completed",
+                "job_id": job_id,
+                "poll_count": poll_count,
+            })
             return job_result
         if status == "FAILED":
-            error_msg = f"RunPod job {job_id} failed after {poll_count} polls"
-            logger.error(f"[POLLING] {error_msg}")
-            return {"ai_score": 0.0, "gpu_time_ms": 0.0, "error": error_msg}
-        if (time.perf_counter() - t_api) > timeout_seconds:
-            error_msg = f"RunPod job {job_id} timed out after {timeout_seconds}s"
-            logger.error(f"[POLLING] {error_msg}")
-            return {"ai_score": 0.0, "gpu_time_ms": 0.0, "error": error_msg}
+            logger.error("runpod_polling_error", extra={
+                "action": "runpod_polling_error",
+                "job_id": job_id,
+                "status": "FAILED",
+                "poll_count": poll_count,
+            })
+            return {"ai_score": 0.0, "gpu_time_ms": 0.0, "error": f"RunPod job {job_id} failed"}
+        if (time.perf_counter() - t_start) > timeout_seconds:
+            logger.error("runpod_polling_error", extra={
+                "action": "runpod_polling_error",
+                "job_id": job_id,
+                "status": "TIMEOUT",
+                "poll_count": poll_count,
+            })
+            return {"ai_score": 0.0, "gpu_time_ms": 0.0, "error": f"RunPod job {job_id} timed out"}
         await asyncio.sleep(poll_delay)
         poll_delay = min(poll_delay * 2, 2.0)
 
@@ -243,16 +251,19 @@ async def run_gpu_inpainting(image_bytes: bytes, mask_bytes: bytes) -> bytes:
 
         payload = {
             "image": img_b64,
-            "mask": mask_b64
+            "mask": mask_b64,
         }
 
         webhook_url = config.get("webhook_url")
-        timeout = 180  # longer timeout for potential cold start
+        timeout = 180
+        t_wall = time.time()
 
         if webhook_url:
             job_result = await _run_with_webhook(endpoint, payload, webhook_url, timeout_seconds=timeout)
         else:
             job_result = await _run_with_polling(endpoint, payload, timeout_seconds=timeout)
+
+        wall_elapsed_sec = time.time() - t_wall
 
         if not job_result:
             raise RuntimeError("Empty response from worker")
@@ -260,17 +271,35 @@ async def run_gpu_inpainting(image_bytes: bytes, mask_bytes: bytes) -> bytes:
         if "error" in job_result:
             raise RuntimeError(f"Worker error: {job_result['error']}")
 
+        gpu_execution_sec = job_result.get("executionTime")
+        if gpu_execution_sec is None:
+            gpu_execution_sec = wall_elapsed_sec
+
+        logger.info("runpod_call_completed", extra={
+            "action": "runpod_call_completed",
+            "gpu_execution_sec": round(gpu_execution_sec, 3),
+            "wall_elapsed_sec": round(wall_elapsed_sec, 3),
+            "cost_usd": round(gpu_execution_sec * settings.inpaint_rate_per_sec, 6),
+            "used_reported_time": job_result.get("executionTime") is not None,
+        })
+
         if "image_base64" not in job_result:
             if "results" in job_result:
                 first = job_result["results"][0]
                 if "image_base64" in first:
                     return base64.b64decode(first["image_base64"])
 
-            logger.error(f"[RUNPOD] Invalid response keys: {job_result.keys()}")
+            logger.error("runpod_invalid_response", extra={
+                "action": "runpod_invalid_response",
+                "keys": list(job_result.keys()),
+            })
             raise RuntimeError("Worker did not return image_base64")
 
         return base64.b64decode(job_result["image_base64"])
 
     except Exception as e:
-        logger.error(f"[RUNPOD] Inpainting failed: {e}")
+        logger.error("runpod_inpainting_failed", extra={
+            "action": "runpod_inpainting_failed",
+            "error": str(e),
+        })
         raise e

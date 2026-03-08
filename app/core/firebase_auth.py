@@ -56,21 +56,27 @@ async def get_current_user(
             "email": decoded.get("email"),
         }
     except firebase_auth.ExpiredIdTokenError:
-        logger.warning("[AUTH] Firebase token expired")
+        logger.warning("firebase_token_expired", extra={"action": "firebase_token_expired"})
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token expired",
             headers={"WWW-Authenticate": "Bearer"},
         )
     except firebase_auth.InvalidIdTokenError as e:
-        logger.warning(f"[AUTH] Invalid Firebase token: {e}")
+        logger.warning("firebase_token_invalid", extra={
+            "action": "firebase_token_invalid",
+            "error": str(e),
+        })
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token",
             headers={"WWW-Authenticate": "Bearer"},
         )
     except Exception as e:
-        logger.error(f"[AUTH] Unexpected token verification error: {e}")
+        logger.error("firebase_token_verify_error", extra={
+            "action": "firebase_token_verify_error",
+            "error": str(e),
+        })
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication failed",

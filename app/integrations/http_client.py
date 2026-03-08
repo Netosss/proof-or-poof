@@ -28,7 +28,7 @@ async def initialize() -> None:
     session = aiohttp.ClientSession(
         timeout=aiohttp.ClientTimeout(total=30)
     )
-    logger.info("[STARTUP] Shared HTTP session initialized")
+    logger.info("startup_http", extra={"action": "startup_http"})
 
 
 async def close() -> None:
@@ -36,7 +36,7 @@ async def close() -> None:
     if session and not session.closed:
         await session.close()
         session = None
-        logger.info("[SHUTDOWN] Shared HTTP session closed")
+        logger.info("shutdown_http", extra={"action": "shutdown_http"})
 
 
 @asynccontextmanager

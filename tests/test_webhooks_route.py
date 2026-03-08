@@ -7,62 +7,75 @@ Tests for:
 import hashlib
 import hmac as hmac_mod
 import json
-import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 
 # ---------------------------------------------------------------------------
-# RunPod webhook
+# RunPod webhook — Redis Pub/Sub delivery
 # ---------------------------------------------------------------------------
 
 
-def _make_runpod_future():
-    m = MagicMock()
-    m.done.return_value = False
-    return m
-
-
-def test_runpod_webhook_completed_resolves_future(client):
-    from app.integrations.runpod import pending_jobs
-
+def test_runpod_webhook_completed_stores_result_in_redis(client, mock_redis):
+    """COMPLETED job: result is SET in Redis (race-check backup) and PUBLISHed."""
     job_id = "runpod-job-completed"
-    mock_future = _make_runpod_future()
-    pending_jobs[job_id] = (mock_future, time.time())
+    output = {"ai_score": 0.9, "gpu_time_ms": 200.0}
 
-    try:
-        payload = {
-            "id": job_id,
-            "status": "COMPLETED",
-            "output": {"ai_score": 0.9, "gpu_time_ms": 200.0},
-        }
-        response = client.post("/webhook/runpod", json=payload)
-        assert response.status_code == 200
-        assert response.json()["status"] == "ok"
-        mock_future.set_result.assert_called_once_with(
-            {"ai_score": 0.9, "gpu_time_ms": 200.0}
-        )
-    finally:
-        pending_jobs.pop(job_id, None)
+    payload = {"id": job_id, "status": "COMPLETED", "output": output}
+    response = client.post("/webhook/runpod", json=payload)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+
+    # The result must be stored in Redis for the race-check GET in runpod.py
+    channel = f"runpod:result:{job_id}"
+    assert channel in mock_redis._store
+    stored = json.loads(mock_redis._store[channel])
+    assert stored["ai_score"] == 0.9
+    assert stored["gpu_time_ms"] == 200.0
 
 
-def test_runpod_webhook_failed_job(client):
-    from app.integrations.runpod import pending_jobs
-
+def test_runpod_webhook_failed_job_notifies_redis(client, mock_redis):
+    """FAILED job: error payload is SET in Redis so the waiting coroutine unblocks."""
     job_id = "runpod-job-failed"
-    mock_future = _make_runpod_future()
-    pending_jobs[job_id] = (mock_future, time.time())
 
-    try:
-        payload = {"id": job_id, "status": "FAILED", "error": "OOM error"}
-        response = client.post("/webhook/runpod", json=payload)
-        assert response.status_code == 200
-        args = mock_future.set_result.call_args[0][0]
-        assert args["error"] == "Job failed"
-        assert args["ai_score"] == 0.0
-    finally:
-        pending_jobs.pop(job_id, None)
+    payload = {"id": job_id, "status": "FAILED", "error": "OOM error"}
+    response = client.post("/webhook/runpod", json=payload)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+
+    channel = f"runpod:result:{job_id}"
+    assert channel in mock_redis._store
+    stored = json.loads(mock_redis._store[channel])
+    assert "error" in stored
+    assert stored["ai_score"] == 0.0
+
+
+def test_runpod_webhook_completed_stores_backup_before_publish(client, mock_redis):
+    """
+    The SET must happen before PUBLISH so a subscriber who arrives after
+    the PUBLISH can still retrieve the result via the GET race-check.
+    """
+    job_id = "runpod-race-job"
+    output = {"ai_score": 0.7, "gpu_time_ms": 150.0}
+
+    payload = {"id": job_id, "status": "COMPLETED", "output": output}
+    response = client.post("/webhook/runpod", json=payload)
+
+    assert response.status_code == 200
+    channel = f"runpod:result:{job_id}"
+    # Key must exist — this is the SET that enables the race-check GET
+    assert channel in mock_redis._store
+
+
+def test_runpod_webhook_status_update_acknowledged(client):
+    """IN_PROGRESS (and other non-terminal) statuses return ok without touching Redis."""
+    payload = {"id": "runpod-in-progress", "status": "IN_PROGRESS"}
+    response = client.post("/webhook/runpod", json=payload)
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
 
 
 def test_runpod_webhook_unknown_job(client):
@@ -71,48 +84,9 @@ def test_runpod_webhook_unknown_job(client):
     assert response.status_code == 200
 
 
-def test_runpod_webhook_race_condition_buffers_result(client):
-    """Webhook arrives before the job is registered in pending_jobs → buffered."""
-    from app.integrations.runpod import webhook_result_buffer
-
-    job_id = "runpod-race-job"
-    webhook_result_buffer.pop(job_id, None)
-
-    try:
-        payload = {
-            "id": job_id,
-            "status": "COMPLETED",
-            "output": {"ai_score": 0.7, "gpu_time_ms": 150.0},
-        }
-        response = client.post("/webhook/runpod", json=payload)
-        assert response.status_code == 200
-        assert job_id in webhook_result_buffer
-        buffered_output, _ = webhook_result_buffer[job_id]
-        assert buffered_output["ai_score"] == 0.7
-    finally:
-        webhook_result_buffer.pop(job_id, None)
-
-
-def test_runpod_webhook_status_update_acknowledged(client):
-    from app.integrations.runpod import pending_jobs
-
-    job_id = "runpod-in-progress"
-    mock_future = _make_runpod_future()
-    pending_jobs[job_id] = (mock_future, time.time())
-
-    try:
-        payload = {"id": job_id, "status": "IN_PROGRESS"}
-        response = client.post("/webhook/runpod", json=payload)
-        assert response.status_code == 200
-        assert response.json()["status"] == "acknowledged"
-    finally:
-        pending_jobs.pop(job_id, None)
-
-
 def test_runpod_webhook_invalid_signature_rejected(client):
     """When RUNPOD_WEBHOOK_SECRET is set, a missing/wrong ?secret= param → 401."""
     with patch("app.api.webhooks.RUNPOD_WEBHOOK_SECRET", "real-runpod-secret"):
-        # No ?secret= query param → 401
         response = client.post(
             "/webhook/runpod",
             json={"id": "fake-job", "status": "COMPLETED", "output": {"ai_score": 0.99}},
@@ -138,7 +112,6 @@ def test_runpod_webhook_valid_signature_accepted(client):
             f"/webhook/runpod?secret={secret}",
             json={"id": "legit-job", "status": "COMPLETED", "output": None},
         )
-    # Job not in pending_jobs → logs a warning but still returns ok (not 401)
     assert response.status_code == 200
 
 

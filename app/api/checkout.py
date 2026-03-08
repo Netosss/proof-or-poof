@@ -39,9 +39,10 @@ def _resolve_api_key() -> str:
     if settings.is_dev:
         key = os.getenv("LEMONSQUEEZY_API_KEY_TEST_MODE", "")
         if not key:
-            logger.warning(
-                "[CHECKOUT] APP_ENV=dev but LEMONSQUEEZY_API_KEY_TEST_MODE is not set"
-            )
+            logger.warning("checkout_config_warning", extra={
+                "action": "checkout_config_warning",
+                "detail": "APP_ENV=dev but LEMONSQUEEZY_API_KEY_TEST_MODE is not set",
+            })
         return key
     return os.getenv("LEMONSQUEEZY_API_KEY", "")
 
@@ -73,11 +74,18 @@ async def create_checkout(
     """
     if not LEMONSQUEEZY_API_KEY:
         key_name = "LEMONSQUEEZY_API_KEY_TEST_MODE" if settings.is_dev else "LEMONSQUEEZY_API_KEY"
-        logger.error(f"[CHECKOUT] {key_name} is not set (APP_ENV={settings.app_env})")
+        logger.error("checkout_config_error", extra={
+            "action": "checkout_config_error",
+            "missing_key": key_name,
+            "app_env": settings.app_env,
+        })
         raise HTTPException(status_code=503, detail="Payment service not configured")
 
     if not LEMONSQUEEZY_STORE_ID:
-        logger.error("[CHECKOUT] LEMONSQUEEZY_STORE_ID is not set")
+        logger.error("checkout_config_error", extra={
+            "action": "checkout_config_error",
+            "missing_key": "LEMONSQUEEZY_STORE_ID",
+        })
         raise HTTPException(status_code=503, detail="Payment service not configured")
 
     uid = user["uid"]
@@ -122,10 +130,11 @@ async def create_checkout(
             ) as resp:
                 if resp.status not in (200, 201):
                     error_body = await resp.text()
-                    logger.error(
-                        f"[CHECKOUT] Lemon Squeezy API error {resp.status} "
-                        f"for uid={uid}: {error_body}"
-                    )
+                    logger.error("checkout_api_error", extra={
+                        "action": "checkout_api_error",
+                        "status_code": resp.status,
+                        "error_body": error_body[:200],
+                    })
                     raise HTTPException(
                         status_code=502,
                         detail="Failed to create checkout session"
@@ -136,16 +145,25 @@ async def create_checkout(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"[CHECKOUT] Unexpected error for uid={uid}: {e}")
+        logger.error("checkout_unexpected_error", extra={
+            "action": "checkout_unexpected_error",
+            "error": str(e),
+        })
         raise HTTPException(status_code=502, detail="Failed to create checkout session")
 
     try:
         checkout_url = data["data"]["attributes"]["url"]
     except (KeyError, TypeError) as e:
-        logger.error(f"[CHECKOUT] Unexpected Lemon Squeezy response shape: {e} — {data}")
+        logger.error("checkout_response_error", extra={
+            "action": "checkout_response_error",
+            "error": str(e),
+        })
         raise HTTPException(status_code=502, detail="Invalid response from payment service")
 
-    logger.info(f"[CHECKOUT] Created checkout for uid={uid}, variant={body.variant_id}")
+    logger.info("checkout_created", extra={
+        "action": "checkout_created",
+        "variant_id": body.variant_id,
+    })
     return CheckoutResponse(checkout_url=checkout_url)
 
 

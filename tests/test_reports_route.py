@@ -19,7 +19,7 @@ import pytest
 def test_create_share_link_valid(client, mock_redis):
     short_id = "abc12345"
     payload = {"summary": "No AI Detected", "confidence_score": 0.95, "evidence_chain": []}
-    mock_redis.set(f"report:{short_id}", json.dumps(payload))
+    mock_redis._store[f"report:{short_id}"] = json.dumps(payload)  # sync seed
 
     with patch("app.services.reports_service.firebase_module") as mock_fb_mod:
         mock_db = __import__("tests.mocks.firebase_mock", fromlist=["MockFirestore"]).MockFirestore()
@@ -35,7 +35,7 @@ def test_create_share_link_valid(client, mock_redis):
 
 def test_create_share_link_idempotent(client, mock_redis):
     short_id = "idem1234"
-    mock_redis.set(f"is_shared:{short_id}", "1")
+    mock_redis._store[f"is_shared:{short_id}"] = "1"  # sync seed
 
     with patch("app.services.reports_service.firebase_module") as mock_fb_mod:
         mock_db = __import__("tests.mocks.firebase_mock", fromlist=["MockFirestore"]).MockFirestore()

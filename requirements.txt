@@ -14,9 +14,12 @@ pandas
 plotly
 google-genai
 firebase-admin
-upstash-redis
+redis>=4.5.0
 streamlit>=1.40.0
 protobuf>=4.25.0
 simple-lama-inpainting
 pillow-heif
 psutil
+sentry-sdk
+python-json-logger
+axiom-py

@@ -3,6 +3,9 @@ Pure unit tests for app/core/rate_limiter.py — in-memory fallback path only.
 
 Redis client is set to None so the memory implementation is exercised.
 Time is frozen with unittest.mock.patch to test window sliding without sleeping.
+
+check_rate_limit is async, so tests that call it use @pytest.mark.asyncio.
+_cleanup_all_limits is sync and its test remains synchronous.
 """
 
 import time
@@ -27,16 +30,18 @@ def _with_null_redis(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_first_request_passes(monkeypatch):
+@pytest.mark.asyncio
+async def test_first_request_passes(monkeypatch):
     _with_null_redis(monkeypatch)
     from app.core.rate_limiter import _rate_limits, check_rate_limit
 
     uid = _uid()
     _rate_limits.pop(uid, None)
-    check_rate_limit(uid)  # should not raise
+    await check_rate_limit(uid)  # should not raise
 
 
-def test_requests_under_limit_pass(monkeypatch):
+@pytest.mark.asyncio
+async def test_requests_under_limit_pass(monkeypatch):
     _with_null_redis(monkeypatch)
     from app.config import settings
     from app.core.rate_limiter import _rate_limits, check_rate_limit
@@ -44,10 +49,11 @@ def test_requests_under_limit_pass(monkeypatch):
     uid = _uid()
     _rate_limits.pop(uid, None)
     for _ in range(settings.rate_limit_max_requests):
-        check_rate_limit(uid)  # no exception
+        await check_rate_limit(uid)  # no exception
 
 
-def test_request_exceeding_limit_raises_429(monkeypatch):
+@pytest.mark.asyncio
+async def test_request_exceeding_limit_raises_429(monkeypatch):
     _with_null_redis(monkeypatch)
     from app.config import settings
     from app.core.rate_limiter import _rate_limits, check_rate_limit
@@ -56,10 +62,10 @@ def test_request_exceeding_limit_raises_429(monkeypatch):
     _rate_limits.pop(uid, None)
 
     for _ in range(settings.rate_limit_max_requests):
-        check_rate_limit(uid)
+        await check_rate_limit(uid)
 
     with pytest.raises(HTTPException) as exc:
-        check_rate_limit(uid)
+        await check_rate_limit(uid)
     assert exc.value.status_code == 429
 
 
@@ -68,7 +74,8 @@ def test_request_exceeding_limit_raises_429(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_new_window_allows_requests_again(monkeypatch):
+@pytest.mark.asyncio
+async def test_new_window_allows_requests_again(monkeypatch):
     _with_null_redis(monkeypatch)
     from app.config import settings
     from app.core.rate_limiter import RATE_LIMIT_WINDOW, _rate_limits, check_rate_limit
@@ -78,13 +85,13 @@ def test_new_window_allows_requests_again(monkeypatch):
 
     # Fill the window
     for _ in range(settings.rate_limit_max_requests):
-        check_rate_limit(uid)
+        await check_rate_limit(uid)
 
     # Advance time past the window so all timestamps expire
     future_time = time.time() + RATE_LIMIT_WINDOW + 1
     with patch("app.core.rate_limiter.time") as mock_time:
         mock_time.time.return_value = future_time
-        check_rate_limit(uid)  # should not raise in the new window
+        await check_rate_limit(uid)  # should not raise in the new window
 
 
 # ---------------------------------------------------------------------------

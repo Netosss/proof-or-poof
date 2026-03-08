@@ -31,12 +31,13 @@ def log_memory(stage: str) -> None:
     process = psutil.Process(os.getpid())
     mem_info = process.memory_info()
     sys_mem = psutil.virtual_memory()
-    logger.debug(
-        f"[MEMORY] {stage} | "
-        f"PID: {os.getpid()} | "
-        f"Process RSS: {mem_info.rss / 1024 / 1024:.2f} MB | "
-        f"System Available: {sys_mem.available / 1024 / 1024:.2f} MB / {sys_mem.total / 1024 / 1024:.2f} MB"
-    )
+    logger.debug("memory_usage", extra={
+        "action": "memory_usage",
+        "stage": stage,
+        "process_rss_mb": round(mem_info.rss / 1024 / 1024, 2),
+        "system_available_mb": round(sys_mem.available / 1024 / 1024, 2),
+        "system_total_mb": round(sys_mem.total / 1024 / 1024, 2),
+    })
 
 
 async def download_image(url: str, max_size: int = settings.max_image_download_bytes) -> tuple[bytes, str]:
@@ -71,7 +72,10 @@ async def download_image(url: str, max_size: int = settings.max_image_download_b
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"Error decoding data URI: {e}")
+            logger.error("url_decode_failed", extra={
+                "action": "url_decode_failed",
+                "error": str(e),
+            })
             raise HTTPException(status_code=400, detail="Invalid data URI")
 
     async with http_module.request_session() as session:

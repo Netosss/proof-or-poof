@@ -3,6 +3,8 @@ Authentication utilities: Turnstile verification, IP extraction, and device-limi
 
 All functions that need a Redis client access it at call-time via the integration module
 so they pick up the instance initialized during the FastAPI lifespan.
+
+All Redis operations are async — no thread pool needed.
 """
 
 import os
@@ -38,7 +40,16 @@ async def verify_turnstile(token: str) -> bool:
     """Verifies a Cloudflare Turnstile token using the shared HTTP session."""
     secret = os.getenv("TURNSTILE_SECRET_KEY")
     if not secret:
-        logger.warning("TURNSTILE_SECRET_KEY not set. Skipping validation (DEV MODE).")
+        if os.getenv("APP_ENV") != "dev":
+            # In production, a missing key is a misconfiguration — fail loudly.
+            raise HTTPException(
+                status_code=500,
+                detail="Verification service misconfigured"
+            )
+        logger.warning("turnstile_config_missing", extra={
+            "action": "turnstile_config_missing",
+            "detail": "TURNSTILE_SECRET_KEY not set, skipping validation (DEV MODE)",
+        })
         return True
 
     url = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
@@ -49,11 +60,19 @@ async def verify_turnstile(token: str) -> bool:
             async with sess.post(url, data=payload) as response:
                 result = await response.json()
                 if not result.get("success"):
-                    logger.warning(f"Turnstile validation failed: {result}")
+                    logger.warning("turnstile_validation_failed", extra={
+                        "action": "turnstile_validation_failed",
+                        "error_codes": result.get("error-codes", []),
+                    })
                     return False
                 return True
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Turnstile connection error: {e}")
+        logger.error("turnstile_connection_error", extra={
+            "action": "turnstile_connection_error",
+            "error": str(e),
+        })
         return False
 
 
@@ -86,10 +105,10 @@ async def check_ip_device_limit(
 
     ip_key = f"ip_devices:{ip_address}"
 
-    pipeline = rc.pipeline()
-    pipeline.sismember(ip_key, device_id)
-    pipeline.scard(ip_key)
-    results = pipeline.exec()
+    pipe = rc.pipeline()
+    pipe.sismember(ip_key, device_id)
+    pipe.scard(ip_key)
+    results = await pipe.execute()
 
     is_known = results[0]
     current_count = results[1]
@@ -103,7 +122,12 @@ async def check_ip_device_limit(
     if current_count >= limit:
         if not token_already_verified:
             if not turnstile_token:
-                logger.warning(f"IP {ip_address} reached device limit. STRICT CAPTCHA required.")
+                logger.warning("ip_device_limit_reached", extra={
+                    "action": "ip_device_limit_reached",
+                    "ip": ip_address,
+                    "device_count": current_count,
+                    "limit": limit,
+                })
                 raise HTTPException(
                     status_code=403,
                     detail={"code": "STRICT_CAPTCHA_REQUIRED", "message": "High activity detected. Strict verification needed."}
@@ -112,7 +136,7 @@ async def check_ip_device_limit(
             if not is_human:
                 raise HTTPException(status_code=403, detail="Invalid CAPTCHA")
 
-    write_pipeline = rc.pipeline()
-    write_pipeline.sadd(ip_key, device_id)
-    write_pipeline.expire(ip_key, IP_DEVICE_WINDOW)
-    write_pipeline.exec()
+    write_pipe = rc.pipeline()
+    write_pipe.sadd(ip_key, device_id)
+    write_pipe.expire(ip_key, IP_DEVICE_WINDOW)
+    await write_pipe.execute()

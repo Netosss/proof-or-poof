@@ -20,9 +20,9 @@ from app.config import settings
 from app.core.auth import check_ip_device_limit, get_client_ip, validate_device_id, verify_turnstile
 from app.core.dependencies import security_manager
 from app.core.firebase_auth import get_optional_user
-from app.core.rate_limiter import check_rate_limit
 from app.detection.pipeline import detect_ai_media
 from app.integrations import redis_client as redis_module
+from app.logging_config import user_id_var
 from app.schemas.detection import DetectionResponse
 from app.services.credit_engine import consume_credits, get_user_balance
 from app.services.credits_service import deduct_guest_credits, get_guest_wallet
@@ -32,6 +32,8 @@ from app.services.finance_service import log_transaction
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Detection"])
+
+VIDEO_SUFFIXES = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.gif'}
 
 
 @router.post("/detect", response_model=DetectionResponse)
@@ -53,12 +55,9 @@ async def detect(
     """
     ip = get_client_ip(request)
 
-    if auth_user:
-        # --- Authenticated path ---
-        uid = auth_user["uid"]
-        # Rate-limit check fires BEFORE Firestore transaction
-        check_rate_limit(f"uid:{uid}")
+    user_id_var.set(auth_user["uid"] if auth_user else "")
 
+    if auth_user:
         if not turnstile_token:
             raise HTTPException(
                 status_code=403,
@@ -69,7 +68,6 @@ async def detect(
             raise HTTPException(status_code=403, detail="Invalid CAPTCHA")
 
     else:
-        # --- Guest path ---
         validate_device_id(device_id)
 
         if not turnstile_token:
@@ -84,8 +82,7 @@ async def detect(
 
         await check_ip_device_limit(ip, device_id, token_already_verified=True)
 
-        # Single Firestore read — covers both ban check and credit check.
-        wallet = get_guest_wallet(device_id)
+        wallet = await get_guest_wallet(device_id)
         if wallet.get("is_banned"):
             raise HTTPException(status_code=403, detail="Device is banned")
 
@@ -114,9 +111,15 @@ async def detect(
         if trusted_metadata_obj and isinstance(trusted_metadata_obj, str):
             try:
                 sidecar_metadata = json.loads(trusted_metadata_obj)
-                logger.info(f"[SIDECAR] Device {device_id} provided trusted metadata: {list(sidecar_metadata.keys())}")
+                logger.info("sidecar_metadata_received", extra={
+                    "action": "sidecar_metadata_received",
+                    "keys": list(sidecar_metadata.keys()),
+                })
             except json.JSONDecodeError as e:
-                logger.warning(f"[SIDECAR] Invalid JSON in trusted_metadata from {device_id}: {e}")
+                logger.warning("sidecar_metadata_invalid", extra={
+                    "action": "sidecar_metadata_invalid",
+                    "error": str(e),
+                })
 
         if file_obj:
             if not isinstance(file_obj, UploadFile):
@@ -144,23 +147,23 @@ async def detect(
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
         tmp_file.write(file_content)
         temp_path = tmp_file.name
-    del file_content  # bytes now on disk — free RAM early for large uploads
+    del file_content
 
     try:
         security_manager.validate_file(filename, filesize, temp_path)
 
         if auth_user:
-            # Authenticated path
             uid = auth_user["uid"]
 
-            # Pre-check balance BEFORE running the AI — prevents burning
-            # Gemini/RunPod compute for users who can't pay.
-            current_balance = get_user_balance(uid)
+            current_balance = await get_user_balance(uid)
             if current_balance < settings.detect_credit_cost:
-                logger.info(
-                    f"[BILLING] Insufficient credits for uid={uid} "
-                    f"(Has: {current_balance}, Need: {settings.detect_credit_cost})"
-                )
+                logger.warning("insufficient_credits", extra={
+                    "action": "insufficient_credits",
+                    "endpoint": "detect",
+                    "has": current_balance,
+                    "need": settings.detect_credit_cost,
+                    "user_type": "authenticated",
+                })
                 raise HTTPException(status_code=402, detail="Insufficient credits")
 
             start_time = time.time()
@@ -172,22 +175,21 @@ async def detect(
             )
 
             if result.get("summary") in ["Analysis Failed", "File too large to scan"]:
-                logger.info(
-                    f"[BILLING] Skipped deduction for uid={uid} due to soft failure: {result.get('summary')}"
-                )
-                new_balance = get_user_balance(uid)
+                new_balance = await get_user_balance(uid)
             else:
-                new_balance = consume_credits(uid, settings.detect_credit_cost, "detect", filename)
+                new_balance = await consume_credits(uid, settings.detect_credit_cost, "detect", filename)
 
         else:
-            # Guest path: reuse wallet fetched above — avoids a second Firestore round-trip.
             current_credits = wallet.get("credits", 0)
 
             if current_credits < settings.detect_credit_cost:
-                logger.info(
-                    f"[BILLING] Insufficient credits for {device_id} "
-                    f"(Has: {current_credits}, Need: {settings.detect_credit_cost})"
-                )
+                logger.warning("insufficient_credits", extra={
+                    "action": "insufficient_credits",
+                    "endpoint": "detect",
+                    "has": current_credits,
+                    "need": settings.detect_credit_cost,
+                    "user_type": "guest",
+                })
                 raise HTTPException(status_code=402, detail="Insufficient credits")
 
             start_time = time.time()
@@ -199,13 +201,10 @@ async def detect(
             )
 
             if result.get("summary") in ["Analysis Failed", "File too large to scan"]:
-                logger.info(
-                    f"[BILLING] Skipped deduction for {device_id} due to soft failure: {result.get('summary')}"
-                )
-                wallet = get_guest_wallet(device_id)
+                wallet = await get_guest_wallet(device_id)
                 new_balance = wallet.get("credits", 0)
             else:
-                new_balance = deduct_guest_credits(device_id, cost=settings.detect_credit_cost)
+                new_balance = await deduct_guest_credits(device_id, cost=settings.detect_credit_cost)
 
         duration = time.time() - start_time
 
@@ -216,18 +215,13 @@ async def detect(
 
         if is_cached:
             cost = 0.0
-            logger.info("[COST] Cache hit: $0.00")
             log_transaction("CACHE", 0.0, {"file": filename, "device_id": device_id})
         elif is_gemini_used:
             cost = settings.gemini_fixed_cost
-            logger.info(f"[COST] Gemini analysis: ${cost:.6f}")
             gemini_usage = result.get("usage", {})
             log_transaction("GEMINI", -cost, {"file": filename, "device_id": device_id, "usage": gemini_usage})
         elif actual_gpu_sec > 0:
             cost = actual_gpu_sec * settings.gpu_rate_per_sec
-            logger.info(
-                f"[COST] GPU: {actual_gpu_sec:.3f}s (actual) vs {duration:.3f}s (round-trip) | Cost: ${cost:.6f}"
-            )
             log_transaction("GPU", -cost, {"file": filename, "device_id": device_id, "duration": actual_gpu_sec})
         else:
             cost = duration * settings.cpu_rate_per_sec
@@ -243,10 +237,23 @@ async def detect(
         rc = redis_module.client
         if rc:
             shareable = {k: v for k, v in result.items() if k != "new_balance"}
-            rc.setex(f"report:{short_id}", settings.report_cache_ttl_sec, json.dumps(shareable))
+            await rc.setex(f"report:{short_id}", settings.report_cache_ttl_sec, json.dumps(shareable))
         result["short_id"] = short_id
 
-        logger.info(f"[ROUTE] Final Response for {filename}: {json.dumps(result)}")
+        logger.info("scan_completed", extra={
+            "action": "scan_completed",
+            "outcome": result.get("summary"),
+            "confidence_score": result.get("confidence_score"),
+            "is_gemini_used": is_gemini_used,
+            "is_cached": is_cached,
+            "is_short_circuited": result.get("is_short_circuited", False),
+            "media_type": "video" if suffix in VIDEO_SUFFIXES else "image",
+            "user_type": "authenticated" if auth_user else "guest",
+            "duration_ms": round(duration * 1000, 1),
+            "cost_usd": cost,
+            "media_file": filename,
+        })
+
         return result
 
     finally:

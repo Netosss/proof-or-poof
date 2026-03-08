@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from app.core.firebase_auth import get_current_user
+from app.logging_config import user_id_var
 from app.services.credit_engine import get_or_create_user
 
 logger = logging.getLogger(__name__)
@@ -52,13 +53,16 @@ async def auth_me(
     """
     uid = user["uid"]
     email = user.get("email")
+    user_id_var.set(uid)
 
-    result = get_or_create_user(uid, email, device_id=body.device_id)
+    result = await get_or_create_user(uid, email, device_id=body.device_id)
 
-    logger.info(
-        f"[AUTH] /api/auth/me uid={uid} "
-        f"is_new={result['is_new_user']} balance={result['credits_balance']}"
-    )
+    logger.info("auth_me_success", extra={
+        "action": "auth_me_success",
+        "is_new_user": result["is_new_user"],
+        "balance": result["credits_balance"],
+        "has_device_id": bool(body.device_id),
+    })
 
     return AuthMeResponse(
         user_id=result["uid"],

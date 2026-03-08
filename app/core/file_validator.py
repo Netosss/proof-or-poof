@@ -61,7 +61,12 @@ def validate_file(filename: str, filesize: int, file_path: str = None) -> bool:
                 if not ret:
                     raise Exception("Could not read video frames")
         except Exception as e:
-            logger.error(f"Malicious or corrupted file detected ({filename}): {e}")
+            logger.error("file_validation_failed", extra={
+                "action": "file_validation_failed",
+                "ext": ext,
+                "filesize": filesize,
+                "error": str(e),
+            })
             raise HTTPException(status_code=400, detail="Invalid file content or format mismatch.")
 
     return True
