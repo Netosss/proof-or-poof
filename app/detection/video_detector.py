@@ -86,7 +86,10 @@ def extract_video_frames(video_path: str) -> tuple:
         cap.release()
 
         if quality_rejected > 0:
-            logger.info(f"[VIDEO] Skipped {quality_rejected} low-quality frames (dark/blurry)")
+            logger.info("video_frames_skipped", extra={
+                "action": "video_frames_skipped",
+                "quality_rejected": quality_rejected,
+            })
 
         # Fallback if too many frames rejected
         if len(frames) < 1 and total_frames >= 1:
@@ -101,7 +104,7 @@ def extract_video_frames(video_path: str) -> tuple:
             cap.release()
 
     except Exception as e:
-        logger.error(f"Error extracting video frames: {e}")
+        logger.error("video_frames_error", extra={"action": "video_frames_error", "error": str(e)})
 
     return frames, quality_rejected
 
@@ -121,11 +124,11 @@ async def get_video_metadata(video_path: str) -> dict:
             if proc.returncode == 0:
                 return json.loads(stdout.decode())
         except asyncio.TimeoutError:
-            logger.warning(f"ffprobe timeout for {video_path}")
+            logger.warning("video_ffprobe_timeout", extra={"action": "video_ffprobe_timeout"})
     except FileNotFoundError:
-        logger.warning("ffprobe not installed")
+        logger.warning("video_ffprobe_missing", extra={"action": "video_ffprobe_missing"})
     except Exception as e:
-        logger.error(f"Error extracting video metadata: {e}")
+        logger.error("video_metadata_error", extra={"action": "video_metadata_error", "error": str(e)})
     finally:
         if proc is not None:
             try:

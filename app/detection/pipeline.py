@@ -162,11 +162,19 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
                 desc = str(data.get("description", "")).lower()
                 if any(ai in agent for ai in _KNOWN_AI_C2PA_GENERATORS):
                     is_generative_ai = True
-                    logger.info(f"[C2PA] AI flagged by assertion softwareAgent: '{agent}'")
+                    logger.info("c2pa_ai_flagged", extra={
+                        "action": "c2pa_ai_flagged",
+                        "signal": "softwareAgent",
+                        "value": agent[:80],
+                    })
                     break
                 if any(term in desc for term in _AI_DESCRIPTION_TERMS):
                     is_generative_ai = True
-                    logger.info(f"[C2PA] AI flagged by assertion description: '{desc[:60]}'")
+                    logger.info("c2pa_ai_flagged", extra={
+                        "action": "c2pa_ai_flagged",
+                        "signal": "description",
+                        "value": desc[:60],
+                    })
                     break
 
         # Pass 2 — generator name fallback.
@@ -177,7 +185,11 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
                 name_lower = name.lower()
                 if any(ai in name_lower for ai in _KNOWN_AI_C2PA_GENERATORS):
                     is_generative_ai = True
-                    logger.info(f"[C2PA] AI flagged by generator name: '{name}'")
+                    logger.info("c2pa_ai_flagged", extra={
+                        "action": "c2pa_ai_flagged",
+                        "signal": "generator_name",
+                        "value": name[:80],
+                    })
                     break
 
         l1_data = {
@@ -190,7 +202,11 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
             )
         }
 
-        logger.info(f"[C2PA] generator='{generator}' is_generative_ai={is_generative_ai}")
+        logger.info("c2pa_result", extra={
+            "action": "c2pa_result",
+            "generator": generator,
+            "is_generative_ai": is_generative_ai,
+        })
 
         return {
             "summary": "AI-Generated" if is_generative_ai else "No AI Detected",
@@ -215,13 +231,13 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
 
     if is_video:
         filename = os.path.basename(file_path)
-        logger.info(f"[PIPELINE] Detecting AI in video: {filename}")
+        logger.info("pipeline_video_start", extra={"action": "pipeline_video_start", "filename": filename})
 
         video_hash = await asyncio.to_thread(get_smart_file_hash, file_path)
         cached_video_result = get_cached_result(video_hash)
 
         if cached_video_result:
-            logger.info(f"[CACHE] Hit for VIDEO scan: {video_hash[:8]}...")
+            logger.info("cache_hit_video", extra={"action": "cache_hit_video"})
             return cached_video_result
 
         video_metadata = await get_video_metadata(file_path)
@@ -229,11 +245,16 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
             video_metadata, filename, file_path
         )
 
-        logger.info(f"[VIDEO META] Human={human_score:.2f}, AI={ai_meta_score:.2f}, early_exit={early_exit}")
-        logger.info(f"[VIDEO META] Signals: {meta_signals}")
+        logger.info("video_metadata_scored", extra={
+            "action": "video_metadata_scored",
+            "human_score": round(human_score, 2),
+            "ai_score": round(ai_meta_score, 2),
+            "early_exit": early_exit,
+            "signals": meta_signals,
+        })
 
         if early_exit == "human":
-            logger.info(f"[VIDEO] Early exit: Verified Human via metadata")
+            logger.info("video_early_exit_human", extra={"action": "video_early_exit_human"})
             res = {
                 "summary": "No AI Detected",
                 "confidence_score": 0.99,
@@ -253,7 +274,7 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
             return res
 
         if early_exit == "ai":
-            logger.info("[VIDEO] Early exit: AI Generator detected via metadata")
+            logger.info("video_early_exit_ai", extra={"action": "video_early_exit_ai"})
             res = {
                 "summary": "AI-Generated",
                 "confidence_score": 0.99,
@@ -272,7 +293,7 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
             set_cached_result(video_hash, cached_version)
             return res
 
-        logger.info("[VIDEO] No early exit, proceeding to tri-frame batch analysis...")
+        logger.info("video_batch_start", extra={"action": "video_batch_start"})
 
         loop = asyncio.get_running_loop()
         frames, quality_rejected = await loop.run_in_executor(
@@ -294,7 +315,11 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
                 ]
             }
 
-        logger.info(f"[VIDEO] Extracted {len(frames)} frames (rejected {quality_rejected} low-quality)")
+        logger.info("video_frames_extracted", extra={
+            "action": "video_frames_extracted",
+            "frame_count": len(frames),
+            "quality_rejected": quality_rejected,
+        })
 
         gemini_result = await loop.run_in_executor(
             None, analyze_batch_images_pro_turbo, frames
@@ -304,9 +329,10 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
         explanation = gemini_result.get("explanation", "Analysis completed.")
         quality_context = gemini_result.get("quality_context", "Unknown")
 
-        logger.info(
-            f"[VIDEO] Gemini Batch: confidence={confidence}, explanation='{explanation}'"
-        )
+        logger.info("video_gemini_batch", extra={
+            "action": "video_gemini_batch",
+            "confidence": confidence,
+        })
 
         is_ai_likely = confidence > settings.ai_confidence_threshold
         summary = "Likely AI-Generated" if is_ai_likely else "Likely Authentic"

@@ -26,10 +26,14 @@ def initialize() -> None:
     if redis_url and redis_token:
         try:
             client = Redis(url=redis_url, token=redis_token)
-            logger.info("[STARTUP] Upstash Redis client initialized successfully")
+            logger.info("startup_redis", extra={"action": "startup_redis"})
         except Exception as e:
-            logger.error(f"[STARTUP] Failed to initialize Upstash Redis client: {e}")
+            logger.error("startup_redis_failed", extra={
+                "action": "startup_redis_failed",
+                "error": str(e),
+            })
     else:
-        logger.warning(
-            "[STARTUP] Redis credentials not found. Rate limiting will fallback to memory."
-        )
+        logger.warning("startup_redis_missing_credentials", extra={
+            "action": "startup_redis_missing_credentials",
+            "fallback": "memory_rate_limiting",
+        })

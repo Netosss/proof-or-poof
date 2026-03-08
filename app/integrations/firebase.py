@@ -30,10 +30,13 @@ def initialize() -> None:
                 cred = credentials.Certificate(sa_info)
                 firebase_admin.initialize_app(cred)
             except Exception as e:
-                logger.error(f"Error initializing Firebase with service account: {e}")
+                logger.error("startup_firebase_error", extra={
+                    "action": "startup_firebase_error",
+                    "error": str(e),
+                })
                 firebase_admin.initialize_app()
         else:
             firebase_admin.initialize_app()
 
     db = firestore.client()
-    logger.info("[STARTUP] Firebase initialized")
+    logger.info("startup_firebase", extra={"action": "startup_firebase"})

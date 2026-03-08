@@ -48,7 +48,7 @@ async def get_balance(
     await check_ip_device_limit(ip, device_id, turnstile_token)
     wallet = get_guest_wallet(device_id)
     balance = wallet.get("credits", 0)
-    logger.info(f"[BALANCE] Device: {device_id} | Credits: {balance}")
+    logger.info("balance_queried", extra={"action": "balance_queried", "balance": balance})
     return {"balance": balance}
 
 
@@ -122,7 +122,7 @@ async def ads_reward(
         txn = db.transaction()
         credits_to_grant, new_count = _check_and_grant(txn, reward_ref)
     except Exception as e:
-        logger.error(f"[ADS] ad_rewards transaction failed for uid={uid}: {e}")
+        logger.error("ads_reward_failed", extra={"action": "ads_reward_failed", "error": str(e)})
         raise HTTPException(status_code=500, detail="Ad reward failed")
 
     if credits_to_grant is None:
@@ -138,10 +138,13 @@ async def ads_reward(
         {"uid": uid, "credits": credits_to_grant, "rewards_today": new_count}
     )
 
-    logger.info(
-        f"[ADS] Granted {credits_to_grant} credits to uid={uid} "
-        f"(reward {new_count}/{AD_REWARD_DAILY_LIMIT} today). Balance: {new_balance}"
-    )
+    logger.info("ads_reward_granted", extra={
+        "action": "ads_reward_granted",
+        "credits_granted": credits_to_grant,
+        "rewards_today": new_count,
+        "daily_limit": AD_REWARD_DAILY_LIMIT,
+        "new_balance": new_balance,
+    })
 
     return AdRewardResponse(
         credits_granted=credits_to_grant,

@@ -57,12 +57,16 @@ class SecurityManager:
             start_time = time.time()
             result = await func(temp_path, *args, **kwargs)
             duration = time.time() - start_time
-            safe_msg = self.sanitize_log_message(f"Successfully processed {filename} in {duration:.2f}s")
-            logger.info(safe_msg)
+            logger.info("media_processed_success", extra={
+                "action": "media_processed_success",
+                "duration_ms": round(duration * 1000, 1),
+            })
             return result
         except Exception as e:
-            err_msg = self.sanitize_log_message(f"Error processing {filename}: {str(e)}")
-            logger.error(err_msg)
+            logger.error("media_processed_error", extra={
+                "action": "media_processed_error",
+                "error": self.sanitize_log_message(str(e)),
+            })
             raise HTTPException(status_code=500, detail="Internal processing error.")
 
 

@@ -40,7 +40,12 @@ def _check_rate_limit_redis(rc, identifier: str) -> None:
             rc.expire(key, RATE_LIMIT_WINDOW)
 
         if current_count > MAX_REQUESTS_PER_WINDOW:
-            logger.warning(f"Redis Rate limit exceeded for {identifier}")
+            logger.warning("rate_limit_exceeded", extra={
+                "action": "rate_limit_exceeded",
+                "backend": "redis",
+                "count": current_count,
+                "limit": MAX_REQUESTS_PER_WINDOW,
+            })
             ttl = rc.ttl(key)
             retry_after = max(ttl, 1) if ttl and ttl > 0 else RATE_LIMIT_WINDOW
             raise HTTPException(
@@ -51,7 +56,10 @@ def _check_rate_limit_redis(rc, identifier: str) -> None:
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Redis rate limit error: {e}. Falling back to memory.")
+        logger.error("rate_limit_redis_error", extra={
+            "action": "rate_limit_redis_error",
+            "error": str(e),
+        })
         _check_rate_limit_memory(identifier)
 
 
@@ -71,7 +79,11 @@ def _check_rate_limit_memory(identifier: str) -> None:
     ]
 
     if len(_rate_limits[identifier]) >= MAX_REQUESTS_PER_WINDOW:
-        logger.warning(f"Memory Rate limit exceeded for {identifier}")
+        logger.warning("rate_limit_exceeded", extra={
+            "action": "rate_limit_exceeded",
+            "backend": "memory",
+            "limit": MAX_REQUESTS_PER_WINDOW,
+        })
         raise HTTPException(
             status_code=429,
             detail="Too many requests. Please try again in a minute."
@@ -88,4 +100,7 @@ def _cleanup_all_limits(now: float) -> None:
     ]
     for k in expired_keys:
         del _rate_limits[k]
-    logger.info(f"Rate limit cleanup: removed {len(expired_keys)} inactive sessions.")
+    logger.info("rate_limit_cleanup", extra={
+        "action": "rate_limit_cleanup",
+        "removed": len(expired_keys),
+    })

@@ -88,15 +88,20 @@ def consume_credits(user_id: str, cost: int, reason: str,
     try:
         txn = db.transaction()
         new_balance = _run(txn, user_ref)
-        logger.info(
-            f"[CREDITS] Consumed {cost} from {user_id} "
-            f"(reason={reason}). New balance: {new_balance}"
-        )
+        logger.info("credits_consumed", extra={
+            "action": "credits_consumed",
+            "amount": cost,
+            "reason": reason,
+            "new_balance": new_balance,
+        })
         return new_balance
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"[CREDITS] consume_credits failed for {user_id}: {e}")
+        logger.error("credits_consume_failed", extra={
+            "action": "credits_consume_failed",
+            "error": str(e),
+        })
         raise HTTPException(status_code=500, detail="Credit transaction failed")
 
 
@@ -131,15 +136,20 @@ def grant_credits(user_id: str, amount: int, reason: str,
     try:
         txn = db.transaction()
         new_balance = _run(txn, user_ref)
-        logger.info(
-            f"[CREDITS] Granted {amount} to {user_id} "
-            f"(reason={reason}). New balance: {new_balance}"
-        )
+        logger.info("credits_granted", extra={
+            "action": "credits_granted",
+            "amount": amount,
+            "reason": reason,
+            "new_balance": new_balance,
+        })
         return new_balance
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"[CREDITS] grant_credits failed for {user_id}: {e}")
+        logger.error("credits_grant_failed", extra={
+            "action": "credits_grant_failed",
+            "error": str(e),
+        })
         raise HTTPException(status_code=500, detail="Credit transaction failed")
 
 
@@ -257,10 +267,10 @@ def get_or_create_user(uid: str, email: Optional[str],
             )
 
         if was_hijack_attempt:
-            logger.warning(
-                f"[AUTH] Hijack attempt blocked: device_id={device_id} "
-                f"already migrated. uid={uid} created with 0 credits."
-            )
+            logger.warning("auth_hijack_blocked", extra={
+                "action": "auth_hijack_blocked",
+                "device_id": device_id,
+            })
 
         return user_data, True
 
@@ -268,10 +278,6 @@ def get_or_create_user(uid: str, email: Optional[str],
         txn = db.transaction()
         data, is_new = _create_user(txn, user_ref, guest_ref)
         balance = data.get("credits_balance", 0)
-        logger.info(
-            f"[AUTH] {'Created' if is_new else 'Found existing'} user {uid} "
-            f"(balance={balance}, device_id={device_id})"
-        )
         return {
             "uid": uid,
             "email": data.get("email") or email,
@@ -281,7 +287,10 @@ def get_or_create_user(uid: str, email: Optional[str],
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"[AUTH] get_or_create_user failed for {uid}: {e}")
+        logger.error("auth_get_or_create_failed", extra={
+            "action": "auth_get_or_create_failed",
+            "error": str(e),
+        })
         raise HTTPException(status_code=500, detail="User initialization failed")
 
 

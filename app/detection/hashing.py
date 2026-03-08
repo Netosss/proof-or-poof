@@ -36,7 +36,7 @@ def get_smart_file_hash(file_path: str) -> str:
         with open(file_path, 'rb') as f:
             data = f.read()
             h = get_safe_hash(data)
-            logger.info(f"[HASH] Full file hash for {file_path} ({file_size} bytes): {h}")
+            logger.debug("file_hashed", extra={"action": "file_hashed", "strategy": "full", "size_bytes": file_size})
             return h
 
     chunk_size = settings.hash_chunk_size_bytes
@@ -51,7 +51,7 @@ def get_smart_file_hash(file_path: str) -> str:
 
     h.update(str(file_size).encode())
     res = h.hexdigest()
-    logger.info(f"[HASH] Smart hash for {file_path} ({file_size} bytes): {res}")
+    logger.debug("file_hashed", extra={"action": "file_hashed", "strategy": "smart_chunk", "size_bytes": file_size})
     return res
 
 

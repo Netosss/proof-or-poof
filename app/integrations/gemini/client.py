@@ -62,7 +62,7 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image], pre_calculate
     """
     GEMINI 3.0 FLASH - OPTIMIZED FOR FORENSIC DETECTION
     """
-    img_to_close = []  # Keep a list of intermediate images to close
+    img_to_close = []
 
     try:
         if isinstance(image_source, str):
@@ -71,34 +71,28 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image], pre_calculate
         else:
             img_original = image_source
 
-        # 1. Analyze Quality on ORIGINAL resolution (if not pre-calculated)
         quality_score = 0
         if pre_calculated_quality_context:
             quality_context = pre_calculated_quality_context
         else:
             quality_context, quality_score = get_quality_context(img_original)
 
-        # 2. Resize for Upload
         img_working = _resize_if_needed(img_original)
         if img_working is not img_original:
             img_to_close.append(img_working)
 
-        # 3. Ensure RGB
         if img_working.mode != "RGB":
             img_rgb = img_working.convert("RGB")
             img_to_close.append(img_rgb)
             img_working = img_rgb
 
-        # 4. Save to bytes
         img_byte_arr = io.BytesIO()
         img_working.save(img_byte_arr, format='JPEG', quality=settings.gemini_jpeg_quality)
         image_bytes = img_byte_arr.getvalue()
 
-        # 5. Clean up ALL intermediate objects immediately
         for img_obj in img_to_close:
             img_obj.close()
 
-        # --- CONFIGURATION ---
         config = types.GenerateContentConfig(
             system_instruction=get_system_instruction(quality_context),
             media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
@@ -108,18 +102,19 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image], pre_calculate
             response_schema=DetectionResult,
         )
 
-        # --- THE PAYLOAD (With x2 Prompt Repetition Hack) ---
         execution_query = "Carefully analyze this image for generative AI manipulation, strictly following the system instructions."
 
+        t0 = time.perf_counter()
         response = client.models.generate_content(
             model="gemini-3-flash-preview",
             contents=[
                 types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
                 execution_query,
-                execution_query  # Duplicated for 360-degree mathematical context
+                execution_query
             ],
             config=config
         )
+        duration_ms = round((time.perf_counter() - t0) * 1000, 1)
 
         parsed_result = response.parsed
 
@@ -130,17 +125,40 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image], pre_calculate
         }
 
         if hasattr(response, "usage_metadata"):
+            input_tokens = response.usage_metadata.prompt_token_count
+            output_tokens = response.usage_metadata.candidates_token_count
             result["usage"] = {
-                "prompt_tokens": response.usage_metadata.prompt_token_count,
-                "completion_tokens": response.usage_metadata.candidates_token_count,
+                "prompt_tokens": input_tokens,
+                "completion_tokens": output_tokens,
                 "total_tokens": response.usage_metadata.total_token_count
             }
+            logger.info("gemini_call_completed", extra={
+                "action": "gemini_call_completed",
+                "model": "gemini-3-flash-preview",
+                "call_type": "single_image",
+                "duration_ms": duration_ms,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cost_usd": settings.gemini_fixed_cost,
+            })
+        else:
+            logger.info("gemini_call_completed", extra={
+                "action": "gemini_call_completed",
+                "model": "gemini-3-flash-preview",
+                "call_type": "single_image",
+                "duration_ms": duration_ms,
+                "cost_usd": settings.gemini_fixed_cost,
+            })
 
         result["quality_context"] = quality_context
         return result
 
     except Exception as e:
-        logger.error(f"[GEMINI] analyze_image_pro_turbo error: {e}")
+        logger.error("gemini_analyze_error", extra={
+            "action": "gemini_analyze_error",
+            "call_type": "single_image",
+            "error": str(e),
+        })
         return {"confidence": -1.0}
 
 
@@ -160,7 +178,10 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image, b
                 try:
                     quality_context, _ = get_quality_context(src)
                 except Exception as e:
-                    logger.error(f"[GEMINI] Failed to get quality context for video frame: {e}")
+                    logger.error("gemini_quality_context_error", extra={
+                        "action": "gemini_quality_context_error",
+                        "error": str(e),
+                    })
 
             if isinstance(src, bytes):
                 image_parts.append(
@@ -201,7 +222,6 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image, b
         if not quality_context:
             quality_context = "**CONTEXT: QUALITY UNKNOWN.**"
 
-        # --- CONFIGURATION ---
         config = types.GenerateContentConfig(
             system_instruction=get_system_instruction(quality_context),
             media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
@@ -211,17 +231,41 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image, b
             response_schema=list[DetectionResult],
         )
 
-        # --- THE PAYLOAD (With x2 Prompt Repetition Hack) ---
         execution_query = "Analyze EACH of the attached images for SYNTHETIC GENERATION ARTIFACTS, strictly following the system instructions."
         request_contents = image_parts + [execution_query, execution_query]
 
+        t0 = time.perf_counter()
         response = client.models.generate_content(
             model="gemini-3-flash-preview",
             contents=request_contents,
             config=config
         )
+        duration_ms = round((time.perf_counter() - t0) * 1000, 1)
 
         raw_results = response.parsed
+
+        if hasattr(response, "usage_metadata"):
+            input_tokens = response.usage_metadata.prompt_token_count
+            output_tokens = response.usage_metadata.candidates_token_count
+            logger.info("gemini_call_completed", extra={
+                "action": "gemini_call_completed",
+                "model": "gemini-3-flash-preview",
+                "call_type": "batch_images",
+                "frame_count": len(image_sources),
+                "duration_ms": duration_ms,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cost_usd": settings.gemini_fixed_cost,
+            })
+        else:
+            logger.info("gemini_call_completed", extra={
+                "action": "gemini_call_completed",
+                "model": "gemini-3-flash-preview",
+                "call_type": "batch_images",
+                "frame_count": len(image_sources),
+                "duration_ms": duration_ms,
+                "cost_usd": settings.gemini_fixed_cost,
+            })
 
         if not raw_results:
             return {"confidence": 0.5, "explanation": "Suspicious: No clear analysis returned."}
@@ -264,7 +308,11 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image, b
         return final_result
 
     except Exception as e:
-        logger.error(f"[GEMINI] analyze_batch_images_pro_turbo error: {e}")
+        logger.error("gemini_batch_error", extra={
+            "action": "gemini_batch_error",
+            "call_type": "batch_images",
+            "error": str(e),
+        })
         return {"confidence": -1.0}
 
 

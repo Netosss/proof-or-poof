@@ -21,7 +21,10 @@ logger = logging.getLogger(__name__)
 def _sync_log(category: str, cost: float, meta: dict) -> None:
     db = firebase_module.db
     if not db:
-        logger.warning("[FINANCE] Firebase not initialized; skipping transaction log.")
+        logger.warning("finance_skip_no_firebase", extra={
+            "action": "finance_skip_no_firebase",
+            "category": category,
+        })
         return
     try:
         transaction_type = "INCOME" if cost >= 0 else "EXPENSE"
@@ -33,9 +36,19 @@ def _sync_log(category: str, cost: float, meta: dict) -> None:
             "meta": meta,
         }
         db.collection("financial_events").add(event)
-        logger.info(f"[FINANCE] {category}: ${cost:.4f} ({transaction_type})")
+        logger.info("finance_transaction", extra={
+            "action": "finance_transaction",
+            "category": category,
+            "amount": float(cost),
+            "transaction_type": transaction_type,
+            **meta,
+        })
     except Exception as e:
-        logger.error(f"[FINANCE LOG ERROR] Failed to log transaction: {e}")
+        logger.error("finance_log_error", extra={
+            "action": "finance_log_error",
+            "category": category,
+            "error": str(e),
+        })
 
 
 def log_transaction(category: str, cost: float, meta: dict = None) -> None:

@@ -21,6 +21,7 @@ from app.core.firebase_auth import get_optional_user
 from app.core.rate_limiter import check_rate_limit
 from app.integrations import redis_client as redis_module
 from app.integrations.runpod import run_gpu_inpainting
+from app.logging_config import user_id_var
 from app.services.credit_engine import consume_credits, get_user_balance
 from app.services.credits_service import deduct_guest_credits, get_guest_wallet
 from app.services.finance_service import log_transaction
@@ -52,12 +53,18 @@ async def inpaint_image(
     request_id = str(uuid.uuid4())
     ip = get_client_ip(request)
 
-    if auth_user:
-        # --- Authenticated path ---
-        uid = auth_user["uid"]
-        logger.info(f"[INPAINT] Request {request_id} started. Image: {image.filename}, UID: {uid}")
+    # Set user_id context var so all downstream logs carry it automatically
+    user_id_var.set(auth_user["uid"] if auth_user else "")
 
-        # Rate-limit check fires BEFORE any Firestore transaction
+    if auth_user:
+        uid = auth_user["uid"]
+        logger.info("inpaint_request_started", extra={
+            "action": "inpaint_request_started",
+            "inpaint_request_id": request_id,
+            "filename": image.filename,
+            "user_type": "authenticated",
+        })
+
         check_rate_limit(f"uid:{uid}")
 
         if not turnstile_token:
@@ -70,9 +77,13 @@ async def inpaint_image(
             raise HTTPException(status_code=403, detail="Invalid CAPTCHA")
 
     else:
-        # --- Guest path ---
         validate_device_id(device_id)
-        logger.info(f"[INPAINT] Request {request_id} started. Image: {image.filename}, Device: {device_id}")
+        logger.info("inpaint_request_started", extra={
+            "action": "inpaint_request_started",
+            "inpaint_request_id": request_id,
+            "filename": image.filename,
+            "user_type": "guest",
+        })
 
         if not turnstile_token:
             raise HTTPException(
@@ -92,10 +103,13 @@ async def inpaint_image(
     try:
         image_bytes = await image.read()
         mask_bytes = await mask.read()
-        image_size_mb = len(image_bytes) / (1024 * 1024)
-        logger.info(f"[INPAINT] Request {request_id}: Files read. Image size: {image_size_mb:.2f}MB")
+        image_size_mb = round(len(image_bytes) / (1024 * 1024), 2)
     except Exception as e:
-        logger.error(f"[INPAINT] File read error: {e}")
+        logger.error("inpaint_file_read_error", extra={
+            "action": "inpaint_file_read_error",
+            "inpaint_request_id": request_id,
+            "error": str(e),
+        })
         raise HTTPException(status_code=400, detail="Error reading upload files")
 
     img_hash = hashlib.sha256(image_bytes).hexdigest()
@@ -106,27 +120,46 @@ async def inpaint_image(
         cache_key = f"paid_image:uid:{uid}:{img_hash}"
         is_free_retry = bool(rc and rc.get(cache_key))
         if is_free_retry:
-            logger.info(f"[INPAINT] Free retry available for uid={uid} on image {img_hash[:8]}")
+            logger.info("inpaint_free_retry_used", extra={
+                "action": "inpaint_free_retry_used",
+                "inpaint_request_id": request_id,
+                "img_hash_prefix": img_hash[:8],
+                "user_type": "authenticated",
+            })
 
         if not is_free_retry:
-            # Pre-check balance BEFORE starting the GPU job — prevents burning
-            # RunPod compute for users who can't pay.
             current_balance = get_user_balance(uid)
             if current_balance < settings.inpaint_credit_cost:
-                logger.info(
-                    f"[BILLING] Insufficient credits for uid={uid} "
-                    f"(Has: {current_balance}, Need: {settings.inpaint_credit_cost})"
-                )
+                logger.warning("insufficient_credits", extra={
+                    "action": "insufficient_credits",
+                    "endpoint": "inpaint",
+                    "has": current_balance,
+                    "need": settings.inpaint_credit_cost,
+                    "user_type": "authenticated",
+                })
                 raise HTTPException(status_code=402, detail="Insufficient credits")
 
         try:
             start_time = time.time()
-            logger.info(f"[INPAINT] Request {request_id} sending to GPU worker...")
+            logger.info("inpaint_gpu_dispatched", extra={
+                "action": "inpaint_gpu_dispatched",
+                "inpaint_request_id": request_id,
+                "user_type": "authenticated",
+            })
             result_bytes = await run_gpu_inpainting(image_bytes, mask_bytes)
             duration = time.time() - start_time
-            logger.info(f"[INPAINT] GPU Request {request_id} COMPLETED in {duration:.3f}s")
-
             usd_cost = duration * settings.inpaint_rate_per_sec
+
+            logger.info("inpaint_completed", extra={
+                "action": "inpaint_completed",
+                "inpaint_request_id": request_id,
+                "duration_ms": round(duration * 1000, 1),
+                "cost_usd": round(usd_cost, 6),
+                "user_type": "authenticated",
+                "is_free_retry": is_free_retry,
+                "image_size_mb": image_size_mb,
+            })
+
             log_transaction("INPAINT", -usd_cost, {"uid": uid, "duration": duration, "request_id": request_id})
 
             if is_free_retry:
@@ -142,33 +175,58 @@ async def inpaint_image(
             return Response(content=result_bytes, media_type="image/png", headers=headers)
 
         except Exception as e:
-            logger.error(f"[INPAINT] GPU Worker failed for {request_id}: {e}", exc_info=True)
+            logger.error("inpaint_gpu_failed", extra={
+                "action": "inpaint_gpu_failed",
+                "inpaint_request_id": request_id,
+                "error": str(e),
+                "user_type": "authenticated",
+            }, exc_info=True)
             raise HTTPException(status_code=500, detail="Inpainting service unavailable")
 
     else:
-        # --- Guest billing ---
         cache_key = f"paid_image:{device_id}:{img_hash}"
         is_free_retry = bool(rc and rc.get(cache_key))
         if is_free_retry:
-            logger.info(f"[INPAINT] Free retry available for {device_id} on image {img_hash[:8]}")
+            logger.info("inpaint_free_retry_used", extra={
+                "action": "inpaint_free_retry_used",
+                "inpaint_request_id": request_id,
+                "img_hash_prefix": img_hash[:8],
+                "user_type": "guest",
+            })
 
         current_credits = wallet.get("credits", 0)
 
         if not is_free_retry and current_credits < settings.inpaint_credit_cost:
-            logger.info(
-                f"[BILLING] Insufficient credits for {device_id} "
-                f"(Has: {current_credits}, Need: {settings.inpaint_credit_cost})"
-            )
-            raise HTTPException(status_code=402, detail="Insufficient credits")
+                logger.warning("insufficient_credits", extra={
+                    "action": "insufficient_credits",
+                    "endpoint": "inpaint",
+                    "has": current_credits,
+                    "need": settings.inpaint_credit_cost,
+                    "user_type": "guest",
+                })
+                raise HTTPException(status_code=402, detail="Insufficient credits")
 
         try:
             start_time = time.time()
-            logger.info(f"[INPAINT] Request {request_id} sending to GPU worker...")
+            logger.info("inpaint_gpu_dispatched", extra={
+                "action": "inpaint_gpu_dispatched",
+                "inpaint_request_id": request_id,
+                "user_type": "guest",
+            })
             result_bytes = await run_gpu_inpainting(image_bytes, mask_bytes)
             duration = time.time() - start_time
-            logger.info(f"[INPAINT] GPU Request {request_id} COMPLETED in {duration:.3f}s")
-
             usd_cost = duration * settings.inpaint_rate_per_sec
+
+            logger.info("inpaint_completed", extra={
+                "action": "inpaint_completed",
+                "inpaint_request_id": request_id,
+                "duration_ms": round(duration * 1000, 1),
+                "cost_usd": round(usd_cost, 6),
+                "user_type": "guest",
+                "is_free_retry": is_free_retry,
+                "image_size_mb": image_size_mb,
+            })
+
             log_transaction("INPAINT", -usd_cost, {"device_id": device_id, "duration": duration, "request_id": request_id})
 
             if is_free_retry:
@@ -184,5 +242,10 @@ async def inpaint_image(
             return Response(content=result_bytes, media_type="image/png", headers=headers)
 
         except Exception as e:
-            logger.error(f"[INPAINT] GPU Worker failed for {request_id}: {e}", exc_info=True)
+            logger.error("inpaint_gpu_failed", extra={
+                "action": "inpaint_gpu_failed",
+                "inpaint_request_id": request_id,
+                "error": str(e),
+                "user_type": "guest",
+            }, exc_info=True)
             raise HTTPException(status_code=500, detail="Inpainting service unavailable")

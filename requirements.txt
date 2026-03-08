@@ -20,3 +20,6 @@ protobuf>=4.25.0
 simple-lama-inpainting
 pillow-heif
 psutil
+sentry-sdk
+python-json-logger
+axiom-py

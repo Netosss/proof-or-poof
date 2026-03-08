@@ -90,12 +90,19 @@ def deduct_guest_credits(device_id: str, cost: int = 5) -> int:
     transaction = db.transaction()
     try:
         new_balance = update_in_transaction(transaction, doc_ref)
-        logger.info(f"Deducted {cost} credits from device {device_id}. New balance: {new_balance}")
+        logger.info("guest_credits_deducted", extra={
+            "action": "guest_credits_deducted",
+            "amount": cost,
+            "new_balance": new_balance,
+        })
         return new_balance
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Guest credit deduction failed for {device_id}: {e}")
+        logger.error("guest_credits_deduct_failed", extra={
+            "action": "guest_credits_deduct_failed",
+            "error": str(e),
+        })
         raise HTTPException(status_code=500, detail="Wallet transaction failed")
 
 
@@ -105,7 +112,7 @@ def perform_recharge(device_id: str, amount: int, secret_key: str) -> dict:
     Validates `secret_key` against RECHARGE_SECRET_KEY env var.
     """
     if not RECHARGE_SECRET_KEY or secret_key != RECHARGE_SECRET_KEY:
-        logger.warning(f"Invalid recharge attempt for {device_id}")
+        logger.warning("recharge_invalid_attempt", extra={"action": "recharge_invalid_attempt"})
         raise HTTPException(status_code=403, detail="Invalid secret key")
 
     db = _get_db()
@@ -135,11 +142,15 @@ def perform_recharge(device_id: str, amount: int, secret_key: str) -> dict:
 
         transaction = db.transaction()
         new_balance = recharge_transaction(transaction, doc_ref)
-        logger.info(f"Recharged {amount} credits for {device_id}. New balance: {new_balance}")
+        logger.info("guest_credits_recharged", extra={
+            "action": "guest_credits_recharged",
+            "amount": amount,
+            "new_balance": new_balance,
+        })
         return {"status": "success", "new_balance": new_balance}
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Recharge failed: {e}")
+        logger.error("recharge_failed", extra={"action": "recharge_failed", "error": str(e)})
         raise HTTPException(status_code=500, detail="Recharge failed")

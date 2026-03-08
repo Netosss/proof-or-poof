@@ -90,7 +90,7 @@ async def detect_ai_media_image_logic(
 
     # --- Merge Trusted Metadata (Sidecar) ---
     if trusted_metadata:
-        logger.info("[SIDECAR] Using trusted metadata from device")
+        logger.info("metadata_sidecar_used", extra={"action": "metadata_sidecar_used"})
         for key in ["Make", "Model", "Software", "DateTime", "LensModel"]:
             if key in trusted_metadata:
                 mapped_key = "DateTimeOriginal" if key == "DateTime" else key
@@ -102,7 +102,7 @@ async def detect_ai_media_image_logic(
             file_size = trusted_metadata["fileSize"]
 
     slim_log = {k: (str(v)[:20] + "..." if len(str(v)) > 20 else v) for k, v in exif.items()}
-    logger.info(f"[META] Raw Metadata (Slim): {slim_log}")
+    logger.info("metadata_raw", extra={"action": "metadata_raw", "exif_slim": slim_log})
 
     # Stringify values to handle non-JSON-serializable types (IFDRational, bytes, etc.)
     clean_metadata = f" {json.dumps({k: str(v) for k, v in exif.items()})} "
@@ -117,7 +117,7 @@ async def detect_ai_media_image_logic(
             raw_header = await asyncio.to_thread(_read_header)
             full_dump += raw_header.decode('utf-8', errors='ignore')
         except Exception as e:
-            logger.warning(f"Raw scan failed: {e}")
+            logger.warning("metadata_raw_scan_failed", extra={"action": "metadata_raw_scan_failed", "error": str(e)})
 
     tiered_score, tiered_signals = get_tiered_signature_score(full_dump, clean_metadata)
 
@@ -128,15 +128,21 @@ async def detect_ai_media_image_logic(
     if tiered_signals:
         ai_signals.extend(tiered_signals)
 
-    logger.info(f"[META] Metadata scoring: human={human_score:.2f}, ai={ai_score:.2f}")
-    if human_signals:
-        logger.info(f"[META] Human signals: {human_signals}")
-    if ai_signals:
-        logger.info(f"[META] AI signals: {ai_signals}")
+    logger.info("metadata_scoring", extra={
+        "action": "metadata_scoring",
+        "human_score": round(human_score, 2),
+        "ai_score": round(ai_score, 2),
+        "human_signals": human_signals or [],
+        "ai_signals": ai_signals or [],
+    })
 
     # 1. VERIFIED HUMAN (Early Exit)
     if human_score >= 0.60:
-        logger.info(f"[EARLY EXIT] Skipping GPU scan: High confidence human metadata ({human_score:.2f})")
+        logger.info("detection_early_exit_human", extra={
+            "action": "detection_early_exit_human",
+            "human_score": round(human_score, 2),
+            "reason": "high_confidence_human_metadata",
+        })
         return {
             "summary": "Likely Authentic",
             "confidence_score": 0.99,
@@ -154,7 +160,12 @@ async def detect_ai_media_image_logic(
 
     # 2. LIKELY HUMAN (Weaker signals but still skip GPU)
     if human_score >= 0.40 and ai_score < 0.15:
-        logger.info(f"[EARLY EXIT] Skipping GPU scan: Likely human metadata ({human_score:.2f}, ai={ai_score:.2f})")
+        logger.info("detection_early_exit_human", extra={
+            "action": "detection_early_exit_human",
+            "human_score": round(human_score, 2),
+            "ai_score": round(ai_score, 2),
+            "reason": "likely_human_metadata",
+        })
         return {
             "summary": "Likely Authentic",
             "confidence_score": 0.9,
@@ -172,7 +183,11 @@ async def detect_ai_media_image_logic(
 
     # 3. LIKELY AI (Early Exit) - Strong AI signals in metadata
     if ai_score >= settings.ai_confidence_threshold:
-        logger.info(f"[EARLY EXIT] Skipping GPU scan: High AI suspicion in metadata ({ai_score:.2f})")
+        logger.info("detection_early_exit_ai", extra={
+            "action": "detection_early_exit_ai",
+            "ai_score": round(ai_score, 2),
+            "reason": "high_ai_suspicion_metadata",
+        })
         return {
             "summary": "Likely AI-Generated",
             "confidence_score": 0.95,
@@ -190,7 +205,12 @@ async def detect_ai_media_image_logic(
 
     # 4. SUSPICIOUS AI (Early Exit) - AI indicators + zero human signals
     if ai_score >= 0.38 and human_score == 0.0:
-        logger.info(f"[EARLY EXIT] Skipping GPU scan: AI indicators + no human metadata (ai={ai_score:.2f}, human={human_score:.2f})")
+        logger.info("detection_early_exit_ai", extra={
+            "action": "detection_early_exit_ai",
+            "ai_score": round(ai_score, 2),
+            "human_score": round(human_score, 2),
+            "reason": "ai_indicators_no_human_metadata",
+        })
         suspicious_confidence = round(random.uniform(0.80, 0.90), 2)
         return {
             "summary": "AI-Generated",
@@ -220,18 +240,24 @@ async def detect_ai_media_image_logic(
     is_stripped = not has_hardware_provenance and tiered_score < settings.ai_confidence_threshold
 
     if is_stripped:
-        logger.info("[META] Image classified as STRIPPED (No Hardware Provenance Tags found)")
+        logger.info("metadata_stripped", extra={"action": "metadata_stripped"})
     elif tiered_score >= settings.ai_confidence_threshold:
-        logger.info(f"[META] Image has technical AI signatures (score={tiered_score:.2f}) - bypassing stripped check")
+        logger.info("metadata_ai_signatures", extra={
+            "action": "metadata_ai_signatures",
+            "tiered_score": round(tiered_score, 2),
+        })
     else:
         found_tags = [tag for tag in PROVENANCE_WHITELIST if tag in exif]
-        logger.info(f"[META] Image has PROVENANCE tags: {found_tags}")
+        logger.info("metadata_provenance_tags", extra={
+            "action": "metadata_provenance_tags",
+            "found_tags": found_tags,
+        })
 
     img_hash = await asyncio.to_thread(get_image_hash, source_for_hash, fast_mode=(frame is not None))
     cached_result = get_cached_result(img_hash)
 
     if cached_result is not None:
-        logger.info("[CACHE] Hit for image scan")
+        logger.info("cache_hit_image", extra={"action": "cache_hit_image"})
         forensic_probability = cached_result.get("ai_score", 0.0)
         is_gemini_used = cached_result.get("is_gemini_used", False)
 
@@ -267,7 +293,7 @@ async def detect_ai_media_image_logic(
                 ]
             }
         else:
-            logger.info(f"[CACHE] Returning cached GPU result (ai_score={forensic_probability:.4f})")
+            logger.info("cache_hit_image", extra={"action": "cache_hit_image", "ai_score": round(forensic_probability, 4)})
             is_ai_likely = forensic_probability > settings.ai_confidence_threshold
             raw_conf = forensic_probability if is_ai_likely else (1.0 - forensic_probability)
             final_conf = boost_score(raw_conf, is_ai_likely=is_ai_likely)
@@ -300,7 +326,11 @@ async def detect_ai_media_image_logic(
             }
 
     # --- GEMINI ---
-    logger.info(f"[GEMINI] Triggering Gemini Pro Turbo (Pixels: {total_pixels}, Score: {tiered_score:.2f})")
+    logger.info("gemini_triggered", extra={
+        "action": "gemini_triggered",
+        "total_pixels": total_pixels,
+        "tiered_score": round(tiered_score, 2),
+    })
 
     pre_calc_context = None
     source_for_gemini = frame or file_path
@@ -315,13 +345,17 @@ async def detect_ai_media_image_logic(
 
         pre_calc_context = await asyncio.to_thread(_get_context_safe)
     except Exception as e:
-        logger.warning(f"Failed to pre-calc quality context: {e}")
+        logger.warning("gemini_precalc_failed", extra={"action": "gemini_precalc_failed", "error": str(e)})
 
     gemini_res = await asyncio.to_thread(
         analyze_image_pro_turbo, source_for_gemini,
         pre_calculated_quality_context=pre_calc_context
     )
-    logger.info(f"[GEMINI] Raw response: {json.dumps(gemini_res)}")
+    logger.info("gemini_response", extra={
+        "action": "gemini_response",
+        "confidence": gemini_res.get("confidence"),
+        "quality_score": gemini_res.get("quality_score"),
+    })
 
     gemini_score = float(gemini_res.get("confidence", -1.0))
     gemini_explanation = gemini_res.get("explanation", "Analyzed via second layer of AI analysis")
