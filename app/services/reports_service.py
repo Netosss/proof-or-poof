@@ -3,6 +3,8 @@ Shared report management: publishing, fetching, and background TTL extension.
 
 Firebase and Redis clients are accessed at call-time via integration modules
 so they pick up instances initialized during the FastAPI lifespan.
+
+All Firestore and Redis operations are async — no thread pool needed.
 """
 
 import json
@@ -25,7 +27,7 @@ def _get_db():
     return db
 
 
-def create_share_link(short_id: str) -> dict:
+async def create_share_link(short_id: str) -> dict:
     """
     Publishes a cached scan result as a permanent shared report.
     Idempotent: re-publishing the same short_id returns the existing report_id.
@@ -33,10 +35,10 @@ def create_share_link(short_id: str) -> dict:
     rc = redis_module.client
     db = _get_db()
 
-    if rc and rc.get(f"is_shared:{short_id}"):
+    if rc and await rc.get(f"is_shared:{short_id}"):
         return {"report_id": short_id}
 
-    raw = rc.get(f"report:{short_id}") if rc else None
+    raw = await rc.get(f"report:{short_id}") if rc else None
     if not raw:
         raise HTTPException(status_code=404, detail="Share link expired or invalid.")
 
@@ -45,21 +47,21 @@ def create_share_link(short_id: str) -> dict:
     payload["created_at"] = now
     payload["expires_at"] = now + timedelta(days=settings.report_ttl_days)
 
-    db.collection("shared_reports").document(short_id).set(payload)
+    await db.collection("shared_reports").document(short_id).set(payload)
 
     if rc:
-        rc.setex(f"is_shared:{short_id}", settings.share_lock_ttl_sec, "1")
+        await rc.setex(f"is_shared:{short_id}", settings.share_lock_ttl_sec, "1")
 
     return {"report_id": short_id}
 
 
-def get_shared_report(report_id: str) -> tuple[dict, bool]:
+async def get_shared_report(report_id: str) -> tuple[dict, bool]:
     """
     Fetches a public shared report.
     Returns (data_dict, should_extend_ttl).
     """
     db = _get_db()
-    doc = db.collection("shared_reports").document(report_id).get()
+    doc = await db.collection("shared_reports").document(report_id).get()
     if not doc.exists:
         raise HTTPException(status_code=404, detail="Report not found or expired.")
 
@@ -78,15 +80,15 @@ def get_shared_report(report_id: str) -> tuple[dict, bool]:
     return data, should_extend
 
 
-def extend_report_ttl(report_id: str, new_expiry: datetime) -> None:
+async def extend_report_ttl(report_id: str, new_expiry: datetime) -> None:
     """
     Background task: extends a viral report's Firestore TTL.
     Uses a Redis nx lock to prevent duplicate writes under concurrent traffic.
     """
     rc = redis_module.client
-    if rc and rc.set(f"extending:{report_id}", "1", nx=True, ex=settings.extend_lock_ttl_sec):
+    if rc and await rc.set(f"extending:{report_id}", "1", nx=True, ex=settings.extend_lock_ttl_sec):
         db = firebase_module.db
         if db:
-            db.collection("shared_reports").document(report_id).update({
+            await db.collection("shared_reports").document(report_id).update({
                 "expires_at": new_expiry
             })

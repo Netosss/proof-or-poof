@@ -3,6 +3,9 @@ Rate limiting: Redis-backed (preferred) with in-memory fallback.
 
 The Redis client is accessed at call-time via the integration module
 so it picks up the instance initialized during the FastAPI lifespan.
+
+All Redis operations are async — no thread pool needed.
+The INCR + EXPIRE sequence uses a pipeline to make it atomic.
 """
 
 import time
@@ -23,21 +26,26 @@ RATE_LIMIT_WINDOW = settings.rate_limit_request_window_sec
 MAX_REQUESTS_PER_WINDOW = settings.rate_limit_max_requests
 
 
-def check_rate_limit(identifier: str) -> None:
+async def check_rate_limit(identifier: str) -> None:
     """Rate limiting using Redis (preferred) or Memory (fallback)."""
     rc = redis_module.client
     if rc:
-        _check_rate_limit_redis(rc, identifier)
+        await _check_rate_limit_redis(rc, identifier)
     else:
         _check_rate_limit_memory(identifier)
 
 
-def _check_rate_limit_redis(rc, identifier: str) -> None:
+async def _check_rate_limit_redis(rc, identifier: str) -> None:
     key = f"rate_limit:{identifier}"
     try:
-        current_count = rc.incr(key)
-        if current_count == 1:
-            rc.expire(key, RATE_LIMIT_WINDOW)
+        # Atomic pipeline: INCR and EXPIRE in a single round-trip.
+        # If the process crashes between two separate commands, the key
+        # would persist forever. The pipeline prevents that.
+        pipe = rc.pipeline()
+        pipe.incr(key)
+        pipe.expire(key, RATE_LIMIT_WINDOW)
+        results = await pipe.execute()
+        current_count = results[0]
 
         if current_count > MAX_REQUESTS_PER_WINDOW:
             logger.warning("rate_limit_exceeded", extra={
@@ -46,7 +54,7 @@ def _check_rate_limit_redis(rc, identifier: str) -> None:
                 "count": current_count,
                 "limit": MAX_REQUESTS_PER_WINDOW,
             })
-            ttl = rc.ttl(key)
+            ttl = await rc.ttl(key)
             retry_after = max(ttl, 1) if ttl and ttl > 0 else RATE_LIMIT_WINDOW
             raise HTTPException(
                 status_code=429,

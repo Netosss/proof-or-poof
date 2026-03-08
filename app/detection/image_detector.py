@@ -254,7 +254,7 @@ async def detect_ai_media_image_logic(
         })
 
     img_hash = await asyncio.to_thread(get_image_hash, source_for_hash, fast_mode=(frame is not None))
-    cached_result = get_cached_result(img_hash)
+    cached_result = await get_cached_result(img_hash)
 
     if cached_result is not None:
         logger.info("cache_hit_image", extra={"action": "cache_hit_image"})
@@ -362,7 +362,7 @@ async def detect_ai_media_image_logic(
     quality_context = gemini_res.get("quality_context", "Unknown")
 
     if gemini_score >= 0.0:
-        set_cached_result(img_hash, {
+        await set_cached_result(img_hash, {
             "ai_score": gemini_score,
             "explanation": gemini_explanation,
             "is_gemini_used": True,

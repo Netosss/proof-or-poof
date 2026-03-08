@@ -234,7 +234,7 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
         logger.info("pipeline_video_start", extra={"action": "pipeline_video_start", "filename": filename})
 
         video_hash = await asyncio.to_thread(get_smart_file_hash, file_path)
-        cached_video_result = get_cached_result(video_hash)
+        cached_video_result = await get_cached_result(video_hash)
 
         if cached_video_result:
             logger.info("cache_hit_video", extra={"action": "cache_hit_video"})
@@ -270,7 +270,7 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
             }
             cached_version = res.copy()
             cached_version["is_cached"] = True
-            set_cached_result(video_hash, cached_version)
+            await set_cached_result(video_hash, cached_version)
             return res
 
         if early_exit == "ai":
@@ -290,7 +290,7 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
             }
             cached_version = res.copy()
             cached_version["is_cached"] = True
-            set_cached_result(video_hash, cached_version)
+            await set_cached_result(video_hash, cached_version)
             return res
 
         logger.info("video_batch_start", extra={"action": "video_batch_start"})
@@ -363,7 +363,7 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
 
         cached_version = final_video_result.copy()
         cached_version["is_cached"] = True
-        set_cached_result(video_hash, cached_version)
+        await set_cached_result(video_hash, cached_version)
 
         return final_video_result
 

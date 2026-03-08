@@ -5,8 +5,8 @@ The Firebase `db` client is accessed at call-time via the integration module
 so it picks up the instance initialized during the FastAPI lifespan.
 
 `log_transaction` is fire-and-forget: when called from an async context it
-spawns a background thread so the Firestore write (~100 ms) does not block
-the HTTP response.  In sync contexts (tests, scripts) it runs inline.
+spawns a background task so the Firestore write (~100 ms) does not block
+the HTTP response. The AsyncClient is used directly — no thread pool needed.
 """
 
 import asyncio
@@ -17,8 +17,13 @@ from app.integrations import firebase as firebase_module
 
 logger = logging.getLogger(__name__)
 
+# Strong references to in-flight background tasks.
+# asyncio's event loop holds tasks in a WeakSet in Python 3.12+; without a
+# strong reference the GC can collect and silently cancel a task mid-flight.
+_background_tasks: set = set()
 
-def _sync_log(category: str, cost: float, meta: dict) -> None:
+
+async def _async_log(category: str, cost: float, meta: dict) -> None:
     db = firebase_module.db
     if not db:
         logger.warning("finance_skip_no_firebase", extra={
@@ -35,7 +40,7 @@ def _sync_log(category: str, cost: float, meta: dict) -> None:
             "amount": float(cost),
             "meta": meta,
         }
-        db.collection("financial_events").add(event)
+        await db.collection("financial_events").add(event)
         logger.info("finance_transaction", extra={
             "action": "finance_transaction",
             "category": category,
@@ -64,7 +69,12 @@ def log_transaction(category: str, cost: float, meta: dict = None) -> None:
         meta = {}
     try:
         loop = asyncio.get_running_loop()
-        loop.create_task(asyncio.to_thread(_sync_log, category, cost, meta))
+        task = loop.create_task(_async_log(category, cost, meta))
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
     except RuntimeError:
-        # No running event loop — sync context (tests, CLI). Run inline.
-        _sync_log(category, cost, meta)
+        # No running event loop — sync context (tests, CLI). Skip gracefully.
+        logger.debug("finance_log_skipped_no_loop", extra={
+            "action": "finance_log_skipped_no_loop",
+            "category": category,
+        })

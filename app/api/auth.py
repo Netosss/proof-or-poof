@@ -55,7 +55,7 @@ async def auth_me(
     email = user.get("email")
     user_id_var.set(uid)
 
-    result = get_or_create_user(uid, email, device_id=body.device_id)
+    result = await get_or_create_user(uid, email, device_id=body.device_id)
 
     logger.info("auth_me_success", extra={
         "action": "auth_me_success",

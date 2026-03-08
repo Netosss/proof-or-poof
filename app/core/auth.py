@@ -3,6 +3,8 @@ Authentication utilities: Turnstile verification, IP extraction, and device-limi
 
 All functions that need a Redis client access it at call-time via the integration module
 so they pick up the instance initialized during the FastAPI lifespan.
+
+All Redis operations are async — no thread pool needed.
 """
 
 import os
@@ -38,6 +40,12 @@ async def verify_turnstile(token: str) -> bool:
     """Verifies a Cloudflare Turnstile token using the shared HTTP session."""
     secret = os.getenv("TURNSTILE_SECRET_KEY")
     if not secret:
+        if os.getenv("APP_ENV") != "dev":
+            # In production, a missing key is a misconfiguration — fail loudly.
+            raise HTTPException(
+                status_code=500,
+                detail="Verification service misconfigured"
+            )
         logger.warning("turnstile_config_missing", extra={
             "action": "turnstile_config_missing",
             "detail": "TURNSTILE_SECRET_KEY not set, skipping validation (DEV MODE)",
@@ -58,6 +66,8 @@ async def verify_turnstile(token: str) -> bool:
                     })
                     return False
                 return True
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("turnstile_connection_error", extra={
             "action": "turnstile_connection_error",
@@ -95,10 +105,10 @@ async def check_ip_device_limit(
 
     ip_key = f"ip_devices:{ip_address}"
 
-    pipeline = rc.pipeline()
-    pipeline.sismember(ip_key, device_id)
-    pipeline.scard(ip_key)
-    results = pipeline.exec()
+    pipe = rc.pipeline()
+    pipe.sismember(ip_key, device_id)
+    pipe.scard(ip_key)
+    results = await pipe.execute()
 
     is_known = results[0]
     current_count = results[1]
@@ -126,7 +136,7 @@ async def check_ip_device_limit(
             if not is_human:
                 raise HTTPException(status_code=403, detail="Invalid CAPTCHA")
 
-    write_pipeline = rc.pipeline()
-    write_pipeline.sadd(ip_key, device_id)
-    write_pipeline.expire(ip_key, IP_DEVICE_WINDOW)
-    write_pipeline.exec()
+    write_pipe = rc.pipeline()
+    write_pipe.sadd(ip_key, device_id)
+    write_pipe.expire(ip_key, IP_DEVICE_WINDOW)
+    await write_pipe.execute()

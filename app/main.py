@@ -10,7 +10,6 @@ Responsibilities (only):
   - Include all APIRouters
 """
 
-import asyncio
 import logging
 import os
 import time
@@ -20,7 +19,7 @@ import sentry_sdk
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -30,7 +29,6 @@ from app.api import auth, checkout, credits, detection, inpainting, reports, sys
 from app.integrations import firebase as firebase_module
 from app.integrations import http_client as http_module
 from app.integrations import redis_client as redis_module
-from app.integrations.runpod import cleanup_stale_jobs
 
 load_dotenv()
 
@@ -49,26 +47,12 @@ if sentry_dsn:
 logger = logging.getLogger(__name__)
 
 
-async def _periodic_cleanup():
-    """Background task that removes stale RunPod jobs every 30 seconds."""
-    from app.config import settings
-    while True:
-        try:
-            await asyncio.sleep(settings.cleanup_interval_sec)
-            cleanup_stale_jobs()
-            logger.debug("cleanup_periodic", extra={"action": "cleanup_periodic"})
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error("cleanup_error", extra={"action": "cleanup_error", "error": str(e)})
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # --- Startup ---
     try:
         firebase_module.initialize()
-        redis_module.initialize()
+        await redis_module.initialize()
         await http_module.initialize()
     except Exception as e:
         logger.critical("startup_failed", extra={
@@ -77,9 +61,6 @@ async def lifespan(app: FastAPI):
         })
         raise
 
-    cleanup_task = None
-    if not os.getenv("TESTING"):
-        cleanup_task = asyncio.create_task(_periodic_cleanup())
     logger.info("startup_complete", extra={
         "action": "startup_complete",
         "services": ["firebase", "redis", "http_session"],
@@ -88,13 +69,8 @@ async def lifespan(app: FastAPI):
     yield
 
     # --- Shutdown ---
-    if cleanup_task:
-        cleanup_task.cancel()
-        try:
-            await cleanup_task
-        except asyncio.CancelledError:
-            pass
     await http_module.close()
+    await redis_module.close()
     logger.info("shutdown_complete", extra={"action": "shutdown_complete"})
 
 
@@ -135,7 +111,7 @@ async def request_logging_middleware(request: Request, call_next):
 @app.exception_handler(StarletteHTTPException)
 async def custom_http_exception_handler(request: Request, exc: StarletteHTTPException):
     headers = getattr(exc, "headers", None) or {}
-    headers["Access-Control-Allow-Origin"] = "*"
+    headers["Access-Control-Allow-Origin"] = "https://fauxlens.com"
     headers["Access-Control-Allow-Credentials"] = "true"
     headers["Access-Control-Allow-Methods"] = "*"
     headers["Access-Control-Allow-Headers"] = "*"
@@ -166,17 +142,19 @@ async def custom_http_exception_handler(request: Request, exc: StarletteHTTPExce
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["https://fauxlens.com"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # ---------------------------------------------------------------------------
-# Sentry verification route
+# Sentry verification route — dev only
 # ---------------------------------------------------------------------------
 @app.get("/sentry-debug")
 async def trigger_error():
+    if os.getenv("APP_ENV") != "dev":
+        raise HTTPException(status_code=404)
     division_by_zero = 1 / 0
 
 

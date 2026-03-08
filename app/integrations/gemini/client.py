@@ -21,8 +21,9 @@ from app.schemas.detection import DetectionResult
 from app.integrations.gemini.quality import get_quality_context
 from app.integrations.gemini.prompts import get_system_instruction
 
-# Allow loading truncated / oversized images (override PIL safety cap)
-Image.MAX_IMAGE_PIXELS = None
+# Cap decompression to 20 MP (from config) to prevent decompression-bomb DoS.
+# A crafted PNG/TIFF can have a tiny file size but expand to multiple GB.
+Image.MAX_IMAGE_PIXELS = settings.pil_max_image_pixels
 
 logger = logging.getLogger(__name__)
 

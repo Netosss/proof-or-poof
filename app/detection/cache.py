@@ -3,6 +3,8 @@ Two-tier result cache: Redis (preferred) → Local Memory (fallback).
 
 The Redis client is accessed at call-time via the integration module so that
 it picks up the instance initialized during the FastAPI lifespan.
+
+All Redis operations are async — no thread pool needed.
 """
 
 import json
@@ -19,12 +21,12 @@ logger = logging.getLogger(__name__)
 local_cache: OrderedDict = OrderedDict()
 
 
-def get_cached_result(key: str) -> Optional[dict]:
+async def get_cached_result(key: str) -> Optional[dict]:
     """Retrieve result from Redis (preferred) or Local Memory (fallback)."""
     rc = redis_module.client
     if rc:
         try:
-            data = rc.get(f"forensic:{key}")
+            data = await rc.get(f"forensic:{key}")
             if data:
                 logger.debug("cache_redis_hit", extra={"action": "cache_redis_hit"})
                 return json.loads(data)
@@ -51,12 +53,12 @@ def get_cached_result(key: str) -> Optional[dict]:
     return None
 
 
-def set_cached_result(key: str, value: dict) -> None:
+async def set_cached_result(key: str, value: dict) -> None:
     """Store result in Redis (24h TTL) or Local Memory (fallback)."""
     rc = redis_module.client
     if rc:
         try:
-            rc.set(f"forensic:{key}", json.dumps(value), ex=settings.deepfake_cache_ttl_sec)
+            await rc.set(f"forensic:{key}", json.dumps(value), ex=settings.deepfake_cache_ttl_sec)
         except Exception as e:
             logger.warning("cache_redis_set_error", extra={"action": "cache_redis_set_error", "error": str(e)})
     else:

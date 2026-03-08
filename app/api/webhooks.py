@@ -7,14 +7,14 @@ import hmac
 import json
 import logging
 import os
-import time
 
 from fastapi import APIRouter, Header, HTTPException, Request
-from firebase_admin import firestore
+from google.cloud.firestore_v1 import SERVER_TIMESTAMP
+from google.cloud.firestore_v1.async_transaction import async_transactional
 
 from app.config import settings
 from app.integrations import firebase as firebase_module
-from app.integrations.runpod import pending_jobs, webhook_result_buffer
+from app.integrations import redis_client as redis_module
 from app.services.credit_engine import grant_credits
 from app.services.finance_service import log_transaction
 
@@ -35,6 +35,9 @@ async def runpod_webhook(request: Request):
     RUNPOD_WEBHOOK_URL as a query parameter, e.g.:
         https://your-app.railway.app/webhook/runpod?secret=<RUNPOD_WEBHOOK_SECRET>
     If RUNPOD_WEBHOOK_SECRET is set, requests without a matching ?secret= are rejected.
+
+    Result delivery: writes to Redis key + publishes to channel so the waiting
+    coroutine in runpod.py (_run_with_webhook) is woken immediately via Pub/Sub.
     """
     try:
         if RUNPOD_WEBHOOK_SECRET:
@@ -56,78 +59,67 @@ async def runpod_webhook(request: Request):
             "status": status,
         })
 
-        if job_id and job_id in pending_jobs:
-            future, start_time = pending_jobs[job_id]
-            elapsed_ms = (time.time() - start_time) * 1000
+        if not job_id:
+            logger.warning("webhook_runpod_missing_job_id", extra={
+                "action": "webhook_runpod_missing_job_id",
+            })
+            return {"status": "ok"}
 
-            if status == "COMPLETED" and output:
-                if not isinstance(output, dict):
-                    logger.warning("webhook_runpod_invalid_output", extra={
-                        "action": "webhook_runpod_invalid_output",
-                        "job_id": job_id,
-                        "output_type": type(output).__name__,
-                    })
-                    output = {"ai_score": 0.0, "gpu_time_ms": 0.0, "error": "Invalid output format"}
+        rc = redis_module.client
 
-                if not future.done():
-                    future.set_result(output)
-
-                if "results" in output:
-                    logger.info("webhook_runpod_completed", extra={
-                        "action": "webhook_runpod_completed",
-                        "job_id": job_id,
-                        "elapsed_ms": round(elapsed_ms, 2),
-                        "batch_size": len(output.get("results", [])),
-                        "gpu_time_ms": output.get("timing_ms", {}).get("total", 0),
-                    })
-                else:
-                    logger.info("webhook_runpod_completed", extra={
-                        "action": "webhook_runpod_completed",
-                        "job_id": job_id,
-                        "elapsed_ms": round(elapsed_ms, 2),
-                        "ai_score": output.get("ai_score"),
-                    })
-
-            elif status == "FAILED":
-                error_output = {
-                    "error": "Job failed",
-                    "details": payload.get("error"),
-                    "ai_score": 0.0,
-                    "gpu_time_ms": 0.0
-                }
-                if not future.done():
-                    future.set_result(error_output)
-                logger.error("webhook_runpod_failed", extra={
-                    "action": "webhook_runpod_failed",
-                    "job_id": job_id,
-                    "error": payload.get("error"),
-                })
-            else:
-                logger.info("webhook_runpod_status", extra={
-                    "action": "webhook_runpod_status",
-                    "job_id": job_id,
-                    "status": status,
-                })
-                return {"status": "acknowledged"}
-
-        elif job_id and status == "COMPLETED" and output:
-            if isinstance(output, dict) and "ai_score" in output:
-                webhook_result_buffer[job_id] = (output, time.time())
-                logger.info("webhook_runpod_buffered", extra={
-                    "action": "webhook_runpod_buffered",
-                    "job_id": job_id,
-                    "ai_score": output.get("ai_score"),
-                })
-            else:
+        if status == "COMPLETED" and output:
+            if not isinstance(output, dict):
                 logger.warning("webhook_runpod_invalid_output", extra={
                     "action": "webhook_runpod_invalid_output",
                     "job_id": job_id,
-                    "reason": "invalid output, not buffering",
+                    "output_type": type(output).__name__,
                 })
-        else:
-            logger.warning("webhook_runpod_unknown_job", extra={
-                "action": "webhook_runpod_unknown_job",
+                output = {"ai_score": 0.0, "gpu_time_ms": 0.0, "error": "Invalid output format"}
+
+            if "results" in output:
+                logger.info("webhook_runpod_completed", extra={
+                    "action": "webhook_runpod_completed",
+                    "job_id": job_id,
+                    "batch_size": len(output.get("results", [])),
+                    "gpu_time_ms": output.get("timing_ms", {}).get("total", 0),
+                })
+            else:
+                logger.info("webhook_runpod_completed", extra={
+                    "action": "webhook_runpod_completed",
+                    "job_id": job_id,
+                    "ai_score": output.get("ai_score"),
+                })
+
+            if rc:
+                channel = f"runpod:result:{job_id}"
+                serialized = json.dumps(output)
+                # SET key first (race-check backup), then PUBLISH to wake subscriber
+                await rc.set(channel, serialized, ex=30)
+                await rc.publish(channel, serialized)
+
+        elif status == "FAILED":
+            error_output = {
+                "error": "Job failed",
+                "details": payload.get("error"),
+                "ai_score": 0.0,
+                "gpu_time_ms": 0.0,
+            }
+            logger.error("webhook_runpod_failed", extra={
+                "action": "webhook_runpod_failed",
                 "job_id": job_id,
+                "error": payload.get("error"),
+            })
+            if rc:
+                channel = f"runpod:result:{job_id}"
+                serialized = json.dumps(error_output)
+                await rc.set(channel, serialized, ex=30)
+                await rc.publish(channel, serialized)
+
+        else:
+            logger.info("webhook_runpod_status", extra={
+                "action": "webhook_runpod_status",
+                "job_id": job_id,
+                "status": status,
             })
 
         return {"status": "ok"}
@@ -268,18 +260,18 @@ async def _handle_order_paid(payload, meta, data, attributes, order_id, custom_d
     total_usd = attributes.get("total", 0) / 100.0
 
     try:
-        purchase_ref.create({
+        await purchase_ref.create({
             "lemon_order_id": order_id,
             "lemon_variant_id": variant_id,
             "user_id": user_id,
             "credits_granted": credits,
             "status": "pending",
             "test_mode": False,
-            "created_at": firestore.SERVER_TIMESTAMP,
+            "created_at": SERVER_TIMESTAMP,
         })
     except Exception as e:
         if "AlreadyExists" in type(e).__name__ or "ALREADY_EXISTS" in str(e).upper():
-            existing = purchase_ref.get()
+            existing = await purchase_ref.get()
             existing_status = existing.to_dict().get("status") if existing.exists else None
 
             if existing_status == "paid":
@@ -306,9 +298,9 @@ async def _handle_order_paid(payload, meta, data, attributes, order_id, custom_d
             raise HTTPException(status_code=500, detail="Purchase record failed")
 
     try:
-        new_balance = grant_credits(user_id, credits, "purchase", order_id)
+        new_balance = await grant_credits(user_id, credits, "purchase", order_id)
     except Exception as e:
-        purchase_ref.update({"status": "grant_failed"})
+        await purchase_ref.update({"status": "grant_failed"})
         logger.error("lemonsqueezy_grant_failed", extra={
             "action": "lemonsqueezy_grant_failed",
             "order_id": order_id,
@@ -317,7 +309,7 @@ async def _handle_order_paid(payload, meta, data, attributes, order_id, custom_d
         })
         raise HTTPException(status_code=500, detail="Credit grant failed — will retry")
 
-    purchase_ref.update({"status": "paid"})
+    await purchase_ref.update({"status": "paid"})
 
     log_transaction("LEMONSQUEEZY", total_usd, {
         "user_id": user_id,
@@ -343,12 +335,9 @@ async def _handle_order_refunded(order_id: str):
 
     purchase_ref = db.collection("purchases").document(order_id)
 
-    user_id = None
-    credits_granted = 0
-
-    @firestore.transactional
-    def _claim_refund(transaction, ref):
-        snap = ref.get(transaction=transaction)
+    @async_transactional
+    async def _claim_refund(transaction, ref):
+        snap = await ref.get(transaction=transaction)
         if not snap.exists:
             return None, None, "not_found"
         purchase = snap.to_dict()
@@ -360,7 +349,7 @@ async def _handle_order_refunded(order_id: str):
 
     try:
         txn = db.transaction()
-        user_id, credits_granted, outcome = _claim_refund(txn, purchase_ref)
+        user_id, credits_granted, outcome = await _claim_refund(txn, purchase_ref)
     except Exception as e:
         logger.error("lemonsqueezy_refund_failed", extra={
             "action": "lemonsqueezy_refund_failed",
@@ -384,7 +373,7 @@ async def _handle_order_refunded(order_id: str):
         return {"status": "ok", "skipped": "already_refunded"}
 
     try:
-        new_balance = grant_credits(user_id, -credits_granted, "refund", order_id)
+        new_balance = await grant_credits(user_id, -credits_granted, "refund", order_id)
         logger.info("lemonsqueezy_order_refunded", extra={
             "action": "lemonsqueezy_order_refunded",
             "order_id": order_id,

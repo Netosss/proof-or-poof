@@ -20,7 +20,6 @@ from app.config import settings
 from app.core.auth import check_ip_device_limit, get_client_ip, validate_device_id, verify_turnstile
 from app.core.dependencies import security_manager
 from app.core.firebase_auth import get_optional_user
-from app.core.rate_limiter import check_rate_limit
 from app.detection.pipeline import detect_ai_media
 from app.integrations import redis_client as redis_module
 from app.logging_config import user_id_var
@@ -56,13 +55,9 @@ async def detect(
     """
     ip = get_client_ip(request)
 
-    # Set user_id context var so all downstream logs carry it automatically
     user_id_var.set(auth_user["uid"] if auth_user else "")
 
     if auth_user:
-        uid = auth_user["uid"]
-        check_rate_limit(f"uid:{uid}")
-
         if not turnstile_token:
             raise HTTPException(
                 status_code=403,
@@ -87,7 +82,7 @@ async def detect(
 
         await check_ip_device_limit(ip, device_id, token_already_verified=True)
 
-        wallet = get_guest_wallet(device_id)
+        wallet = await get_guest_wallet(device_id)
         if wallet.get("is_banned"):
             raise HTTPException(status_code=403, detail="Device is banned")
 
@@ -160,7 +155,7 @@ async def detect(
         if auth_user:
             uid = auth_user["uid"]
 
-            current_balance = get_user_balance(uid)
+            current_balance = await get_user_balance(uid)
             if current_balance < settings.detect_credit_cost:
                 logger.warning("insufficient_credits", extra={
                     "action": "insufficient_credits",
@@ -180,9 +175,9 @@ async def detect(
             )
 
             if result.get("summary") in ["Analysis Failed", "File too large to scan"]:
-                new_balance = get_user_balance(uid)
+                new_balance = await get_user_balance(uid)
             else:
-                new_balance = consume_credits(uid, settings.detect_credit_cost, "detect", filename)
+                new_balance = await consume_credits(uid, settings.detect_credit_cost, "detect", filename)
 
         else:
             current_credits = wallet.get("credits", 0)
@@ -206,10 +201,10 @@ async def detect(
             )
 
             if result.get("summary") in ["Analysis Failed", "File too large to scan"]:
-                wallet = get_guest_wallet(device_id)
+                wallet = await get_guest_wallet(device_id)
                 new_balance = wallet.get("credits", 0)
             else:
-                new_balance = deduct_guest_credits(device_id, cost=settings.detect_credit_cost)
+                new_balance = await deduct_guest_credits(device_id, cost=settings.detect_credit_cost)
 
         duration = time.time() - start_time
 
@@ -242,7 +237,7 @@ async def detect(
         rc = redis_module.client
         if rc:
             shareable = {k: v for k, v in result.items() if k != "new_balance"}
-            rc.setex(f"report:{short_id}", settings.report_cache_ttl_sec, json.dumps(shareable))
+            await rc.setex(f"report:{short_id}", settings.report_cache_ttl_sec, json.dumps(shareable))
         result["short_id"] = short_id
 
         logger.info("scan_completed", extra={

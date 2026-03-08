@@ -24,8 +24,8 @@ logger = logging.getLogger(__name__)
 class SecurityManager:
     """Orchestrates rate limiting, file validation, and secure execution."""
 
-    def check_rate_limit(self, identifier: str) -> None:
-        check_rate_limit(identifier)
+    async def check_rate_limit(self, identifier: str) -> None:
+        await check_rate_limit(identifier)
 
     def validate_file(self, filename: str, filesize: int, file_path: str = None) -> bool:
         return validate_file(filename, filesize, file_path)
@@ -50,7 +50,7 @@ class SecurityManager:
     ) -> Any:
         """Rate-limits, validates, executes, and sanitizes logs for a media processing call."""
         identifier = uid or request.client.host
-        self.check_rate_limit(identifier)
+        await self.check_rate_limit(identifier)
         self.validate_file(filename, filesize, temp_path)
 
         try:

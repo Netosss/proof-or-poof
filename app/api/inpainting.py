@@ -18,7 +18,6 @@ from fastapi.responses import Response
 from app.config import settings
 from app.core.auth import check_ip_device_limit, get_client_ip, validate_device_id, verify_turnstile
 from app.core.firebase_auth import get_optional_user
-from app.core.rate_limiter import check_rate_limit
 from app.integrations import redis_client as redis_module
 from app.integrations.runpod import run_gpu_inpainting
 from app.logging_config import user_id_var
@@ -53,7 +52,6 @@ async def inpaint_image(
     request_id = str(uuid.uuid4())
     ip = get_client_ip(request)
 
-    # Set user_id context var so all downstream logs carry it automatically
     user_id_var.set(auth_user["uid"] if auth_user else "")
 
     if auth_user:
@@ -64,8 +62,6 @@ async def inpaint_image(
             "filename": image.filename,
             "user_type": "authenticated",
         })
-
-        check_rate_limit(f"uid:{uid}")
 
         if not turnstile_token:
             raise HTTPException(
@@ -96,7 +92,7 @@ async def inpaint_image(
 
         await check_ip_device_limit(ip, device_id, token_already_verified=True)
 
-        wallet = get_guest_wallet(device_id)
+        wallet = await get_guest_wallet(device_id)
         if wallet.get("is_banned"):
             raise HTTPException(status_code=403, detail="Device is banned")
 
@@ -118,7 +114,7 @@ async def inpaint_image(
     if auth_user:
         uid = auth_user["uid"]
         cache_key = f"paid_image:uid:{uid}:{img_hash}"
-        is_free_retry = bool(rc and rc.get(cache_key))
+        is_free_retry = bool(rc and await rc.get(cache_key))
         if is_free_retry:
             logger.info("inpaint_free_retry_used", extra={
                 "action": "inpaint_free_retry_used",
@@ -128,7 +124,7 @@ async def inpaint_image(
             })
 
         if not is_free_retry:
-            current_balance = get_user_balance(uid)
+            current_balance = await get_user_balance(uid)
             if current_balance < settings.inpaint_credit_cost:
                 logger.warning("insufficient_credits", extra={
                     "action": "insufficient_credits",
@@ -164,12 +160,12 @@ async def inpaint_image(
 
             if is_free_retry:
                 if rc:
-                    rc.delete(cache_key)
-                new_balance = get_user_balance(uid)
+                    await rc.delete(cache_key)
+                new_balance = await get_user_balance(uid)
             else:
-                new_balance = consume_credits(uid, settings.inpaint_credit_cost, "inpaint", request_id)
+                new_balance = await consume_credits(uid, settings.inpaint_credit_cost, "inpaint", request_id)
                 if rc:
-                    rc.set(cache_key, "1", ex=settings.deepfake_dedupe_ttl_sec)
+                    await rc.set(cache_key, "1", ex=settings.deepfake_dedupe_ttl_sec)
 
             headers = {"X-User-Balance": str(new_balance)}
             return Response(content=result_bytes, media_type="image/png", headers=headers)
@@ -185,7 +181,7 @@ async def inpaint_image(
 
     else:
         cache_key = f"paid_image:{device_id}:{img_hash}"
-        is_free_retry = bool(rc and rc.get(cache_key))
+        is_free_retry = bool(rc and await rc.get(cache_key))
         if is_free_retry:
             logger.info("inpaint_free_retry_used", extra={
                 "action": "inpaint_free_retry_used",
@@ -231,12 +227,12 @@ async def inpaint_image(
 
             if is_free_retry:
                 if rc:
-                    rc.delete(cache_key)
+                    await rc.delete(cache_key)
                 new_balance = current_credits
             else:
-                new_balance = deduct_guest_credits(device_id, cost=settings.inpaint_credit_cost)
+                new_balance = await deduct_guest_credits(device_id, cost=settings.inpaint_credit_cost)
                 if rc:
-                    rc.set(cache_key, "1", ex=settings.deepfake_dedupe_ttl_sec)
+                    await rc.set(cache_key, "1", ex=settings.deepfake_dedupe_ttl_sec)
 
             headers = {"X-User-Balance": str(new_balance)}
             return Response(content=result_bytes, media_type="image/png", headers=headers)
