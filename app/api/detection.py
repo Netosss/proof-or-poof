@@ -251,7 +251,7 @@ async def detect(
             "user_type": "authenticated" if auth_user else "guest",
             "duration_ms": round(duration * 1000, 1),
             "cost_usd": cost,
-            "filename": filename,
+            "media_file": filename,
         })
 
         return result

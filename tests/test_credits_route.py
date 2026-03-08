@@ -22,7 +22,7 @@ SECRET = "supersecret"
 def test_get_balance_existing_wallet(client):
     with (
         patch("app.api.credits.check_ip_device_limit", new_callable=AsyncMock),
-        patch("app.api.credits.get_guest_wallet", return_value={"credits": 42}),
+        patch("app.api.credits.get_guest_wallet", new_callable=AsyncMock, return_value={"credits": 42}),
     ):
         response = client.get(
             "/api/user/balance", headers={"X-Device-ID": DEVICE_ID}
@@ -38,6 +38,7 @@ def test_get_balance_new_device_gets_welcome_credits(client):
         patch("app.api.credits.check_ip_device_limit", new_callable=AsyncMock),
         patch(
             "app.api.credits.get_guest_wallet",
+            new_callable=AsyncMock,
             return_value={"credits": settings.welcome_credits},
         ),
     ):
@@ -57,6 +58,7 @@ def test_add_credits_post_valid(client):
     with (
         patch(
             "app.api.credits.perform_recharge",
+            new_callable=AsyncMock,
             return_value={"status": "success", "new_balance": 15},
         ),
         patch("app.api.credits.log_transaction"),
@@ -107,6 +109,7 @@ def test_add_credits_webhook_valid(client):
     with (
         patch(
             "app.api.credits.perform_recharge",
+            new_callable=AsyncMock,
             return_value={"status": "success", "new_balance": 10},
         ),
         patch("app.api.credits.log_transaction"),

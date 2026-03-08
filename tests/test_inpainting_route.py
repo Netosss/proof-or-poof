@@ -36,7 +36,7 @@ def _patches(turnstile_ok=True, wallet=None):
         patch("app.api.inpainting.verify_turnstile", new_callable=AsyncMock, return_value=turnstile_ok)
     )
     stack.enter_context(patch("app.api.inpainting.check_ip_device_limit", new_callable=AsyncMock))
-    stack.enter_context(patch("app.api.inpainting.get_guest_wallet", return_value=wallet))
+    stack.enter_context(patch("app.api.inpainting.get_guest_wallet", new_callable=AsyncMock, return_value=wallet))
     return stack
 
 
@@ -83,7 +83,7 @@ def test_inpaint_success_deducts_credits(client):
         stack.enter_context(
             patch("app.api.inpainting.run_gpu_inpainting", new_callable=AsyncMock, return_value=FAKE_RESULT)
         )
-        stack.enter_context(patch("app.api.inpainting.deduct_guest_credits", return_value=48))
+        stack.enter_context(patch("app.api.inpainting.deduct_guest_credits", new_callable=AsyncMock, return_value=48))
         stack.enter_context(patch("app.api.inpainting.log_transaction"))
         response = client.post("/inpaint/image", headers=HEADERS, files=_make_files())
     assert response.status_code == 200
@@ -96,7 +96,7 @@ def test_inpaint_free_retry_skips_deduction(client, mock_redis):
     image_bytes = make_tiny_jpeg()
     img_hash = hashlib.sha256(image_bytes).hexdigest()
     cache_key = f"paid_image:{DEVICE_ID}:{img_hash}"
-    mock_redis.set(cache_key, "1")
+    mock_redis._store[cache_key] = "1"  # sync seed — mock_redis.set() is now async
 
     with _patches(wallet=WALLET_LOW) as stack:
         stack.enter_context(
@@ -116,7 +116,7 @@ def test_inpaint_free_retry_skips_deduction(client, mock_redis):
 
     assert response.status_code == 200
     mock_deduct.assert_not_called()
-    assert mock_redis.get(cache_key) is None
+    assert mock_redis._store.get(cache_key) is None
 
 
 def test_inpaint_gpu_failure_returns_500(client):

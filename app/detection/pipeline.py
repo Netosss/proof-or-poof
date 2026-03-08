@@ -231,7 +231,7 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
 
     if is_video:
         filename = os.path.basename(file_path)
-        logger.info("pipeline_video_start", extra={"action": "pipeline_video_start", "filename": filename})
+        logger.info("pipeline_video_start", extra={"action": "pipeline_video_start", "media_file": filename})
 
         video_hash = await asyncio.to_thread(get_smart_file_hash, file_path)
         cached_video_result = await get_cached_result(video_hash)

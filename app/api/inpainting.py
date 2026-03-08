@@ -59,7 +59,7 @@ async def inpaint_image(
         logger.info("inpaint_request_started", extra={
             "action": "inpaint_request_started",
             "inpaint_request_id": request_id,
-            "filename": image.filename,
+            "media_file": image.filename,
             "user_type": "authenticated",
         })
 
@@ -77,7 +77,7 @@ async def inpaint_image(
         logger.info("inpaint_request_started", extra={
             "action": "inpaint_request_started",
             "inpaint_request_id": request_id,
-            "filename": image.filename,
+            "media_file": image.filename,
             "user_type": "guest",
         })
 

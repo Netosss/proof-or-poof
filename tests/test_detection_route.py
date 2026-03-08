@@ -43,10 +43,10 @@ def _patches(
         patch("app.api.detection.check_ip_device_limit", new_callable=AsyncMock)
     )
     stack.enter_context(
-        patch("app.api.detection.get_guest_wallet", return_value=wallet)
+        patch("app.api.detection.get_guest_wallet", new_callable=AsyncMock, return_value=wallet)
     )
     stack.enter_context(
-        patch("app.api.detection.deduct_guest_credits", return_value=deduct_result)
+        patch("app.api.detection.deduct_guest_credits", new_callable=AsyncMock, return_value=deduct_result)
     )
     stack.enter_context(
         patch("app.api.detection.detect_ai_media", new_callable=AsyncMock, return_value=detect_result)
@@ -54,7 +54,7 @@ def _patches(
     stack.enter_context(patch("app.api.detection.log_transaction"))
     from app.core.dependencies import security_manager
     stack.enter_context(patch.object(security_manager, "validate_file", return_value=True))
-    stack.enter_context(patch.object(security_manager, "check_rate_limit"))
+    stack.enter_context(patch.object(security_manager, "check_rate_limit", new_callable=AsyncMock))
     return stack
 
 
