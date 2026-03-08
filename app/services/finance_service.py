@@ -44,7 +44,8 @@ async def _async_log(category: str, cost: float, meta: dict) -> None:
         logger.info("finance_transaction", extra={
             "action": "finance_transaction",
             "category": category,
-            "amount": float(cost),
+            "amount": float(cost),          # signed: negative = expense
+            "cost_usd": abs(float(cost)),   # always positive — use this for chart aggregations
             "transaction_type": transaction_type,
             **meta,
         })

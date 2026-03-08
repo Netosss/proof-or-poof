@@ -88,6 +88,7 @@ async def detect(
 
     file_content = None
     filename = "unknown"
+    upload_content_type: str | None = None   # MIME from the multipart boundary
     sidecar_metadata = None
 
     content_type = request.headers.get("content-type", "")
@@ -127,6 +128,7 @@ async def detect(
                     raise HTTPException(status_code=400, detail="Invalid file upload format")
             file_content = await file_obj.read()
             filename = file_obj.filename or "uploaded_file"
+            upload_content_type = file_obj.content_type or None
         elif url_obj:
             if isinstance(url_obj, str):
                 file_content, filename = await download_image(url_obj)
@@ -150,7 +152,7 @@ async def detect(
     del file_content
 
     try:
-        security_manager.validate_file(filename, filesize, temp_path)
+        security_manager.validate_file(filename, filesize, temp_path, upload_content_type)
 
         if auth_user:
             uid = auth_user["uid"]
@@ -240,6 +242,9 @@ async def detect(
             await rc.setex(f"report:{short_id}", settings.report_cache_ttl_sec, json.dumps(shareable))
         result["short_id"] = short_id
 
+        failed = result.get("summary") in ("Analysis Failed", "File too large to scan")
+        credits_consumed = 0 if failed else settings.detect_credit_cost
+
         logger.info("scan_completed", extra={
             "action": "scan_completed",
             "outcome": result.get("summary"),
@@ -251,6 +256,7 @@ async def detect(
             "user_type": "authenticated" if auth_user else "guest",
             "duration_ms": round(duration * 1000, 1),
             "cost_usd": cost,
+            "credits_consumed": credits_consumed,
             "media_file": filename,
         })
 

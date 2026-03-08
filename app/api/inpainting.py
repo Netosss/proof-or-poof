@@ -17,6 +17,7 @@ from fastapi.responses import Response
 
 from app.config import settings
 from app.core.auth import check_ip_device_limit, get_client_ip, validate_device_id, verify_turnstile
+from app.core.dependencies import security_manager
 from app.core.firebase_auth import get_optional_user
 from app.integrations import redis_client as redis_module
 from app.integrations.runpod import run_gpu_inpainting
@@ -108,6 +109,17 @@ async def inpaint_image(
         })
         raise HTTPException(status_code=400, detail="Error reading upload files")
 
+    # Validate MIME type and size before touching billing or the GPU.
+    # file_path is omitted — magic-bytes PIL check is skipped here because
+    # run_gpu_inpainting will reject corrupt images naturally, and writing
+    # to disk solely to verify is unnecessary for inpainting.
+    security_manager.validate_file(
+        image.filename or "image",
+        len(image_bytes),
+        content_type=image.content_type or None,
+        mode="inpaint",
+    )
+
     img_hash = hashlib.sha256(image_bytes).hexdigest()
     rc = redis_module.client
 
@@ -151,6 +163,7 @@ async def inpaint_image(
                 "inpaint_request_id": request_id,
                 "duration_ms": round(duration * 1000, 1),
                 "cost_usd": round(usd_cost, 6),
+                "credits_consumed": 0 if is_free_retry else settings.inpaint_credit_cost,
                 "user_type": "authenticated",
                 "is_free_retry": is_free_retry,
                 "image_size_mb": image_size_mb,
@@ -218,6 +231,7 @@ async def inpaint_image(
                 "inpaint_request_id": request_id,
                 "duration_ms": round(duration * 1000, 1),
                 "cost_usd": round(usd_cost, 6),
+                "credits_consumed": 0 if is_free_retry else settings.inpaint_credit_cost,
                 "user_type": "guest",
                 "is_free_retry": is_free_retry,
                 "image_size_mb": image_size_mb,
