@@ -27,8 +27,16 @@ class SecurityManager:
     async def check_rate_limit(self, identifier: str) -> None:
         await check_rate_limit(identifier)
 
-    def validate_file(self, filename: str, filesize: int, file_path: str = None) -> bool:
-        return validate_file(filename, filesize, file_path)
+    def validate_file(
+        self,
+        filename: str,
+        filesize: int,
+        file_path: str | None = None,
+        content_type: str | None = None,
+        *,
+        mode: str = "detect",
+    ) -> bool:
+        return validate_file(filename, filesize, file_path, content_type, mode=mode)
 
     def sanitize_log_message(self, message: str) -> str:
         return sanitize_log_message(message)

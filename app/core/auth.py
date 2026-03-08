@@ -76,17 +76,71 @@ async def verify_turnstile(token: str) -> bool:
         return False
 
 
-def get_client_ip(request: Request) -> str:
-    """Extracts the real client IP from headers, falling back to host."""
-    cf_ip = request.headers.get("cf-connecting-ip")
-    if cf_ip:
-        return cf_ip
+import ipaddress as _ipaddress
 
+# Cloudflare's published egress ranges — https://www.cloudflare.com/ips/
+# These are stable and rarely change; update when Cloudflare publishes new ones.
+_CF_NETWORKS: tuple[_ipaddress.IPv4Network | _ipaddress.IPv6Network, ...] = (
+    # IPv4
+    _ipaddress.ip_network("103.21.244.0/22"),
+    _ipaddress.ip_network("103.22.200.0/22"),
+    _ipaddress.ip_network("103.31.4.0/22"),
+    _ipaddress.ip_network("104.16.0.0/13"),
+    _ipaddress.ip_network("104.24.0.0/14"),
+    _ipaddress.ip_network("108.162.192.0/18"),
+    _ipaddress.ip_network("131.0.72.0/22"),
+    _ipaddress.ip_network("141.101.64.0/18"),
+    _ipaddress.ip_network("162.158.0.0/15"),
+    _ipaddress.ip_network("172.64.0.0/13"),
+    _ipaddress.ip_network("173.245.48.0/20"),
+    _ipaddress.ip_network("188.114.96.0/20"),
+    _ipaddress.ip_network("190.93.240.0/20"),
+    _ipaddress.ip_network("197.234.240.0/22"),
+    _ipaddress.ip_network("198.41.128.0/17"),
+    # IPv6
+    _ipaddress.ip_network("2400:cb00::/32"),
+    _ipaddress.ip_network("2405:8100::/32"),
+    _ipaddress.ip_network("2405:b500::/32"),
+    _ipaddress.ip_network("2606:4700::/32"),
+    _ipaddress.ip_network("2803:f800::/32"),
+    _ipaddress.ip_network("2c0f:f248::/32"),
+    _ipaddress.ip_network("2a06:98c0::/29"),
+)
+
+
+def _is_cloudflare_ip(ip_str: str) -> bool:
+    """Return True if ip_str belongs to a known Cloudflare egress network."""
+    try:
+        ip = _ipaddress.ip_address(ip_str)
+        return any(ip in net for net in _CF_NETWORKS)
+    except ValueError:
+        return False
+
+
+def get_client_ip(request: Request) -> str:
+    """
+    Extract the real client IP, trusting CF-Connecting-IP only when the
+    connection actually comes from a Cloudflare edge node.
+
+    If the TCP peer is not a Cloudflare IP, we ignore CF-Connecting-IP
+    (it could be forged) and fall back to X-Forwarded-For / the raw host.
+    This prevents attackers from spoofing their IP for rate-limiting purposes
+    by hitting the Railway URL directly and setting a fake CF-Connecting-IP.
+    """
+    peer_ip = request.client.host if request.client else ""
+
+    if _is_cloudflare_ip(peer_ip):
+        # Traffic arrived through Cloudflare — trust the real-IP header.
+        cf_ip = request.headers.get("cf-connecting-ip")
+        if cf_ip:
+            return cf_ip
+
+    # Direct hit (bypassing Cloudflare) or Railway's own load balancer.
     x_forwarded = request.headers.get("x-forwarded-for")
     if x_forwarded:
         return x_forwarded.split(",")[0].strip()
 
-    return request.client.host if request.client else "127.0.0.1"
+    return peer_ip or "127.0.0.1"
 
 
 async def check_ip_device_limit(

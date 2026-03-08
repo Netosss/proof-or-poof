@@ -77,12 +77,24 @@ async def test_download_image_base64_too_large():
 
 
 def _make_mock_session(status=200, content=b"image_bytes", content_type="image/jpeg"):
-    """Build a mock aiohttp session whose .get() returns a context-manager response."""
+    """
+    Build a mock aiohttp session whose .get() returns a context-manager response.
+
+    response.content.iter_chunked() is an async generator that yields the
+    content in a single chunk, matching the streaming read path in download_image.
+    """
+    async def _iter_chunked(_chunk_size):
+        if content:
+            yield content
+
+    mock_content = MagicMock()
+    mock_content.iter_chunked = _iter_chunked
+
     mock_resp = MagicMock()
     mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
     mock_resp.__aexit__ = AsyncMock(return_value=None)
     mock_resp.status = status
-    mock_resp.read = AsyncMock(return_value=content)
+    mock_resp.content = mock_content
     mock_resp.headers = {"Content-Type": content_type}
 
     mock_session = MagicMock()
@@ -105,9 +117,17 @@ def _patch_session(mock_session):
     )
 
 
+def _patch_ssrf_check():
+    """Bypass the SSRF DNS check — tests use mocked sessions, no real network."""
+    return patch(
+        "app.services.detection_service._assert_url_safe",
+        new_callable=AsyncMock,
+    )
+
+
 async def test_download_image_url_success():
     session = _make_mock_session(status=200, content=b"fake_img", content_type="image/jpeg")
-    with _patch_session(session):
+    with _patch_session(session), _patch_ssrf_check():
         content, name = await download_image("https://example.com/photo.jpg")
 
     assert content == b"fake_img"
@@ -116,7 +136,7 @@ async def test_download_image_url_success():
 
 async def test_download_image_url_not_found():
     session = _make_mock_session(status=404)
-    with _patch_session(session):
+    with _patch_session(session), _patch_ssrf_check():
         with pytest.raises(HTTPException) as exc:
             await download_image("https://example.com/missing.jpg")
     assert exc.value.status_code == 400
@@ -125,7 +145,7 @@ async def test_download_image_url_not_found():
 async def test_download_image_url_too_large():
     big = b"X" * 10
     session = _make_mock_session(status=200, content=big, content_type="image/jpeg")
-    with _patch_session(session):
+    with _patch_session(session), _patch_ssrf_check():
         with pytest.raises(HTTPException) as exc:
             await download_image("https://example.com/big.jpg", max_size=5)
     assert exc.value.status_code == 400
@@ -137,7 +157,20 @@ async def test_download_image_url_client_error():
     mock_session = MagicMock()
     mock_session.get = MagicMock(side_effect=aiohttp.ClientError("connection refused"))
 
-    with _patch_session(mock_session):
+    with _patch_session(mock_session), _patch_ssrf_check():
         with pytest.raises(HTTPException) as exc:
             await download_image("https://unreachable.example.com/img.jpg")
     assert exc.value.status_code == 400
+
+
+async def test_download_image_ssrf_blocked():
+    """Private/internal URLs must be rejected before any HTTP request is made."""
+    for bad_url in [
+        "http://169.254.169.254/latest/meta-data/",   # AWS metadata
+        "http://localhost/admin",
+        "http://127.0.0.1:6379/",
+        "ftp://example.com/file.jpg",                  # wrong scheme
+    ]:
+        with pytest.raises(HTTPException) as exc:
+            await download_image(bad_url)
+        assert exc.value.status_code == 400, f"Expected 400 for {bad_url}"

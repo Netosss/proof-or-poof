@@ -101,7 +101,7 @@ async def detect_ai_media_image_logic(
         if "fileSize" in trusted_metadata:
             file_size = trusted_metadata["fileSize"]
 
-    slim_log = {k: (str(v)[:20] + "..." if len(str(v)) > 20 else v) for k, v in exif.items()}
+    slim_log = {k: (str(v)[:20] + "..." if len(str(v)) > 20 else str(v)) for k, v in exif.items()}
     logger.info("metadata_raw", extra={"action": "metadata_raw", "exif_slim": slim_log})
 
     # Stringify values to handle non-JSON-serializable types (IFDRational, bytes, etc.)

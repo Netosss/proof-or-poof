@@ -116,14 +116,22 @@ async def custom_http_exception_handler(request: Request, exc: StarletteHTTPExce
     headers["Access-Control-Allow-Methods"] = "*"
     headers["Access-Control-Allow-Headers"] = "*"
 
-    try:
-        async for _ in request.stream():
+    # Drain the request body so HTTP/2 doesn't surface ERR_HTTP2_PROTOCOL_ERROR
+    # to the browser.  Cap at 64 KB to prevent a DDoS vector where an attacker
+    # sends a huge body on a request that will be rejected (bad token, etc.).
+    # Anything larger is handled by uvicorn/h2 via RST_STREAM automatically.
+    _MAX_DRAIN = 65_536  # 64 KB
+    content_length = request.headers.get("content-length", "0")
+    if int(content_length or 0) <= _MAX_DRAIN:
+        try:
+            drained = 0
+            async for chunk in request.stream():
+                drained += len(chunk)
+                if drained >= _MAX_DRAIN:
+                    break
+        except RuntimeError:
+            # "Stream consumed" — FastAPI already read the body. Fine to ignore.
             pass
-    except Exception as e:
-        logger.warning("exception_handler_drain_error", extra={
-            "action": "exception_handler_drain_error",
-            "error": str(e),
-        })
 
     response_data = {"detail": exc.detail}
     logger.info("http_exception_response", extra={
