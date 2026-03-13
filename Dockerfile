@@ -42,4 +42,4 @@ COPY . .
 RUN touch app/__init__.py
 
 # [FIX] Changed to workers 1 to prevent double-loading the AI model into RAM
-CMD sh -c "uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --workers 1"
+CMD sh -c "uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --workers 1 --loop uvloop"
