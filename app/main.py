@@ -10,10 +10,12 @@ Responsibilities (only):
   - Include all APIRouters
 """
 
+import asyncio
 import logging
 import os
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import sentry_sdk
 from contextlib import asynccontextmanager
@@ -50,6 +52,11 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # --- Startup ---
+    # Increase the default thread pool from ~12 (os.cpu_count()+4) to 30 so up
+    # to 30 Gemini calls can run in parallel.  Gemini is I/O-bound (network
+    # wait), so threads stay idle most of the time and cost <200 KB RSS each.
+    asyncio.get_event_loop().set_default_executor(ThreadPoolExecutor(max_workers=30))
+
     try:
         firebase_module.initialize()
         await redis_module.initialize()
