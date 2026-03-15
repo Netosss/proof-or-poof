@@ -137,3 +137,61 @@ def test_missing_metadata_adds_small_suspicion():
 
     # Should be non-zero but below the confidence threshold
     assert 0 < score < 0.5
+
+
+# ---------------------------------------------------------------------------
+# Short Tier-1 word handling (≤4 chars → soft score, not early-exit 0.99)
+# ---------------------------------------------------------------------------
+
+
+def test_short_tier1_word_sora_returns_soft_score():
+    """'sora' as a standalone word → soft 0.70, NOT the 0.99 early-exit."""
+    dump = "generated with sora model"
+    score, signals = get_tiered_signature_score(dump, dump)
+
+    assert score == 0.70
+    assert any("sora" in s.lower() for s in signals)
+
+
+def test_short_tier1_word_flux_returns_soft_score():
+    """'flux' as a standalone word → soft 0.70."""
+    dump = "created using flux pipeline"
+    score, signals = get_tiered_signature_score(dump, dump)
+
+    assert score == 0.70
+    assert any("flux" in s.lower() for s in signals)
+
+
+def test_short_tier1_word_luma_returns_soft_score():
+    """'luma' as a standalone word → soft 0.70 (no Tier-2/3 terms in this dump)."""
+    dump = "rendered by luma labs"
+    score, signals = get_tiered_signature_score(dump, dump)
+
+    assert score == 0.70
+
+
+def test_short_tier1_word_as_substring_no_match():
+    """'sora' embedded in a longer word must NOT trigger (word-boundary guard)."""
+    dump = "author: sorabeauty, camera: nikon"
+    score, signals = get_tiered_signature_score(dump, dump)
+
+    assert score == 0.0
+    assert signals == []
+
+
+def test_long_tier1_word_still_returns_max_score():
+    """Regression: long Tier-1 names (e.g. 'midjourney') keep the 0.99 hard exit."""
+    dump = "created with midjourney v6"
+    score, signals = get_tiered_signature_score(dump, dump)
+
+    assert score >= 0.99
+    assert any("midjourney" in s.lower() for s in signals)
+
+
+def test_short_tier1_word_plus_tier2_stacks_above_soft():
+    """'sora' (soft 0.70) + a Tier-2 tech term → score accumulates above 0.70."""
+    # 'lora' is a Tier-2 term; combined with 'sora' the final score should exceed 0.70
+    dump = "generated with sora, lora applied"
+    score, _ = get_tiered_signature_score(dump, dump)
+
+    assert score > 0.70

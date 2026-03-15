@@ -166,3 +166,40 @@ async def test_gemini_error_returns_analysis_failed(tmp_path):
         result = await detect_ai_media_image_logic(str(p), {})
 
     assert result["summary"] == "Analysis Failed"
+
+
+# ---------------------------------------------------------------------------
+# boost_score — soft proportional boost (score + (1 - score) * 0.25)
+# ---------------------------------------------------------------------------
+
+
+def test_boost_score_soft_proportional_nudge():
+    """Uncertain AI score is nudged proportionally, not hard-floored."""
+    from app.detection.image_detector import boost_score
+
+    result = boost_score(0.55, is_ai_likely=True)
+    assert abs(result - 0.6625) < 1e-6
+
+
+def test_boost_score_does_not_hard_floor():
+    """Score below old hard floor (0.85) is NOT snapped to 0.85."""
+    from app.detection.image_detector import boost_score
+
+    result = boost_score(0.55, is_ai_likely=True)
+    assert result < 0.85
+
+
+def test_boost_score_strong_signal_small_bump():
+    """Strong AI signal gets only a small additional nudge."""
+    from app.detection.image_detector import boost_score
+
+    result = boost_score(0.90, is_ai_likely=True)
+    assert abs(result - 0.925) < 1e-6
+
+
+def test_boost_score_human_result_unchanged():
+    """Human-likely results are never boosted."""
+    from app.detection.image_detector import boost_score
+
+    assert boost_score(0.10, is_ai_likely=False) == 0.10
+    assert boost_score(0.55, is_ai_likely=False) == 0.55

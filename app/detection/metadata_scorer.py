@@ -61,9 +61,16 @@ def get_tiered_signature_score(full_dump: str, clean_dump: str) -> tuple:
     clean_dump = clean_dump.lower()
 
     for word in TIER_1_GENERATORS:
-        if word in full_dump:
-            signals.append(f"Found definite generator signature: '{word}'")
-            return 0.99, signals
+        if len(word) <= 4:
+            # Short words (e.g. "sora", "flux", "luma") match too broadly as substrings.
+            # Require a word boundary and return a soft score — let Gemini make the call.
+            if re.search(r'\b' + re.escape(word) + r'\b', full_dump):
+                signals.append(f"Found short generator keyword (soft signal): '{word}'")
+                score = max(score, 0.70)
+        else:
+            if word in full_dump:
+                signals.append(f"Found definite generator signature: '{word}'")
+                return 0.99, signals
 
     tier_2_hits = 0
     for word in TIER_2_TECH_TERMS:

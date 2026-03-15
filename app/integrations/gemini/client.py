@@ -11,7 +11,7 @@ import io
 import json
 import time
 import logging
-from PIL import Image
+from PIL import Image, ImageFilter, ImageStat, ImageMath
 from google import genai
 from google.genai import types
 from typing import Union
@@ -40,6 +40,46 @@ client = genai.Client(
         )
     )
 )
+
+
+def _compute_noise_cv(img: Image.Image) -> float:
+    """
+    Computes noise spatial CV (coefficient of variation across quadrants).
+
+    Uses grayscale luminance + 32-bit float signed residual (I - B) to preserve
+    the true statistical distribution of the noise. The previous implementation
+    used ImageChops.difference (absolute |I-B|) in 8-bit uint, which:
+      - Folds the signed noise distribution → artificially crushes variance
+      - Loses sub-integer noise shifts (1-5px) to rounding/clipping
+
+    Low CV = unnaturally uniform noise across all image regions = AI diffusion signal.
+    High CV = spatially-varied organic noise = real camera sensor noise.
+
+    Returns 0.0 (neutral / hint suppressed) if the image is too small to split
+    into four meaningful quadrants (< 8px in either dimension).
+    """
+    w, h = img.size
+    if w < 8 or h < 8:
+        return 0.0
+
+    img_gray  = img.convert("L")
+    blurred   = img_gray.filter(ImageFilter.GaussianBlur(radius=settings.forensic_noise_radius))
+    img_f     = img_gray.convert("F")
+    blurred_f = blurred.convert("F")
+    # Signed float32 residual — lambda_eval preserves negatives; avoids 8-bit clipping/folding
+    noise = ImageMath.lambda_eval(lambda args: args["a"] - args["b"], a=img_f, b=blurred_f)
+
+    mx, my = w // 2, h // 2
+    quadrants = [
+        noise.crop((0,  0,  mx, my)),
+        noise.crop((mx, 0,  w,  my)),
+        noise.crop((0,  my, mx, h)),
+        noise.crop((mx, my, w,  h)),
+    ]
+    q_vars = [ImageStat.Stat(q).var[0] for q in quadrants]
+    mean_var = sum(q_vars) / 4
+    std_var  = (sum((v - mean_var) ** 2 for v in q_vars) / 4) ** 0.5
+    return std_var / (mean_var + 1e-6)
 
 
 def _resize_if_needed(img: Image.Image) -> Image.Image:
@@ -87,6 +127,30 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image], pre_calculate
             img_to_close.append(img_rgb)
             img_working = img_rgb
 
+        # Compute noise_cv cheaply (~20ms). Only injects a hint when the value
+        # falls in [forensic_noise_cv_floor, forensic_noise_cv_ceil) — a range
+        # that contains only AI images and zero real images in the gold dataset.
+        # Outside that range the signal is too ambiguous to be directional.
+        # Wrapped in try-except so any PIL edge-case never fails the full inference call.
+        noise_hint = ""
+        try:
+            noise_cv = _compute_noise_cv(img_working)
+            if settings.forensic_noise_cv_floor <= noise_cv < settings.forensic_noise_cv_ceil:
+                noise_hint = (
+                    f" [Forensic note: noise spatial uniformity score {noise_cv:.3f} is in a "
+                    f"range consistent with AI diffusion output — examine micro-texture "
+                    f"consistency across flat regions and edges especially carefully.]"
+                )
+                logger.info("forensic_noise_hint_fired", extra={
+                    "action": "forensic_noise_hint_fired",
+                    "noise_cv": round(noise_cv, 4),
+                })
+        except Exception as noise_err:
+            logger.warning("forensic_noise_cv_failed", extra={
+                "action": "forensic_noise_cv_failed",
+                "error": str(noise_err),
+            })
+
         img_byte_arr = io.BytesIO()
         img_working.save(img_byte_arr, format='JPEG', quality=settings.gemini_jpeg_quality)
         image_bytes = img_byte_arr.getvalue()
@@ -103,7 +167,10 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image], pre_calculate
             response_schema=DetectionResult,
         )
 
-        execution_query = "Carefully analyze this image for generative AI manipulation, strictly following the system instructions."
+        execution_query = (
+            "Carefully analyze this image for generative AI manipulation, "
+            f"strictly following the system instructions.{noise_hint}"
+        )
 
         t0 = time.perf_counter()
         response = client.models.generate_content(
@@ -111,7 +178,7 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image], pre_calculate
             contents=[
                 types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
                 execution_query,
-                execution_query
+                execution_query,
             ],
             config=config
         )
@@ -121,7 +188,7 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image], pre_calculate
 
         result = {
             "confidence": parsed_result.confidence,
-            "explanation": parsed_result.explanation,
+            "signal_category": parsed_result.signal_category,
             "quality_score": quality_score
         }
 
@@ -160,7 +227,8 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image], pre_calculate
             "call_type": "single_image",
             "error": str(e),
         })
-        return {"confidence": -1.0}
+        # confidence=-1.0 signals a hard failure to image_detector.py
+        return {"confidence": -1.0, "signal_category": "multiple_subtle_ai_artifacts_present"}
 
 
 def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image, bytes]]) -> dict:
@@ -233,7 +301,7 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image, b
         )
 
         execution_query = "Analyze EACH of the attached images for SYNTHETIC GENERATION ARTIFACTS, strictly following the system instructions."
-        request_contents = image_parts + [execution_query, execution_query]
+        request_contents = image_parts + [execution_query]
 
         t0 = time.perf_counter()
         response = client.models.generate_content(
@@ -269,7 +337,7 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image, b
             })
 
         if not raw_results:
-            return {"confidence": 0.5, "explanation": "Suspicious: No clear analysis returned."}
+            return {"confidence": 0.5, "signal_category": "multiple_subtle_ai_artifacts_present"}
 
         ai_votes = [r for r in raw_results if r.confidence > settings.gemini_ai_vote_threshold]
         not_ai_votes = [r for r in raw_results if r.confidence <= settings.gemini_ai_vote_threshold]
@@ -278,24 +346,24 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image, b
 
         if len(ai_votes) > len(not_ai_votes):
             avg_conf = sum(r.confidence for r in ai_votes) / len(ai_votes)
-            best_explanation_item = max(ai_votes, key=lambda x: x.confidence)
+            best = max(ai_votes, key=lambda x: x.confidence)
             final_result = {
                 "confidence": round(avg_conf, 2),
-                "explanation": best_explanation_item.explanation,
+                "signal_category": best.signal_category,
                 "quality_context": quality_context
             }
         else:
             if not_ai_votes:
                 avg_conf = sum(r.confidence for r in not_ai_votes) / len(not_ai_votes)
-                best_explanation_item = min(not_ai_votes, key=lambda x: x.confidence)
-                explanation = best_explanation_item.explanation
+                best = min(not_ai_votes, key=lambda x: x.confidence)
+                signal = best.signal_category
             else:
                 avg_conf = 0.0
-                explanation = "No visual anomalies detected"
+                signal = "no_visual_anomalies_detected"
 
             final_result = {
                 "confidence": round(avg_conf, 2),
-                "explanation": explanation,
+                "signal_category": signal,
                 "quality_context": quality_context
             }
 
