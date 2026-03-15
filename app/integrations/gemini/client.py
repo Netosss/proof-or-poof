@@ -178,6 +178,7 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image], pre_calculate
             contents=[
                 types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
                 execution_query,
+                execution_query,
             ],
             config=config
         )
