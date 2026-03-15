@@ -37,6 +37,10 @@ HARDWARE_TAGS = {
     "FNumber", "BodySerialNumber", "LensModel", "GPSLatitude"
 }
 
+def _label_for(signal_category: str) -> str:
+    """Convert a snake_case signal_category key to a human-readable label."""
+    return signal_category.replace("_", " ").capitalize()
+
 
 def boost_score(score: float, is_ai_likely: bool = True) -> float:
     """
@@ -269,7 +273,8 @@ async def detect_ai_media_image_logic(
             raw_conf = forensic_probability if is_ai_likely else (1.0 - forensic_probability)
             final_conf = boost_score(raw_conf, is_ai_likely=is_ai_likely)
 
-            cached_explanation = cached_result.get("explanation", "Analyzed via second layer of AI analysis (Cached)")
+            cached_signal = cached_result.get("signal_category", "multiple_subtle_ai_artifacts_present")
+            cached_explanation = _label_for(cached_signal)
             cached_quality_context = cached_result.get("quality_context", "Unknown")
 
             return {
@@ -361,13 +366,14 @@ async def detect_ai_media_image_logic(
     })
 
     gemini_score = float(gemini_res.get("confidence", -1.0))
-    gemini_explanation = gemini_res.get("explanation", "Analyzed via second layer of AI analysis")
+    gemini_signal = gemini_res.get("signal_category", "multiple_subtle_ai_artifacts_present")
+    gemini_explanation = _label_for(gemini_signal)
     quality_context = gemini_res.get("quality_context", "Unknown")
 
     if gemini_score >= 0.0:
         await set_cached_result(img_hash, {
             "ai_score": gemini_score,
-            "explanation": gemini_explanation,
+            "signal_category": gemini_signal,
             "is_gemini_used": True,
             "gpu_time_ms": 0,
             "quality_context": quality_context

@@ -187,7 +187,7 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image], pre_calculate
 
         result = {
             "confidence": parsed_result.confidence,
-            "explanation": parsed_result.explanation,
+            "signal_category": parsed_result.signal_category,
             "quality_score": quality_score
         }
 
@@ -226,7 +226,8 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image], pre_calculate
             "call_type": "single_image",
             "error": str(e),
         })
-        return {"confidence": -1.0}
+        # confidence=-1.0 signals a hard failure to image_detector.py
+        return {"confidence": -1.0, "signal_category": "multiple_subtle_ai_artifacts_present"}
 
 
 def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image, bytes]]) -> dict:
@@ -335,7 +336,7 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image, b
             })
 
         if not raw_results:
-            return {"confidence": 0.5, "explanation": "Suspicious: No clear analysis returned."}
+            return {"confidence": 0.5, "signal_category": "multiple_subtle_ai_artifacts_present"}
 
         ai_votes = [r for r in raw_results if r.confidence > settings.gemini_ai_vote_threshold]
         not_ai_votes = [r for r in raw_results if r.confidence <= settings.gemini_ai_vote_threshold]
@@ -344,24 +345,24 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image, b
 
         if len(ai_votes) > len(not_ai_votes):
             avg_conf = sum(r.confidence for r in ai_votes) / len(ai_votes)
-            best_explanation_item = max(ai_votes, key=lambda x: x.confidence)
+            best = max(ai_votes, key=lambda x: x.confidence)
             final_result = {
                 "confidence": round(avg_conf, 2),
-                "explanation": best_explanation_item.explanation,
+                "signal_category": best.signal_category,
                 "quality_context": quality_context
             }
         else:
             if not_ai_votes:
                 avg_conf = sum(r.confidence for r in not_ai_votes) / len(not_ai_votes)
-                best_explanation_item = min(not_ai_votes, key=lambda x: x.confidence)
-                explanation = best_explanation_item.explanation
+                best = min(not_ai_votes, key=lambda x: x.confidence)
+                signal = best.signal_category
             else:
                 avg_conf = 0.0
-                explanation = "No visual anomalies detected"
+                signal = "no_visual_anomalies_detected"
 
             final_result = {
                 "confidence": round(avg_conf, 2),
-                "explanation": explanation,
+                "signal_category": signal,
                 "quality_context": quality_context
             }
 
