@@ -40,12 +40,15 @@ HARDWARE_TAGS = {
 
 def boost_score(score: float, is_ai_likely: bool = True) -> float:
     """
-    Boost confidence only for AI-likely results.
-    Human-likely results keep their raw confidence to avoid misleading scores.
+    Soft proportional boost for AI-likely results only.
+
+    Nudges uncertain AI scores (e.g. 0.55 → 0.66) without hard-flooring every
+    result at 0.85, which inflated false positives. Strong signals (e.g. 0.90)
+    are boosted only slightly (→ 0.925). Human results are never boosted.
     """
     if is_ai_likely:
-        return max(0.85, score)
-    return score  # No boost for human results
+        return score + (1.0 - score) * 0.25
+    return score
 
 
 async def detect_ai_media_image_logic(
