@@ -78,9 +78,16 @@ async def detect_ai_media_image_logic(
         try:
             with Image.open(file_path) as img:
                 width, height = img.size
+                img_format = (img.format or "unknown").lower()
             source_for_hash = file_path
             file_size = os.path.getsize(file_path)
-        except Exception:
+        except Exception as open_err:
+            logger.error("image_open_failed", extra={
+                "action": "image_open_failed",
+                "file_path_hint": os.path.basename(file_path) if file_path else "none",
+                "error": str(open_err),
+                "error_type": type(open_err).__name__,
+            })
             return {
                 "summary": "Analysis Failed",
                 "confidence_score": 0.0,
@@ -109,7 +116,13 @@ async def detect_ai_media_image_logic(
             file_size = trusted_metadata["fileSize"]
 
     slim_log = {k: (str(v)[:20] + "..." if len(str(v)) > 20 else str(v)) for k, v in exif.items()}
-    logger.info("metadata_raw", extra={"action": "metadata_raw", "exif_slim": slim_log})
+    logger.info("metadata_raw", extra={
+        "action": "metadata_raw",
+        "exif_slim": slim_log,
+        "exif_key_count": len(exif),
+        "dimensions": f"{width}x{height}",
+        "file_size_bytes": file_size,
+    })
 
     # Stringify values to handle non-JSON-serializable types (IFDRational, bytes, etc.)
     clean_metadata = f" {json.dumps({k: str(v) for k, v in exif.items()})} "
@@ -337,7 +350,12 @@ async def detect_ai_media_image_logic(
     logger.info("gemini_triggered", extra={
         "action": "gemini_triggered",
         "total_pixels": total_pixels,
+        "dimensions": f"{width}x{height}",
+        "file_size_bytes": file_size,
         "tiered_score": round(tiered_score, 2),
+        "human_score": round(human_score, 2),
+        "ai_score": round(ai_score, 2),
+        "source": "frame" if frame else "file",
     })
 
     pre_calc_context = None
@@ -353,7 +371,11 @@ async def detect_ai_media_image_logic(
 
         pre_calc_context = await asyncio.to_thread(_get_context_safe)
     except Exception as e:
-        logger.warning("gemini_precalc_failed", extra={"action": "gemini_precalc_failed", "error": str(e)})
+        logger.warning("gemini_precalc_failed", extra={
+            "action": "gemini_precalc_failed",
+            "error": str(e),
+            "error_type": type(e).__name__,
+        })
 
     gemini_res = await asyncio.to_thread(
         analyze_image_pro_turbo, source_for_gemini,

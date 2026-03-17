@@ -8,6 +8,7 @@ ffprobe-based metadata extraction, and video metadata scoring.
 import asyncio
 import json
 import logging
+import os
 import cv2
 import numpy as np
 
@@ -89,6 +90,8 @@ def extract_video_frames(video_path: str) -> tuple:
             logger.info("video_frames_skipped", extra={
                 "action": "video_frames_skipped",
                 "quality_rejected": quality_rejected,
+                "frames_kept": len(frames),
+                "total_sample_points": len(sample_points),
             })
 
         # Fallback if too many frames rejected
@@ -104,7 +107,12 @@ def extract_video_frames(video_path: str) -> tuple:
             cap.release()
 
     except Exception as e:
-        logger.error("video_frames_error", extra={"action": "video_frames_error", "error": str(e)})
+        logger.error("video_frames_error", extra={
+            "action": "video_frames_error",
+            "error": str(e),
+            "error_type": type(e).__name__,
+            "video_path_hint": os.path.basename(video_path) if video_path else "unknown",
+        })
 
     return frames, quality_rejected
 
@@ -124,11 +132,22 @@ async def get_video_metadata(video_path: str) -> dict:
             if proc.returncode == 0:
                 return json.loads(stdout.decode())
         except asyncio.TimeoutError:
-            logger.warning("video_ffprobe_timeout", extra={"action": "video_ffprobe_timeout"})
+            logger.warning("video_ffprobe_timeout", extra={
+                "action": "video_ffprobe_timeout",
+                "video_path_hint": os.path.basename(video_path),
+                "timeout_sec": settings.ffprobe_timeout_sec,
+            })
     except FileNotFoundError:
-        logger.warning("video_ffprobe_missing", extra={"action": "video_ffprobe_missing"})
+        logger.warning("video_ffprobe_missing", extra={
+            "action": "video_ffprobe_missing",
+            "hint": "ffprobe not found in PATH — install ffmpeg package",
+        })
     except Exception as e:
-        logger.error("video_metadata_error", extra={"action": "video_metadata_error", "error": str(e)})
+        logger.error("video_metadata_error", extra={
+            "action": "video_metadata_error",
+            "error": str(e),
+            "error_type": type(e).__name__,
+        })
     finally:
         if proc is not None:
             try:

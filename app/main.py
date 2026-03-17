@@ -141,11 +141,14 @@ async def custom_http_exception_handler(request: Request, exc: StarletteHTTPExce
             pass
 
     response_data = {"detail": exc.detail}
-    logger.info("http_exception_response", extra={
+    log_level = logger.warning if exc.status_code < 500 else logger.error
+    log_level("http_exception_response", extra={
         "action": "http_exception_response",
         "status_code": exc.status_code,
-        "detail": str(exc.detail),
+        "detail": str(exc.detail)[:500],
         "path": request.url.path,
+        "method": request.method,
+        "user_agent": request.headers.get("user-agent", "")[:200],
     })
 
     return JSONResponse(

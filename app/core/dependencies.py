@@ -27,7 +27,7 @@ class SecurityManager:
     async def check_rate_limit(self, identifier: str) -> None:
         await check_rate_limit(identifier)
 
-    def validate_file(
+    async def validate_file(
         self,
         filename: str,
         filesize: int,
@@ -36,7 +36,7 @@ class SecurityManager:
         *,
         mode: str = "detect",
     ) -> bool:
-        return validate_file(filename, filesize, file_path, content_type, mode=mode)
+        return await validate_file(filename, filesize, file_path, content_type, mode=mode)
 
     def sanitize_log_message(self, message: str) -> str:
         return sanitize_log_message(message)
@@ -59,7 +59,7 @@ class SecurityManager:
         """Rate-limits, validates, executes, and sanitizes logs for a media processing call."""
         identifier = uid or request.client.host
         await self.check_rate_limit(identifier)
-        self.validate_file(filename, filesize, temp_path)
+        await self.validate_file(filename, filesize, temp_path)
 
         try:
             start_time = time.time()
@@ -68,13 +68,18 @@ class SecurityManager:
             logger.info("media_processed_success", extra={
                 "action": "media_processed_success",
                 "duration_ms": round(duration * 1000, 1),
+                "media_file": filename,
+                "filesize_bytes": filesize,
             })
             return result
         except Exception as e:
             logger.error("media_processed_error", extra={
                 "action": "media_processed_error",
+                "media_file": filename,
+                "filesize_bytes": filesize,
                 "error": self.sanitize_log_message(str(e)),
-            })
+                "error_type": type(e).__name__,
+            }, exc_info=True)
             raise HTTPException(status_code=500, detail="Internal processing error.")
 
 
