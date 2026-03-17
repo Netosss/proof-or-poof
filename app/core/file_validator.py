@@ -4,14 +4,14 @@ File validation and log sanitization utilities.
 Validation runs in three layers (cheapest → most expensive):
   1. MIME type   — from the multipart Content-Type header
   2. Extension   — from the filename
-  3. Magic bytes — PIL.verify() + PIL.load() / ffprobe + cv2 (actual file I/O)
+  3. Magic bytes — PIL.verify() + PIL.load() / ffprobe (actual file I/O)
 
 Layer 3 is the real security gate; layers 1 & 2 are cheap early rejects.
 
 Security notes:
-  - Layer 3 runs via asyncio.to_thread so PIL/cv2 blocking I/O never stalls
+  - Layer 3 runs via asyncio.to_thread so PIL/ffprobe blocking I/O never stalls
     the event loop.
-  - PIL/cv2 error strings are sanitized before being surfaced in HTTP responses
+  - PIL/ffprobe error strings are sanitized before being surfaced in HTTP responses
     to prevent temp-file path leaks (e.g. /tmp/tmpXYZ123).
   - File size is measured from disk (os.path.getsize) when a path is available,
     not trusted from the caller's filesize parameter which can be spoofed via a
@@ -31,7 +31,6 @@ import re
 import subprocess
 import logging
 
-import cv2
 from fastapi import HTTPException
 from PIL import Image
 
@@ -50,7 +49,7 @@ logger = logging.getLogger(__name__)
 #
 # Intentional design decision: this shifts Layer 1 from "deny unknown" to
 # "allow unknown image/video".  This is safe here because Layer 3 is the real
-# gate — PIL verify/load and cv2 will reject anything that is not a genuine
+# gate — PIL verify/load and ffprobe will reject anything that is not a genuine
 # image or video regardless of what the MIME header claims.  Using a blocklist
 # means new formats (e.g. AVIF, HEIF variants, future codecs) work without
 # code changes, while the known dangerous types (SVG, WMF, EPS, Flash) are
@@ -187,12 +186,9 @@ ALLOWED_INPAINT_EXTENSIONS: frozenset[str] = ALLOWED_IMAGE_EXTENSIONS
 
 # ---------------------------------------------------------------------------
 # Video codecs that cannot be decoded on the current platform.
-# ffprobe is only called when cv2 fails (failure path), so this dict is
-# consulted only for broken/exotic files — not on every video upload.
-#
 # Expand this dict based on deployment platform capabilities.  For example,
-# H.265/HEVC decoding is hardware-dependent; add "hevc" here if your server
-# reports cv2 failures with that codec.
+# H.265/HEVC decoding may be unavailable on some servers; add "hevc" here if
+# ffprobe reports that codec but uploads consistently fail downstream.
 # ---------------------------------------------------------------------------
 _UNSUPPORTED_VIDEO_CODECS: dict[str, str] = {
     "av1": (
@@ -211,13 +207,19 @@ _UNSUPPORTED_VIDEO_CODECS: dict[str, str] = {
 # ---------------------------------------------------------------------------
 # Blocking helpers — run via asyncio.to_thread to keep the event loop free.
 # All path-containing error messages are sanitized before being returned so
-# that PIL/cv2 strings like "/tmp/tmpXYZ123 is truncated" never reach clients.
+# that PIL strings like "/tmp/tmpXYZ123 is truncated" never reach clients.
 # ---------------------------------------------------------------------------
 
-def _probe_video_codec(file_path: str) -> str:
+def _probe_video_codec(file_path: str) -> tuple[str, list | None]:
     """
-    Return the primary video stream codec name (lowercase) via ffprobe.
-    Returns an empty string if ffprobe is unavailable or the probe fails.
+    Probe a video file with ffprobe and return (codec_name, streams).
+
+    Return values:
+      (codec, streams)  — ffprobe ran; streams is a list (may be empty if no video track)
+      ("", None)        — ffprobe is not installed; caller raises a clear error
+
+    Logs a warning on FileNotFoundError so ops teams notice the missing
+    ffmpeg dependency on new server deployments.
     Blocking — intended to run inside asyncio.to_thread.
     """
     try:
@@ -233,11 +235,17 @@ def _probe_video_codec(file_path: str) -> str:
         if result.returncode == 0:
             data = json.loads(result.stdout)
             streams = data.get("streams", [])
-            if streams:
-                return streams[0].get("codec_name", "").lower()
+            codec = streams[0].get("codec_name", "").lower() if streams else ""
+            return codec, streams
+        return "", []
+    except FileNotFoundError:
+        logger.warning("ffprobe_not_found", extra={
+            "action": "ffprobe_not_found",
+            "hint": "ffprobe not found in PATH — install ffmpeg package",
+        })
+        return "", None  # None signals "ffprobe unavailable" to the caller
     except Exception:
-        pass
-    return ""
+        return "", []
 
 
 def _check_image_magic_bytes(file_path: str, ext: str) -> None:
@@ -261,6 +269,9 @@ def _check_image_magic_bytes(file_path: str, ext: str) -> None:
         ) from exc
 
     # Must re-open after verify() — PIL exhausts the file pointer during verify.
+    # Initialize to ext so the except clause always has a usable value even if
+    # Image.open() raises before detected_format is assigned.
+    detected_format = ext
     try:
         with Image.open(file_path) as img:
             detected_format = (img.format or "unknown").lower()
@@ -275,38 +286,37 @@ def _check_image_magic_bytes(file_path: str, ext: str) -> None:
 
 def _check_video_magic_bytes(file_path: str, ext: str) -> None:
     """
-    Blocking video validation: cv2 frame read, with ffprobe on failure only.
+    Blocking video validation via ffprobe (subprocess, process-isolated).
 
-    Happy path (valid video):
-      cv2 opens → reads one frame → returns immediately, no subprocess spawned.
+    A crafted malformed video can trigger a SIGSEGV in OpenCV's C/C++ layer
+    that cannot be caught by Python try/except and kills the worker process.
+    Because ffprobe runs as a separate OS process, any crash is contained:
+    subprocess.run() returns a non-zero exit code and the Python app survives.
 
-    Failure path (corrupt / unsupported codec):
-      cv2 fails → ffprobe runs to identify the codec → returns a codec-specific
-      415 (e.g. AV1) or a generic 400 with the codec name for context.
-
-    Deferring ffprobe to the failure path avoids spawning a subprocess on every
-    video upload and removes a potential process-pool exhaustion vector under
-    high traffic.
+    ffprobe is a hard dependency here — if it is missing, a clear ValueError
+    is raised (the rest of the video pipeline requires it anyway).
 
     Raises HTTPException(415) for known-unsupported codecs (e.g. AV1).
     Raises ValueError with a sanitized message for other read failures.
     Blocking — intended to run inside asyncio.to_thread.
     """
-    cap = cv2.VideoCapture(file_path)
-    can_open = cap.isOpened()
-    can_read = False
-    if can_open:
-        ret, _ = cap.read()
-        can_read = ret
-    cap.release()
+    codec, streams = _probe_video_codec(file_path)
 
-    if can_open and can_read:
-        # Happy path — cv2 succeeded, no subprocess needed.
-        return
+    if streams is None:
+        # ffprobe is not installed.  The rest of the video pipeline (frame
+        # extraction, metadata scoring) also requires ffprobe, so this server
+        # is already broken for video processing.  Fail clearly rather than
+        # silently falling back to cv2 and masking the missing dependency.
+        raise ValueError(
+            "ffprobe is not installed — video validation is unavailable. "
+            "Install the ffmpeg package and restart the server."
+        )
 
-    # cv2 failed.  Run ffprobe now to identify the codec and surface a
-    # codec-specific 415 instead of a confusing generic 400.
-    codec = _probe_video_codec(file_path)
+    if not streams:
+        raise ValueError(
+            f"File contains no readable video stream (ext: {ext}). "
+            "The file may be corrupted, audio-only, or use an unsupported container."
+        )
 
     if codec in _UNSUPPORTED_VIDEO_CODECS:
         raise HTTPException(
@@ -314,19 +324,7 @@ def _check_video_magic_bytes(file_path: str, ext: str) -> None:
             detail=_UNSUPPORTED_VIDEO_CODECS[codec],
         )
 
-    if not can_open:
-        raise ValueError(
-            f"Could not open video stream "
-            f"(ext: {ext}, codec: {codec or 'unknown'}). "
-            "The file may be corrupted or encoded with an unsupported codec."
-        )
-
-    raise ValueError(
-        f"Could not read video frames "
-        f"(ext: {ext}, codec: {codec or 'unknown'}). "
-        "Ensure the file is a valid, non-corrupted video. "
-        "H.264 (MP4) is recommended for best compatibility."
-    )
+    # ffprobe confirmed at least one valid video stream — file is good.
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +343,7 @@ async def validate_file(
     Validate a file upload in three layers:
       1. MIME type (if provided by the multipart boundary)
       2. File extension
-      3. Magic bytes (PIL / ffprobe + cv2) — async, runs in thread pool
+      3. Magic bytes (PIL / ffprobe) — async, runs in thread pool
 
     Raises HTTPException (400 / 413 / 415) on failure.
     Returns True on success.
@@ -434,7 +432,7 @@ async def validate_file(
                 f"Unsupported file extension '{ext}'. "
                 "Detection supports all common image formats (JPEG, PNG, WebP, GIF, "
                 "BMP, TIFF, HEIC, AVIF, PSD, TGA, ICO, JPEG 2000…) and video formats "
-                "(MP4, MOV, AVI, MKV, WebM, FLV, TS, MTS, M4V, WMV and many more)."
+                "(MP4, MOV, AVI, MKV, WebM, FLV, MTS, M2TS, M4V, WMV and many more)."
             )
         raise HTTPException(status_code=415, detail=detail)
 
@@ -458,7 +456,7 @@ async def validate_file(
         )
 
     # --- Layer 3: Magic bytes ---
-    # Run blocking PIL / ffprobe / cv2 calls in a thread pool so the async
+    # Run blocking PIL / ffprobe calls in a thread pool so the async
     # event loop is never stalled waiting for file I/O.
     if file_path:
         try:
@@ -507,7 +505,18 @@ async def validate_file(
 
 
 def sanitize_log_message(message: str) -> str:
-    """Strip sensitive server-side file paths from log messages and HTTP responses."""
-    msg = re.sub(r'\/[^\s]+\/tmp[a-zA-Z0-9_]+', '[TEMP_FILE]', message)
-    msg = re.sub(r'\/[^\s]+\/([^\/\s]+)', r'.../\1', msg)
+    """Strip sensitive server-side file paths from log messages and HTTP responses.
+
+    Two passes:
+      1. /tmp/tmpXYZ123 — common in PIL error strings; replaced with [TEMP_FILE].
+      2. Any absolute Unix path — replaced with .../filename.
+
+    The negative lookbehind (?<!\\w) in pass 2 anchors matches to paths that are
+    NOT preceded by a word character, which prevents false positives on:
+      - MIME types  (application/json  — '/' preceded by 'n')
+      - URL paths   (host/path         — '/' preceded by 't')
+      - Fractions   (4/3               — '/' preceded by '4')
+    """
+    msg = re.sub(r'/tmp/tmp[a-zA-Z0-9_]+', '[TEMP_FILE]', message)
+    msg = re.sub(r'(?<!\w)(?:/[a-zA-Z0-9_.-]+)+/([a-zA-Z0-9_.-]+)', r'.../\1', msg)
     return msg
