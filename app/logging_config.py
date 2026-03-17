@@ -32,14 +32,39 @@ request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("request_id
 device_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("device_id", default="")
 user_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("user_id", default="")
 
+# Map Python log levels to Axiom/standard severity strings (lowercase).
+# Without this, Axiom sees no "severity" field and defaults everything to "error".
+_LEVEL_TO_SEVERITY: dict[int, str] = {
+    logging.DEBUG: "debug",
+    logging.INFO: "info",
+    logging.WARNING: "warning",
+    logging.ERROR: "error",
+    logging.CRITICAL: "critical",
+}
+
 
 class RequestContextFilter(logging.Filter):
-    """Injects per-request context into every LogRecord."""
+    """
+    Injects per-request context and severity into every LogRecord.
+
+    Applied to the root logger so it runs exactly once per record regardless
+    of how many handlers are attached.  Fields injected:
+      - request_id, device_id, user_id  — from ContextVars set by middleware
+      - severity                         — lowercase level name ("info", "warning", …)
+      - level                            — alias for severity (Axiom accepts both)
+    """
 
     def filter(self, record: logging.LogRecord) -> bool:
         record.request_id = request_id_var.get("")
         record.device_id = device_id_var.get("")
         record.user_id = user_id_var.get("")
+        # Axiom uses "severity" / "level" to colour-code and filter log entries.
+        # Python's default levelname ("INFO", "WARNING") is not recognised, so
+        # Axiom falls back to "error" for every record.  Inject both field names
+        # with the correct lowercase value to fix the severity display.
+        sev = _LEVEL_TO_SEVERITY.get(record.levelno, "info")
+        record.severity = sev
+        record.level = sev
         return True
 
 
@@ -82,21 +107,25 @@ def configure_json_logging() -> None:
       2. _SafeAxiomHandler — direct SDK delivery to Axiom
                              (only when AXIOM_TOKEN env var is present)
 
-    Both handlers share the same RequestContextFilter so every record
-    automatically carries request_id, device_id, and user_id.
+    A single RequestContextFilter is added to the ROOT LOGGER so it runs
+    exactly once per LogRecord (not once per handler).  This ensures
+    request_id / device_id / severity are available to every handler,
+    including the AxiomHandler which stores record.__dict__ directly.
     """
     root = logging.getLogger()
     ctx_filter = RequestContextFilter()
+
+    # Apply filter at the root logger level — runs once per record.
+    root.addFilter(ctx_filter)
 
     # --- 1. Stdout / Railway handler (always active) ---
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(
         jsonlogger.JsonFormatter(
             "%(asctime)s %(levelname)s %(name)s %(message)s "
-            "%(request_id)s %(device_id)s %(user_id)s"
+            "%(request_id)s %(device_id)s %(user_id)s %(severity)s"
         )
     )
-    stream_handler.addFilter(ctx_filter)
     handlers: list[logging.Handler] = [stream_handler]
 
     # --- 2. Axiom handler (only when AXIOM_TOKEN is configured) ---
@@ -110,7 +139,6 @@ def configure_json_logging() -> None:
 
             axiom_client = Client(token=axiom_token)
             raw_handler = AxiomHandler(axiom_client, axiom_dataset)
-            raw_handler.addFilter(ctx_filter)
 
             # Wrap in a safe handler that surfaces flush errors to stderr
             # and marks the internal timer as daemon.
@@ -119,16 +147,16 @@ def configure_json_logging() -> None:
 
             # Confirm Axiom is wired up — visible in Railway and in Axiom.
             stream_handler.stream.write(
-                f'{{"level":"INFO","message":"axiom_handler_configured",'
+                f'{{"level":"INFO","severity":"info","message":"axiom_handler_configured",'
                 f'"dataset":"{axiom_dataset}"}}\n'
             )
         except Exception as exc:
             stream_handler.stream.write(
-                f'{{"level":"WARNING","message":"axiom_handler_init_failed","error":"{exc}"}}\n'
+                f'{{"level":"WARNING","severity":"warning","message":"axiom_handler_init_failed","error":"{exc}"}}\n'
             )
     else:
         stream_handler.stream.write(
-            '{"level":"WARNING","message":"axiom_handler_skipped",'
+            '{"level":"WARNING","severity":"warning","message":"axiom_handler_skipped",'
             '"reason":"AXIOM_TOKEN not set — logs go to stdout only"}\n'
         )
 

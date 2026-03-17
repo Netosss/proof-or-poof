@@ -7,6 +7,7 @@ Grants a free retry token for 10 minutes so users can re-download without being 
 """
 
 import hashlib
+import io
 import logging
 import time
 import uuid
@@ -14,6 +15,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Request, UploadFile
 from fastapi.responses import Response
+from PIL import Image
 
 from app.config import settings
 from app.core.auth import check_ip_device_limit, get_client_ip, validate_device_id, verify_turnstile
@@ -29,6 +31,11 @@ from app.services.finance_service import log_transaction
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Inpainting"])
+
+# Formats the RunPod / LaMa GPU worker accepts directly.  Any other format
+# PIL can open is converted to JPEG before dispatch.  Defined at module level
+# to avoid recreating the set literal on every request.
+_INPAINT_PASSTHROUGH_FORMATS: frozenset[str] = frozenset({"jpeg", "png"})
 
 
 @router.post("/inpaint/image")
@@ -113,12 +120,56 @@ async def inpaint_image(
     # file_path is omitted — magic-bytes PIL check is skipped here because
     # run_gpu_inpainting will reject corrupt images naturally, and writing
     # to disk solely to verify is unnecessary for inpainting.
-    security_manager.validate_file(
+    await security_manager.validate_file(
         image.filename or "image",
         len(image_bytes),
         content_type=image.content_type or None,
         mode="inpaint",
     )
+
+    # Normalize unusual image formats to JPEG before sending to the GPU worker.
+    # RunPod / LaMa expects standard JPEG or PNG.  Formats like MPO, HEIC, AVIF,
+    # TIFF, PSD, TGA, ICO, DDS etc. must be converted first.
+    # JPEG and PNG are passed through unchanged to avoid an unnecessary re-encode.
+    try:
+        buf = io.BytesIO(image_bytes)
+        with Image.open(buf) as probe_img:
+            detected_fmt = (probe_img.format or "unknown").lower()
+            needs_conversion = detected_fmt not in _INPAINT_PASSTHROUGH_FORMATS
+
+        if needs_conversion:
+            buf.seek(0)
+            original_size = len(image_bytes)
+            with Image.open(buf) as src_img:
+                out = io.BytesIO()
+                src_img.convert("RGB").save(out, format="JPEG", quality=95)
+            image_bytes = out.getvalue()
+            image_size_mb = round(len(image_bytes) / (1024 * 1024), 2)
+            logger.info("inpaint_image_normalized", extra={
+                "action": "inpaint_image_normalized",
+                "inpaint_request_id": request_id,
+                "original_format": detected_fmt,
+                "original_size_bytes": original_size,
+                "converted_size_bytes": len(image_bytes),
+            })
+    except HTTPException:
+        raise
+    except Exception as conv_err:
+        logger.warning("inpaint_image_normalization_failed", extra={
+            "action": "inpaint_image_normalization_failed",
+            "inpaint_request_id": request_id,
+            "media_file": image.filename,
+            "error": str(conv_err),
+            "error_type": type(conv_err).__name__,
+        })
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Could not process the uploaded image file "
+                f"({image.filename or 'unknown'}). "
+                "Please convert it to JPEG or PNG and try again."
+            ),
+        )
 
     img_hash = hashlib.sha256(image_bytes).hexdigest()
     rc = redis_module.client

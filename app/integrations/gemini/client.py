@@ -144,11 +144,13 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image], pre_calculate
                 logger.info("forensic_noise_hint_fired", extra={
                     "action": "forensic_noise_hint_fired",
                     "noise_cv": round(noise_cv, 4),
+                    "image_size": f"{img_working.width}x{img_working.height}",
                 })
         except Exception as noise_err:
             logger.warning("forensic_noise_cv_failed", extra={
                 "action": "forensic_noise_cv_failed",
                 "error": str(noise_err),
+                "image_size": f"{img_working.width}x{img_working.height}" if img_working else "unknown",
             })
 
         img_byte_arr = io.BytesIO()
@@ -226,7 +228,9 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image], pre_calculate
             "action": "gemini_analyze_error",
             "call_type": "single_image",
             "error": str(e),
-        })
+            "error_type": type(e).__name__,
+            "image_source_type": "file_path" if isinstance(image_source, str) else "pil_image",
+        }, exc_info=True)
         # confidence=-1.0 signals a hard failure to image_detector.py
         return {"confidence": -1.0, "signal_category": "multiple_subtle_ai_artifacts_present"}
 
@@ -380,8 +384,10 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image, b
         logger.error("gemini_batch_error", extra={
             "action": "gemini_batch_error",
             "call_type": "batch_images",
+            "frame_count": len(image_sources),
             "error": str(e),
-        })
+            "error_type": type(e).__name__,
+        }, exc_info=True)
         return {"confidence": -1.0}
 
 

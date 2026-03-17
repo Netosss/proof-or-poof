@@ -28,12 +28,15 @@ from app.services.credit_engine import consume_credits, get_user_balance
 from app.services.credits_service import deduct_guest_credits, get_guest_wallet
 from app.services.detection_service import _generate_short_id, download_image, log_memory
 from app.services.finance_service import log_transaction
+from app.core.file_validator import ALLOWED_VIDEO_EXTENSIONS
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Detection"])
 
-VIDEO_SUFFIXES = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.gif'}
+# Kept in sync with file_validator so the media_type field in scan_completed
+# accurately reflects what was validated as a video.
+VIDEO_SUFFIXES = ALLOWED_VIDEO_EXTENSIONS
 
 
 @router.post("/detect", response_model=DetectionResponse)
@@ -152,7 +155,7 @@ async def detect(
     del file_content
 
     try:
-        security_manager.validate_file(filename, filesize, temp_path, upload_content_type)
+        await security_manager.validate_file(filename, filesize, temp_path, upload_content_type)
 
         if auth_user:
             uid = auth_user["uid"]

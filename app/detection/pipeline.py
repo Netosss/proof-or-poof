@@ -9,6 +9,7 @@ Top-level detection pipeline — public entry point for the /detect route.
 
 import os
 import asyncio
+import contextvars
 import logging
 
 from app.integrations.c2pa import get_c2pa_manifest
@@ -21,11 +22,14 @@ from app.detection.video_detector import (
     get_video_metadata_score,
 )
 from app.detection.image_detector import detect_ai_media_image_logic
+from app.core.file_validator import ALLOWED_VIDEO_EXTENSIONS
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-VIDEO_EXTENSIONS = ('.mp4', '.mov', '.avi', '.mkv', '.webm', '.gif')
+# Derived directly from the file validator so routing always stays in sync
+# with what validate_file() accepts as a video.
+VIDEO_EXTENSIONS = tuple(ALLOWED_VIDEO_EXTENSIONS)
 
 
 # ---------------------------------------------------------------------------
@@ -296,11 +300,23 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
         logger.info("video_batch_start", extra={"action": "video_batch_start"})
 
         loop = asyncio.get_running_loop()
+
+        # Explicitly copy the current context so request_id / device_id are
+        # available inside the thread-pool worker (run_in_executor copies
+        # context in Python 3.7+, but we make it explicit to be safe).
+        # Each executor call gets its own snapshot taken at dispatch time.
+        ctx_frames = contextvars.copy_context()
         frames, quality_rejected = await loop.run_in_executor(
-            None, extract_video_frames, file_path
+            None, ctx_frames.run, extract_video_frames, file_path
         )
 
         if not frames:
+            logger.warning("video_frames_empty", extra={
+                "action": "video_frames_empty",
+                "media_file": filename,
+                "quality_rejected": quality_rejected,
+                "error": "No usable frames could be extracted from the video",
+            })
             return {
                 "summary": "Analysis Failed",
                 "confidence_score": 0.0,
@@ -321,8 +337,9 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
             "quality_rejected": quality_rejected,
         })
 
+        ctx_gemini = contextvars.copy_context()
         gemini_result = await loop.run_in_executor(
-            None, analyze_batch_images_pro_turbo, frames
+            None, ctx_gemini.run, analyze_batch_images_pro_turbo, frames
         )
 
         confidence = gemini_result.get("confidence", 0.0)
