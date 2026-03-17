@@ -94,6 +94,13 @@ async def request_logging_middleware(request: Request, call_next):
     request_id_var.set(req_id)
     device_id_var.set(device_id)
 
+    # Tag the Sentry scope so any error captured during this request carries
+    # the device_id and client IP — makes crash reports actionable.
+    sentry_sdk.set_user({
+        "id": device_id or "anonymous",
+        "ip_address": request.client.host if request.client else None,
+    })
+
     t0 = time.perf_counter()
     response = await call_next(request)
     duration_ms = round((time.perf_counter() - t0) * 1000, 1)
@@ -150,6 +157,12 @@ async def custom_http_exception_handler(request: Request, exc: StarletteHTTPExce
         "method": request.method,
         "user_agent": request.headers.get("user-agent", "")[:200],
     })
+
+    # Send unexpected server errors to Sentry for developer alerting and
+    # stack-trace grouping.  4xx are expected user errors — they belong in
+    # Axiom dashboards, not Sentry issue trackers.
+    if exc.status_code >= 500:
+        sentry_sdk.capture_exception(exc)
 
     return JSONResponse(
         status_code=exc.status_code,
