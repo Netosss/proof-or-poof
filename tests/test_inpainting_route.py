@@ -188,3 +188,28 @@ def test_inpaint_gpu_failure_returns_500(client):
         stack.enter_context(patch("app.api.inpainting.log_transaction"))
         response = client.post("/inpaint/image", headers=HEADERS, files=_make_files())
     assert response.status_code == 500
+
+
+def test_inpaint_gpu_failure_restores_op_ref_token(client, mock_redis):
+    """If the GPU errors while processing a free retry, the op_ref token must be restored."""
+    token = str(uuid.uuid4())
+    mock_redis.seed(f"op_ref:{DEVICE_ID}:{token}", "1")
+
+    with _patches(wallet=WALLET_LOW) as stack:
+        stack.enter_context(
+            patch(
+                "app.api.inpainting.run_gpu_inpainting",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("GPU timeout"),
+            )
+        )
+        stack.enter_context(patch("app.api.inpainting.log_transaction"))
+        response = client.post(
+            "/inpaint/image",
+            headers={**HEADERS, "X-Op-Ref": token},
+            files=_make_files(),
+        )
+
+    assert response.status_code == 500
+    # Token must be back in Redis so the user can retry
+    assert mock_redis._store.get(f"op_ref:{DEVICE_ID}:{token}") is not None

@@ -237,6 +237,8 @@ async def inpaint_image(
             return Response(content=result_bytes, media_type="image/png", headers=headers)
 
         except Exception as e:
+            if is_free_retry and rc:
+                await rc.set(f"op_ref:{uid}:{op_ref}", "1", ex=600)
             logger.error("inpaint_gpu_failed", extra={
                 "action": "inpaint_gpu_failed",
                 "inpaint_request_id": request_id,
@@ -304,6 +306,8 @@ async def inpaint_image(
             return Response(content=result_bytes, media_type="image/png", headers=headers)
 
         except Exception as e:
+            if is_free_retry and rc:
+                await rc.set(f"op_ref:{device_id}:{op_ref}", "1", ex=600)
             logger.error("inpaint_gpu_failed", extra={
                 "action": "inpaint_gpu_failed",
                 "inpaint_request_id": request_id,
