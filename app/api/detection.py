@@ -194,6 +194,13 @@ async def detect(
         suffix = os.path.splitext(filename)[1].lower() or ".jpg"
         await security_manager.validate_file(filename, filesize, temp_path, upload_content_type)
 
+        # Rename to the correct extension so the pipeline can route video vs
+        # image correctly — pipeline.py uses file_path.endswith(VIDEO_EXTENSIONS)
+        # and will always fall through to the image path if the extension is .tmp.
+        proper_path = os.path.splitext(temp_path)[0] + suffix
+        os.rename(temp_path, proper_path)
+        temp_path = proper_path
+
         if auth_user:
             uid = auth_user["uid"]
 
