@@ -1,17 +1,26 @@
 """
-Detection request helpers: URL/base64 image downloading, short ID generation,
+Detection request helpers: URL/base64 media downloading, short ID generation,
 and memory usage logging.
 
-Security: download_image() defends against SSRF by:
-  1. Accepting only http/https schemes.
+Security: download_media_to_disk() defends against SSRF by:
+  1. Accepting only https:// scheme (http:// is rejected to eliminate MITM risk —
+     without TLS a network attacker can inject any payload before the file
+     validator sees it).
   2. Resolving the hostname via async DNS and rejecting private / reserved /
      loopback / link-local IP addresses (covers AWS/GCP metadata endpoints,
      localhost, RFC-1918 ranges, etc.).
-  3. Streaming the response body in chunks rather than buffering the entire
-     response before checking the size — prevents memory exhaustion if the
-     remote server starts streaming a huge body.
+  3. Streaming the response body in 64 KB chunks directly to disk so the size
+     limit fires before the full payload is ever held in RAM.
+
+Known limitation (DNS rebinding): the DNS check and the actual aiohttp.get()
+call perform two separate DNS lookups. An attacker with a TTL-0 DNS record could
+in theory return a safe IP for the check and a private IP for the fetch. This
+stops virtually all automated attacks; a full fix would require passing the
+already-resolved IP to aiohttp via a custom TCPConnector and a spoofed Host
+header, which is disproportionate to the risk for this use case.
 """
 
+import aiofiles
 import asyncio
 import base64
 import ipaddress
@@ -66,14 +75,14 @@ def _is_blocked_ip(addr: str) -> bool:
 async def _assert_url_safe(url: str) -> None:
     """
     Raise HTTPException(400) if the URL is not safe to fetch:
-      - scheme must be http or https
+      - scheme must be https (http rejected to eliminate MITM attack surface)
       - resolved hostname must not be a private / internal IP
 
-    DNS resolution is done in a thread-pool executor (asyncio-safe).
+    DNS resolution is done via the running event loop (asyncio-safe).
     """
     parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        raise HTTPException(status_code=400, detail="Only http/https URLs are supported")
+    if parsed.scheme != "https":
+        raise HTTPException(status_code=400, detail="Only HTTPS URLs are supported")
 
     hostname = parsed.hostname
     if not hostname:
@@ -144,14 +153,28 @@ def log_memory(stage: str) -> None:
     })
 
 
-async def download_image(url: str, max_size: int = settings.max_image_download_bytes) -> tuple[bytes, str]:
+async def download_media_to_disk(
+    url: str,
+    dest_path: str,
+    max_size: int = settings.max_image_download_bytes,
+) -> str:
     """
-    Downloads a media file from a URL or decodes a base64 data URI.
+    Download a media file from a URL (or decode a base64 data URI) and write it
+    directly to *dest_path* in chunks — never holding the full payload in RAM.
+
+    Returns the logical filename (e.g. ``"downloaded_media.mp4"``).
+    The caller is responsible for creating *dest_path* (e.g. via
+    ``tempfile.mkstemp``) and deleting it on completion.
 
     Security guarantees:
-      - Data URIs: size is capped before base64 decoding to prevent memory spikes.
-      - HTTP URLs: SSRF-protected (see _assert_url_safe); body is streamed in
-        chunks so the size limit fires before the full payload is buffered.
+      - Data URIs: the raw base64 string is length-checked before decoding, and
+        the decoded bytes are checked against max_size before the write.  The
+        decoded payload is held in RAM briefly (it is bounded by max_size, so
+        at most ~50 MB for the default limit).
+      - HTTPS URLs: SSRF-protected (see _assert_url_safe); redirects are
+        disabled (allow_redirects=False) to prevent redirect-chain SSRF; body is
+        streamed in 64 KB chunks written directly to disk so the size limit fires
+        before the full payload is ever held in RAM.
     """
     if url.startswith("data:"):
         try:
@@ -174,48 +197,55 @@ async def download_image(url: str, max_size: int = settings.max_image_download_b
                     detail=f"Image too large (max {max_size // (1024 * 1024)} MB)",
                 )
 
+            async with aiofiles.open(dest_path, "wb") as f:
+                await f.write(content)
+
             mime_type = header.split(":")[1].split(";")[0]
             suffix = _suffix_from_content_type(mime_type, "")
-            return content, f"pasted_image{suffix}"
+            return f"pasted_image{suffix}"
         except HTTPException:
             raise
         except Exception as exc:
             logger.error("url_decode_failed", extra={"action": "url_decode_failed", "error": str(exc)})
             raise HTTPException(status_code=400, detail="Invalid data URI")
 
-    # --- HTTP / HTTPS URL ---
+    # --- HTTPS URL ---
 
     # SSRF guard: validate scheme and ensure hostname resolves to a public IP.
     await _assert_url_safe(url)
 
     async with http_module.request_session() as session:
         try:
-            async with session.get(url) as response:
+            # allow_redirects=False: prevents SSRF via redirect chains where
+            # the initial URL is safe (https://attacker.com) but a 302 Location
+            # header points to an internal address (http://169.254.169.254/...).
+            async with session.get(url, allow_redirects=False) as response:
+                if response.status in (301, 302, 303, 307, 308):
+                    raise HTTPException(status_code=400, detail="Redirects are not permitted")
                 if response.status != 200:
                     raise HTTPException(
                         status_code=400,
-                        detail=f"Failed to fetch image from URL: Status {response.status}",
+                        detail=f"Failed to fetch media from URL: Status {response.status}",
                     )
 
-                # Stream in chunks — do NOT call response.read() which buffers
-                # the entire body before we can check the size.
-                chunks: list[bytes] = []
+                # Stream chunks directly to disk — never assembles the full
+                # payload in RAM (fixes the b"".join() memory exhaustion bug).
                 total = 0
-                async for chunk in response.content.iter_chunked(65_536):
-                    total += len(chunk)
-                    if total > max_size:
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"Image too large (max {max_size // (1024 * 1024)} MB)",
-                        )
-                    chunks.append(chunk)
-                content = b"".join(chunks)
+                async with aiofiles.open(dest_path, "wb") as f:
+                    async for chunk in response.content.iter_chunked(65_536):
+                        total += len(chunk)
+                        if total > max_size:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"File too large (max {max_size // (1024 * 1024)} MB)",
+                            )
+                        await f.write(chunk)
 
                 content_type = response.headers.get("Content-Type", "")
                 suffix = _suffix_from_content_type(content_type, url)
-                return content, f"downloaded_media{suffix}"
+                return f"downloaded_media{suffix}"
 
         except HTTPException:
             raise
         except aiohttp.ClientError as exc:
-            raise HTTPException(status_code=400, detail=f"Error fetching image: {exc}")
+            raise HTTPException(status_code=400, detail=f"Error fetching media: {exc}")

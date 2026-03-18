@@ -7,9 +7,11 @@ or JSON payload { "url": "https://..." }.
 Validates Turnstile, checks bans, and deducts guest credits only on success.
 """
 
+import asyncio
 import json
 import logging
 import os
+import shutil
 import tempfile
 import time
 from typing import Optional
@@ -26,7 +28,7 @@ from app.logging_config import user_id_var
 from app.schemas.detection import DetectionResponse
 from app.services.credit_engine import consume_credits, get_user_balance
 from app.services.credits_service import deduct_guest_credits, get_guest_wallet
-from app.services.detection_service import _generate_short_id, download_image, log_memory
+from app.services.detection_service import _generate_short_id, download_media_to_disk, log_memory
 from app.services.finance_service import log_transaction
 from app.core.file_validator import ALLOWED_VIDEO_EXTENSIONS
 
@@ -37,6 +39,37 @@ router = APIRouter(tags=["Detection"])
 # Kept in sync with file_validator so the media_type field in scan_completed
 # accurately reflects what was validated as a video.
 VIDEO_SUFFIXES = ALLOWED_VIDEO_EXTENSIONS
+
+
+_UPLOAD_CHUNK = 65_536  # 64 KB — matches the HTTPS streaming path
+
+
+def _stream_upload_to_disk(upload_file: UploadFile, dest_path: str) -> None:
+    """Copy a multipart upload to *dest_path* in chunks without loading it into RAM.
+
+    Runs inside asyncio.to_thread to keep the event loop unblocked.
+
+    Guards:
+      - seek(0) resets the file pointer in case Starlette's SpooledTemporaryFile
+        has been partially consumed before this call.
+      - Per-chunk size accumulation aborts early if the upload exceeds the
+        maximum allowed video size, preventing disk exhaustion before
+        validate_file gets a chance to run its own size check.
+    """
+    upload_file.file.seek(0)
+    max_bytes = settings.max_video_upload_bytes
+    total = 0
+    with open(dest_path, "wb") as fp:
+        while True:
+            chunk = upload_file.file.read(_UPLOAD_CHUNK)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise ValueError(
+                    f"Upload too large (max {max_bytes // (1024 * 1024)} MB)"
+                )
+            fp.write(chunk)
 
 
 @router.post("/detect", response_model=DetectionResponse)
@@ -89,72 +122,76 @@ async def detect(
         if wallet.get("is_banned"):
             raise HTTPException(status_code=403, detail="Device is banned")
 
-    file_content = None
     filename = "unknown"
     upload_content_type: str | None = None   # MIME from the multipart boundary
     sidecar_metadata = None
 
-    content_type = request.headers.get("content-type", "")
-
-    if "application/json" in content_type:
-        try:
-            payload = await request.json()
-            url = payload.get("url")
-            if not url:
-                raise HTTPException(status_code=400, detail="Missing 'url' in JSON body")
-            file_content, filename = await download_image(url)
-        except json.JSONDecodeError:
-            raise HTTPException(status_code=400, detail="Invalid JSON body")
-
-    elif "multipart/form-data" in content_type:
-        form = await request.form()
-        file_obj = form.get("file")
-        url_obj = form.get("url")
-        trusted_metadata_obj = form.get("trusted_metadata")
-
-        if trusted_metadata_obj and isinstance(trusted_metadata_obj, str):
-            try:
-                sidecar_metadata = json.loads(trusted_metadata_obj)
-                logger.info("sidecar_metadata_received", extra={
-                    "action": "sidecar_metadata_received",
-                    "keys": list(sidecar_metadata.keys()),
-                })
-            except json.JSONDecodeError as e:
-                logger.warning("sidecar_metadata_invalid", extra={
-                    "action": "sidecar_metadata_invalid",
-                    "error": str(e),
-                })
-
-        if file_obj:
-            if not isinstance(file_obj, UploadFile):
-                if isinstance(file_obj, str):
-                    raise HTTPException(status_code=400, detail="Invalid file upload format")
-            file_content = await file_obj.read()
-            filename = file_obj.filename or "uploaded_file"
-            upload_content_type = file_obj.content_type or None
-        elif url_obj:
-            if isinstance(url_obj, str):
-                file_content, filename = await download_image(url_obj)
-            else:
-                raise HTTPException(status_code=400, detail="Invalid url field")
-        else:
-            raise HTTPException(status_code=400, detail="Must provide 'file' or 'url' in form data")
-
-    else:
-        raise HTTPException(
-            status_code=415,
-            detail="Unsupported Media Type. Use multipart/form-data or application/json"
-        )
-
-    filesize = len(file_content)
-    suffix = os.path.splitext(filename)[1].lower() or ".jpg"
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
-        tmp_file.write(file_content)
-        temp_path = tmp_file.name
-    del file_content
+    # Create the temp file up front so all ingestion paths stream directly to
+    # disk — no in-memory buffer for the file payload.  The try/finally below
+    # covers every exit path (ingestion errors, validation failures, and normal
+    # completion) so the file is always cleaned up.
+    fd, temp_path = tempfile.mkstemp(suffix=".tmp")
+    os.close(fd)
 
     try:
+        content_type = request.headers.get("content-type", "")
+
+        if "application/json" in content_type:
+            try:
+                payload = await request.json()
+                url = payload.get("url")
+                if not url:
+                    raise HTTPException(status_code=400, detail="Missing 'url' in JSON body")
+                filename = await download_media_to_disk(url, temp_path)
+            except json.JSONDecodeError:
+                raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+        elif "multipart/form-data" in content_type:
+            form = await request.form()
+            file_obj = form.get("file")
+            url_obj = form.get("url")
+            trusted_metadata_obj = form.get("trusted_metadata")
+
+            if trusted_metadata_obj and isinstance(trusted_metadata_obj, str):
+                try:
+                    sidecar_metadata = json.loads(trusted_metadata_obj)
+                    logger.info("sidecar_metadata_received", extra={
+                        "action": "sidecar_metadata_received",
+                        "keys": list(sidecar_metadata.keys()),
+                    })
+                except json.JSONDecodeError as e:
+                    logger.warning("sidecar_metadata_invalid", extra={
+                        "action": "sidecar_metadata_invalid",
+                        "error": str(e),
+                    })
+
+            if file_obj:
+                if not isinstance(file_obj, UploadFile):
+                    if isinstance(file_obj, str):
+                        raise HTTPException(status_code=400, detail="Invalid file upload format")
+                filename = file_obj.filename or "uploaded_file"
+                upload_content_type = file_obj.content_type or None
+                try:
+                    await asyncio.to_thread(_stream_upload_to_disk, file_obj, temp_path)
+                except ValueError as exc:
+                    raise HTTPException(status_code=413, detail=str(exc))
+            elif url_obj:
+                if isinstance(url_obj, str):
+                    filename = await download_media_to_disk(url_obj, temp_path)
+                else:
+                    raise HTTPException(status_code=400, detail="Invalid url field")
+            else:
+                raise HTTPException(status_code=400, detail="Must provide 'file' or 'url' in form data")
+
+        else:
+            raise HTTPException(
+                status_code=415,
+                detail="Unsupported Media Type. Use multipart/form-data or application/json"
+            )
+
+        # Measure size from disk — never trust a client-supplied Content-Length.
+        filesize = os.path.getsize(temp_path)
+        suffix = os.path.splitext(filename)[1].lower() or ".jpg"
         await security_manager.validate_file(filename, filesize, temp_path, upload_content_type)
 
         if auth_user:
