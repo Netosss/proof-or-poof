@@ -4,6 +4,7 @@ uvloop
 python-multipart
 c2pa-python==0.27.1
 aiohttp
+aiofiles
 pydantic
 pydantic-settings
 runpod

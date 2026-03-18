@@ -123,11 +123,19 @@ def test_detect_multipart_file_upload(client):
 
 
 def test_detect_json_url_upload(client):
+    """URL-based detection: download_media_to_disk writes content to disk and
+    returns a filename; the route reads from disk for the rest of the pipeline."""
+    jpeg_bytes = make_tiny_jpeg()
+
+    async def _fake_download(url, dest_path, max_size=None):
+        with open(dest_path, "wb") as f:
+            f.write(jpeg_bytes)
+        return "photo.jpg"
+
     with _patches():
         with patch(
-            "app.api.detection.download_image",
-            new_callable=AsyncMock,
-            return_value=(make_tiny_jpeg(), "photo.jpg"),
+            "app.api.detection.download_media_to_disk",
+            side_effect=_fake_download,
         ):
             response = client.post(
                 "/detect",
@@ -222,3 +230,45 @@ def test_detect_redis_unavailable_still_returns_result(client, monkeypatch):
         )
     assert response.status_code == 200
     assert response.json()["summary"] == "No AI Detected"
+
+
+def test_detect_json_url_video(client):
+    """A URL whose Content-Type resolves to a video extension is accepted and
+    processed without error — confirms the suffix routing is not image-only."""
+    from tests.conftest import make_tiny_jpeg
+    import io
+    # Use a tiny JPEG payload (validate_file is mocked, so codec doesn't matter)
+    video_bytes = make_tiny_jpeg()
+
+    async def _fake_video_download(url, dest_path, max_size=None):
+        with open(dest_path, "wb") as f:
+            f.write(video_bytes)
+        # Simulate a video/mp4 Content-Type → filename ends with .mp4
+        return "downloaded_media.mp4"
+
+    with _patches():
+        with patch(
+            "app.api.detection.download_media_to_disk",
+            side_effect=_fake_video_download,
+        ):
+            response = client.post(
+                "/detect",
+                headers={**HEADERS, "content-type": "application/json"},
+                content=json.dumps({"url": "https://cdn.example.com/clip.mp4"}),
+            )
+    assert response.status_code == 200
+    assert "short_id" in response.json()
+
+
+def test_detect_multipart_upload_too_large_rejected(client):
+    """Uploads exceeding the streaming size cap must be rejected with 413."""
+    from app.config import settings
+
+    oversized = b"X" * (settings.max_video_upload_bytes + 1)
+    with _patches():
+        response = client.post(
+            "/detect",
+            headers=HEADERS,
+            files={"file": ("big.mp4", oversized, "video/mp4")},
+        )
+    assert response.status_code == 413
