@@ -1,10 +1,10 @@
 """
 Tests for POST /inpaint/image.
 
-Mocks: check_ip_device_limit, run_gpu_inpainting, Firebase (wallet/ban), Redis (retry token).
+Mocks: check_ip_device_limit, run_gpu_inpainting, Firebase (wallet/ban), Redis (op_ref token).
 """
 
-import hashlib
+import uuid
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -83,20 +83,34 @@ def test_inpaint_success_deducts_credits(client):
         stack.enter_context(
             patch("app.api.inpainting.run_gpu_inpainting", new_callable=AsyncMock, return_value=FAKE_RESULT)
         )
-        stack.enter_context(patch("app.api.inpainting.deduct_guest_credits", new_callable=AsyncMock, return_value=48))
+        stack.enter_context(patch("app.api.inpainting.deduct_guest_credits", new_callable=AsyncMock, return_value=20))
         stack.enter_context(patch("app.api.inpainting.log_transaction"))
         response = client.post("/inpaint/image", headers=HEADERS, files=_make_files())
     assert response.status_code == 200
     assert response.content == FAKE_RESULT
-    assert response.headers["x-user-balance"] == "48"
+    assert response.headers["x-user-balance"] == "20"
+
+
+def test_inpaint_paid_success_returns_op_ref_header(client):
+    """A paid inpainting response must include X-Op-Ref for the next free retry."""
+    with _patches(wallet=WALLET_OK) as stack:
+        stack.enter_context(
+            patch("app.api.inpainting.run_gpu_inpainting", new_callable=AsyncMock, return_value=FAKE_RESULT)
+        )
+        stack.enter_context(patch("app.api.inpainting.deduct_guest_credits", new_callable=AsyncMock, return_value=20))
+        stack.enter_context(patch("app.api.inpainting.log_transaction"))
+        response = client.post("/inpaint/image", headers=HEADERS, files=_make_files())
+    assert response.status_code == 200
+    assert "x-op-ref" in response.headers
+    # Value should be a valid UUID
+    uuid.UUID(response.headers["x-op-ref"])
 
 
 def test_inpaint_free_retry_skips_deduction(client, mock_redis):
-    """If a paid_image key exists in Redis, the user gets a free retry."""
-    image_bytes = make_tiny_jpeg()
-    img_hash = hashlib.sha256(image_bytes).hexdigest()
-    cache_key = f"paid_image:{DEVICE_ID}:{img_hash}"
-    mock_redis._store[cache_key] = "1"  # sync seed — mock_redis.set() is now async
+    """If a valid op_ref token exists in Redis the user gets a free retry."""
+    token = str(uuid.uuid4())
+    cache_key = f"op_ref:{DEVICE_ID}:{token}"
+    mock_redis.seed(cache_key, "1")
 
     with _patches(wallet=WALLET_LOW) as stack:
         stack.enter_context(
@@ -107,16 +121,59 @@ def test_inpaint_free_retry_skips_deduction(client, mock_redis):
         stack.enter_context(patch("app.api.inpainting.log_transaction"))
         response = client.post(
             "/inpaint/image",
-            headers=HEADERS,
-            files={
-                "image": ("img.jpg", image_bytes, "image/jpeg"),
-                "mask": ("mask.jpg", make_tiny_jpeg(), "image/jpeg"),
-            },
+            headers={**HEADERS, "X-Op-Ref": token},
+            files=_make_files(),
         )
 
     assert response.status_code == 200
     mock_deduct.assert_not_called()
+    # Free retry must not return a new X-Op-Ref
+    assert "x-op-ref" not in response.headers
+
+
+def test_inpaint_op_ref_consumed_on_free_retry(client, mock_redis):
+    """The Redis op_ref key must be deleted after use (no double-spend)."""
+    token = str(uuid.uuid4())
+    cache_key = f"op_ref:{DEVICE_ID}:{token}"
+    mock_redis.seed(cache_key, "1")
+
+    with _patches(wallet=WALLET_LOW) as stack:
+        stack.enter_context(
+            patch("app.api.inpainting.run_gpu_inpainting", new_callable=AsyncMock, return_value=FAKE_RESULT)
+        )
+        stack.enter_context(patch("app.api.inpainting.deduct_guest_credits", new_callable=AsyncMock, return_value=0))
+        stack.enter_context(patch("app.api.inpainting.log_transaction"))
+        client.post(
+            "/inpaint/image",
+            headers={**HEADERS, "X-Op-Ref": token},
+            files=_make_files(),
+        )
+
     assert mock_redis._store.get(cache_key) is None
+
+
+def test_inpaint_stale_op_ref_charges_normally(client, mock_redis):
+    """An X-Op-Ref with no matching Redis key is treated as a normal paid call."""
+    stale_token = str(uuid.uuid4())
+    # Do NOT seed the key — simulates an expired or already-used token
+
+    with _patches(wallet=WALLET_OK) as stack:
+        stack.enter_context(
+            patch("app.api.inpainting.run_gpu_inpainting", new_callable=AsyncMock, return_value=FAKE_RESULT)
+        )
+        mock_deduct = AsyncMock(return_value=20)
+        stack.enter_context(patch("app.api.inpainting.deduct_guest_credits", mock_deduct))
+        stack.enter_context(patch("app.api.inpainting.log_transaction"))
+        response = client.post(
+            "/inpaint/image",
+            headers={**HEADERS, "X-Op-Ref": stale_token},
+            files=_make_files(),
+        )
+
+    assert response.status_code == 200
+    mock_deduct.assert_called_once()
+    # A new op_ref should be issued for the paid call
+    assert "x-op-ref" in response.headers
 
 
 def test_inpaint_gpu_failure_returns_500(client):

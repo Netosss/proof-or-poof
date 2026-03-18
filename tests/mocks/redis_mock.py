@@ -144,6 +144,13 @@ class MockRedis:
         remaining = self._expiry[key] - time.time()
         return max(0, int(remaining))
 
+    async def getdel(self, key: str):
+        if self._expired(key):
+            return None
+        value = self._store.pop(key, None)
+        self._expiry.pop(key, None)
+        return value
+
     async def delete(self, key: str) -> int:
         existed = key in self._store
         self._store.pop(key, None)

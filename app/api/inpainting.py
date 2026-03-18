@@ -3,10 +3,13 @@ Inpainting route: /inpaint/image
 
 Removes objects from an image using the RunPod GPU worker (LaMa).
 Verifies Turnstile, checks credits, and only deducts on success.
-Grants a free retry token for 10 minutes so users can re-download without being charged.
+
+After a paid removal the response includes an `X-Op-Ref` header containing a
+UUID token.  Sending that token back as `X-Op-Ref` on the *next* request grants
+one free refinement (works on any image — the result, an undo, a re-crop, etc.).
+The token is single-use (Redis GETDEL) and expires after 10 minutes.
 """
 
-import hashlib
 import io
 import logging
 import time
@@ -45,6 +48,7 @@ async def inpaint_image(
     mask: UploadFile = File(...),
     device_id: str = Header(..., alias="X-Device-ID"),
     turnstile_token: Optional[str] = Header(None, alias="X-Turnstile-Token"),
+    op_ref: Optional[str] = Header(None, alias="X-Op-Ref"),
     auth_user: Optional[dict] = Depends(get_optional_user),
 ):
     """
@@ -171,20 +175,19 @@ async def inpaint_image(
             ),
         )
 
-    img_hash = hashlib.sha256(image_bytes).hexdigest()
     rc = redis_module.client
 
     if auth_user:
         uid = auth_user["uid"]
-        cache_key = f"paid_image:uid:{uid}:{img_hash}"
-        is_free_retry = bool(rc and await rc.get(cache_key))
-        if is_free_retry:
-            logger.info("inpaint_free_retry_used", extra={
-                "action": "inpaint_free_retry_used",
-                "inpaint_request_id": request_id,
-                "img_hash_prefix": img_hash[:8],
-                "user_type": "authenticated",
-            })
+        is_free_retry = False
+        if op_ref and rc:
+            is_free_retry = bool(await rc.getdel(f"op_ref:{uid}:{op_ref}"))
+            if is_free_retry:
+                logger.info("inpaint_free_retry_used", extra={
+                    "action": "inpaint_free_retry_used",
+                    "inpaint_request_id": request_id,
+                    "user_type": "authenticated",
+                })
 
         if not is_free_retry:
             current_balance = await get_user_balance(uid)
@@ -223,15 +226,14 @@ async def inpaint_image(
             log_transaction("INPAINT", -usd_cost, {"uid": uid, "duration": duration, "request_id": request_id})
 
             if is_free_retry:
-                if rc:
-                    await rc.delete(cache_key)
                 new_balance = await get_user_balance(uid)
+                headers = {"X-User-Balance": str(new_balance)}
             else:
                 new_balance = await consume_credits(uid, settings.inpaint_credit_cost, "inpaint", request_id)
+                new_op_ref = str(uuid.uuid4())
                 if rc:
-                    await rc.set(cache_key, "1", ex=settings.deepfake_dedupe_ttl_sec)
-
-            headers = {"X-User-Balance": str(new_balance)}
+                    await rc.set(f"op_ref:{uid}:{new_op_ref}", "1", ex=600)
+                headers = {"X-User-Balance": str(new_balance), "X-Op-Ref": new_op_ref}
             return Response(content=result_bytes, media_type="image/png", headers=headers)
 
         except Exception as e:
@@ -244,15 +246,15 @@ async def inpaint_image(
             raise HTTPException(status_code=500, detail="Inpainting service unavailable")
 
     else:
-        cache_key = f"paid_image:{device_id}:{img_hash}"
-        is_free_retry = bool(rc and await rc.get(cache_key))
-        if is_free_retry:
-            logger.info("inpaint_free_retry_used", extra={
-                "action": "inpaint_free_retry_used",
-                "inpaint_request_id": request_id,
-                "img_hash_prefix": img_hash[:8],
-                "user_type": "guest",
-            })
+        is_free_retry = False
+        if op_ref and rc:
+            is_free_retry = bool(await rc.getdel(f"op_ref:{device_id}:{op_ref}"))
+            if is_free_retry:
+                logger.info("inpaint_free_retry_used", extra={
+                    "action": "inpaint_free_retry_used",
+                    "inpaint_request_id": request_id,
+                    "user_type": "guest",
+                })
 
         current_credits = wallet.get("credits", 0)
 
@@ -291,15 +293,14 @@ async def inpaint_image(
             log_transaction("INPAINT", -usd_cost, {"device_id": device_id, "duration": duration, "request_id": request_id})
 
             if is_free_retry:
-                if rc:
-                    await rc.delete(cache_key)
                 new_balance = current_credits
+                headers = {"X-User-Balance": str(new_balance)}
             else:
                 new_balance = await deduct_guest_credits(device_id, cost=settings.inpaint_credit_cost)
+                new_op_ref = str(uuid.uuid4())
                 if rc:
-                    await rc.set(cache_key, "1", ex=settings.deepfake_dedupe_ttl_sec)
-
-            headers = {"X-User-Balance": str(new_balance)}
+                    await rc.set(f"op_ref:{device_id}:{new_op_ref}", "1", ex=600)
+                headers = {"X-User-Balance": str(new_balance), "X-Op-Ref": new_op_ref}
             return Response(content=result_bytes, media_type="image/png", headers=headers)
 
         except Exception as e:
