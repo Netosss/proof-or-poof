@@ -121,7 +121,7 @@ async def inpaint_image(
     # run_gpu_inpainting will reject corrupt images naturally, and writing
     # to disk solely to verify is unnecessary for inpainting.
     await security_manager.validate_file(
-        image.filename or "image",
+        image.filename or "uploaded_image.jpg",
         len(image_bytes),
         content_type=image.content_type or None,
         mode="inpaint",

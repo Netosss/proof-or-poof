@@ -169,7 +169,7 @@ async def detect(
                 if not isinstance(file_obj, UploadFile):
                     if isinstance(file_obj, str):
                         raise HTTPException(status_code=400, detail="Invalid file upload format")
-                filename = file_obj.filename or "uploaded_file"
+                filename = file_obj.filename or "uploaded_file.jpg"
                 upload_content_type = file_obj.content_type or None
                 try:
                     await asyncio.to_thread(_stream_upload_to_disk, file_obj, temp_path)
