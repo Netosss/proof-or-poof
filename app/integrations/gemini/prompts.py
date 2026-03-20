@@ -46,6 +46,8 @@ def get_system_instruction(quality_context: str) -> str:
       QUALITY GUARD: At LOW or MEDIUM quality, JPEG compression naturally destroys fine hair detail and causes edge bleeding. Do NOT flag hair edge dissolving unless quality context is HIGH.
     * SMALL OBJECTS & TRANSPARENCY: Inspect glass and small items (e.g., keys, jewelry). AI often fuses small mechanical parts into a single meaningless lump, or renders internal glass mechanisms without 3D thickness.
       QUALITY GUARD: At LOW or MEDIUM quality, small objects naturally lose structural detail due to compression. Do NOT flag small object fusion unless quality context is HIGH.
+    * LOCAL RETOUCHING ANOMALY: Inspect skin, backgrounds, and surfaces for regions that are hyper-smoothed relative to their immediate surroundings. AI inpainting produces localized zones of plastic-smooth texture that abruptly transition into natural grain or detail at the patch boundary. The signal is the boundary itself — a subtle or visible edge where texture quality abruptly changes with no physical explanation (no shadow boundary, no material change, no depth shift). A face where the cheek skin is airbrush-smooth while the forehead or chin has visible pore texture is a strong inpainting signal.
+      QUALITY GUARD: Only apply this check when quality context is HIGH — at LOW or MEDIUM quality, compression naturally destroys local texture uniformly.
 
     6. MANDATORY SELF-VERIFICATION & ANTI-HALLUCINATION:
     * AI models frequently hallucinate anatomical errors (like extra fingers) by misinterpreting shadows or overlapping objects.
@@ -54,6 +56,14 @@ def get_system_instruction(quality_context: str) -> str:
     * If the answer is YES, or if it is even slightly ambiguous, you MUST DISCARD that anomaly.
     * Only select a signal_category if the anomaly is completely undeniable to a human observer (e.g., gibberish text, 2D objects lacking physical depth).
     * VOCABULARY MATCHING: DO NOT use human anatomical terms (like 'fingers', 'flesh', 'skin') when describing armor, robots, statues, or inanimate objects.
+    * AUTHENTIC SIGNAL REWARDS: The following characteristics ACTIVELY REDUCE AI likelihood — if you observe any of them, lower your AI confidence accordingly:
+      - Visible chromatic aberration: purple, cyan, or green color fringing at high-contrast edges
+      - Natural vignetting: corners or edges visibly darker than the image center
+      - Film grain or sensor noise visible in smooth areas (skies, walls, shadows)
+      - Surface wear: scratches, dust, fingerprints, rust, weathering, fading paint on objects
+      - Asymmetric or imperfect composition: slightly off-center framing, tilted horizon, uneven balance
+      - Natural focus falloff: foreground or background softening consistent with the implied focal length
+      - Lens flares with natural camera aperture shapes (hexagonal or octagonal bokeh highlights)
 
     7. ENVIRONMENTAL & OUTDOOR PHYSICS:
     * Wind consistency: In outdoor scenes, all wind-affected elements (flags, hair, leaves, clothing, smoke) MUST move in the same direction and with proportional force. If a flag billows strongly but nearby hair is perfectly still, or two flags point in opposite directions, it is AI.
@@ -74,6 +84,33 @@ def get_system_instruction(quality_context: str) -> str:
     * Real photography never produces structural clones; AI diffusion models frequently do due to their tiling generation process.
     * This signal is valid at any quality level — cloning artifacts are visible even in compressed images.
 
+    10. SCENE COMPOSITION & SYNTHETIC UNIFORMITY:
+    * WRONG DEPTH-OF-FIELD: Inspect whether the depth-of-field is physically consistent with the implied focal length and scene geometry. A portrait where both the subject's eyelashes and a wall 2 meters behind are equally sharp is physically impossible with any portrait lens at wide aperture. A close-up macro shot with zero background falloff is impossible. This is a strong AI signal.
+      NOTE: Do NOT flag wide-angle landscape or architectural photography where everything is legitimately sharp — a small aperture (f/11+) achieves this naturally. The signal is a DOF that is WRONG for the scene (e.g., portrait tightness with full-scene sharpness), not simply a sharp image.
+      QUALITY GUARD: Only apply the DOF check when quality context is HIGH — compression blur mimics natural DOF falloff at lower quality.
+    * LOCALIZED SHARPNESS ANOMALY: Inspect whether any region has a sharpness level inconsistent with its neighbors at the same apparent focal depth. A face that is razor-sharp while the subject's collar or earring at the same distance is inexplicably soft is a strong inpainting signal. Conversely, a background element that is anomalously sharp while everything else at that depth is uniformly blurred is suspicious. Always ask: can the mismatch be explained by depth difference, motion, or angle? If no optical explanation exists, it is AI.
+      QUALITY GUARD: Only apply this check when quality context is HIGH — JPEG compression uniformly degrades sharpness across the whole frame, masking natural local variation.
+    * PRISTINE SURFACES: Objects or environments that would naturally accumulate wear (weathered stone, scuffed sidewalks, fingerprinted glass, rusty metal, aged wood) appear factory-new with zero imperfection. AI models default to idealized textures. If a supposedly old, outdoor, or heavily-used surface has no dust, scratches, wear, or patina, that is suspicious.
+    * SCENE SYMMETRY: Architectural or urban compositions (streets, building facades, plazas) that are mirror-symmetric in ways real-world construction never achieves — identical windows with no offset, uniform grout lines, symmetric weathering patterns. Real buildings always have imperfections. NOTE: Do NOT flag purpose-built symmetrical monuments or formal plazas — only flag when the symmetry extends to organic elements (weathering, trees, paving wear) that would naturally break it.
+    * IDEALIZED NATURAL FEATURES: In landscape and nature scenes, inspect organic elements for AI's tendency to idealize. Real nature is disordered — flag when you see: grass or foliage that is uniformly lush with zero dead patches, bare spots, or color variation across a large area; mountains or hills with impossibly smooth, perfect silhouettes and no rocky irregularity; forests where every tree is identically shaped and perfectly in full bloom; beaches or shores with no debris, seaweed, irregular sand ripples, or footprints; waterfalls that are perfectly symmetric with no turbulence variation. The signal is the absence of the organic disorder that real environments always contain.
+      Anti-FP: Do NOT flag pristine environments that are pristine for a legitimate reason (a freshly groomed golf course, a manicured garden, a recently cleaned beach). Only flag when the idealization is implausible given the apparent environment type and scale.
+    * COMPOSITIONAL AI SIGNATURE (SOFT SIGNAL — NEVER USE ALONE): AI generation models are trained on stock photography and consistently produce "hero shot" compositions: a dramatically lit subject perfectly centered or rule-of-thirds placed, with an epic backdrop arranged as if by a set designer, zero environmental interaction (subject casts no shadow on nearby objects, disturbs nothing in the environment), and an overall "too convenient" framing that no real candid or event photo achieves. This is a SOFT signal only — professional photography also achieves cinematic compositions. Only let this escalate confidence if at least one hard AI signal from another rule is already present. NEVER use this as a standalone flag.
+    * Anti-FP: Visible surface wear, scratches, weathering, or organically uneven composition ACTIVELY REDUCES AI likelihood — treat as authenticity signals.
+
+    11. SYNTHETIC COLOR & LIGHTING SIGNATURES:
+    * QUALITY GUARD: Only apply this rule when quality context is HIGH. JPEG compression corrupts color fidelity at lower quality and can make natural tones appear artificial.
+    * COLOR TEMPERATURE VIOLATION: First identify the primary light source visible in the frame (sun angle, lamp color, visible sky). Then verify whether the shadow color, ambient fill, and highlight temperature are physically consistent with that source. A warm golden glow wrapping the subject when the sun is directly overhead is physically impossible. Cool blue shadows in a scene lit entirely by warm tungsten lamps are impossible. Flag ONLY when the contradiction is undeniable — a specific color that cannot exist given the visible light sources.
+    * SYNTHETIC UNIFORM LIGHTING: Scene-wide illumination with no directional falloff, no hotspots, and no penumbra — as if the entire outdoor or indoor environment is lit by a giant diffuse softbox. Real outdoor scenes always have a dominant directional source. Real indoor scenes always show falloff from the fixture. If every surface is identically lit regardless of its orientation to the light source, that is AI.
+    * IMPOSSIBLE SATURATION GRADIENTS: Sky-to-ground or background-to-foreground color transitions that follow an impossible spectral curve — neon pink bleeding into teal in a natural outdoor sky, or a perfect radial rainbow glow around a subject with no physical light source responsible for it.
+    * Anti-FP: Do NOT flag HDR photography, golden-hour warmth, intentional post-processing color grades, or naturally saturated tropical or sunset environments. Only flag when the color temperature physically contradicts the light sources and atmospheric conditions visible in the scene.
+
+    12. LENS OPTICS ABSENCE:
+    * QUALITY GUARD: Only apply this rule when quality context is HIGH. At LOW or MEDIUM quality, JPEG compression destroys the subtle optical characteristics this rule depends on.
+    * Real camera lenses ALWAYS produce at least some combination of: chromatic aberration (purple, cyan, or green color fringing at high-contrast edges, especially backlit hair or tree branches against sky), vignetting (corners and edges subtly darker than the image center), and lens distortion (barrel or pincushion warping of straight lines near the frame edges, especially visible on architecture and horizons).
+    * AI images at HIGH quality often exhibit ALL THREE absences simultaneously: perfectly neutral edges with zero color fringing, corner brightness identical to center brightness, and mathematically straight architectural lines with no geometric distortion across the entire frame.
+    * Only flag this when ALL optical imperfections are simultaneously absent in a scene where at least one would be expected — for example: a high-contrast backlit portrait with zero chromatic aberration on hair edges, AND uniform corner brightness, AND perfectly straight background lines.
+    * Anti-FP: Modern mirrorless cameras with in-camera lens-correction profiles suppress individual artifacts digitally. Do NOT flag a single absent artifact in isolation. The signal requires the SIMULTANEOUS complete absence of all optical imperfections.
+
     [OUTPUT FORMAT]
     You MUST respond strictly in JSON with exactly two fields: "confidence" and "signal_category".
 
@@ -82,7 +119,7 @@ def get_system_instruction(quality_context: str) -> str:
 
     ALLOWED VALUES FOR signal_category:
       "watermark_or_content_credentials_detected"        — Rule 1: AI watermark or content credential found
-      "skin_or_surface_texture_is_waxy_or_plastic"       — Rule 2: Skin/surface looks synthetic or waxy
+      "skin_or_surface_texture_is_waxy_or_plastic"       — Rule 2/5: Skin/surface is waxy or has a local retouching patch with abrupt texture boundary
       "objects_merge_or_dissolve_at_boundaries"          — Rule 2/5: Object edges unnaturally fuse or disappear
       "geometry_or_perspective_is_physically_impossible" — Rule 2: Spatial geometry defies physics
       "text_or_signage_contains_gibberish_characters"    — Rule 3: Text/signs contain illegible gibberish (HIGH/MEDIUM only)
@@ -94,6 +131,9 @@ def get_system_instruction(quality_context: str) -> str:
       "glass_or_small_objects_lack_3d_structure"         — Rule 5: Glass/small objects fuse flat (HIGH only)
       "facial_detail_inconsistency_detected"             — Rule 8: Teeth/eyes/ears show AI failure (HIGH only)
       "repeated_or_cloned_elements_detected"             — Rule 9: Near-identical duplicated elements in scene
+      "scene_composition_is_synthetically_uniform"       — Rule 10: Wrong DOF, localized sharpness anomaly, pristine surfaces, impossible structural symmetry, or idealized natural features (HIGH only for DOF/sharpness checks)
+      "unnatural_color_grading_or_saturation_detected"   — Rule 11: Color temperature contradicts visible light sources, or impossible saturation gradient (HIGH only)
+      "lens_optics_absence_detected"                     — Rule 12: Simultaneous absence of chromatic aberration, vignetting, and lens distortion (HIGH only)
       "uniform_diffusion_noise_pattern_detected"         — Forensic: Noise is spatially uniform (AI diffusion)
       "multiple_subtle_ai_artifacts_present"             — Catch-all: Multiple weak signals, no single dominant one
       "no_visual_anomalies_detected"                     — Clean: No AI anomalies found (use when confidence <= 0.5)
@@ -132,4 +172,13 @@ def get_system_instruction(quality_context: str) -> str:
 
     Example 11 (Multiple weak signals, no single dominant artifact):
     {{"confidence": 0.85, "signal_category": "multiple_subtle_ai_artifacts_present"}}
+
+    Example 12 (AI cityscape — portrait-style selective focus: foreground and background 30m apart equally sharp, impossible for the implied focal length):
+    {{"confidence": 0.87, "signal_category": "scene_composition_is_synthetically_uniform"}}
+
+    Example 13 (AI outdoor portrait — warm golden glow wrapping subject from all sides; sun visibly overhead and harsh; shadow color temperature contradicts light source):
+    {{"confidence": 0.88, "signal_category": "unnatural_color_grading_or_saturation_detected"}}
+
+    Example 14 (AI backlit portrait, HIGH quality — hair edges against bright sky show zero chromatic fringing, corners identical brightness to center, background architectural lines perfectly straight with no barrel distortion):
+    {{"confidence": 0.84, "signal_category": "lens_optics_absence_detected"}}
     """
