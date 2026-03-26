@@ -37,8 +37,8 @@ image = (
 @app.cls(
     image=image,
     gpu="L4",
-    timeout=180,
-    scaledown_window=120,
+    timeout=30,
+    scaledown_window=30,
     enable_memory_snapshot=True,
     experimental_options={"enable_gpu_snapshot": True},
 )
