@@ -1,0 +1,54 @@
+name: Deploy Modal Worker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "worker/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - "worker/**"
+
+jobs:
+  deploy-pr:
+    name: Deploy to PR environment
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Modal
+        run: pip install modal
+
+      - name: Deploy to ephemeral PR environment
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: |
+          modal environment create "pr-${{ github.event.pull_request.number }}" 2>/dev/null || true
+          modal deploy worker/modal_app.py --env "pr-${{ github.event.pull_request.number }}"
+
+  deploy-prod:
+    name: Deploy to production
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Modal
+        run: pip install modal
+
+      - name: Deploy to main environment
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: modal deploy worker/modal_app.py --env main
