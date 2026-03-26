@@ -1,7 +1,7 @@
 """
 Inpainting route: /inpaint/image
 
-Removes objects from an image using the RunPod GPU worker (LaMa).
+Removes objects from an image using a Modal GPU worker (LaMa).
 Verifies Turnstile, checks credits, and only deducts on success.
 
 After a paid removal the response includes an `X-Op-Ref` header containing a
@@ -25,7 +25,7 @@ from app.core.auth import check_ip_device_limit, get_client_ip, validate_device_
 from app.core.dependencies import security_manager
 from app.core.firebase_auth import get_optional_user
 from app.integrations import redis_client as redis_module
-from app.integrations.runpod import run_gpu_inpainting
+from app.integrations.gpu_worker import run_gpu_inpainting
 from app.logging_config import user_id_var
 from app.services.credit_engine import consume_credits, get_user_balance
 from app.services.credits_service import deduct_guest_credits, get_guest_wallet
@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Inpainting"])
 
-# Formats the RunPod / LaMa GPU worker accepts directly.  Any other format
+# Formats the Modal / LaMa GPU worker accepts directly.  Any other format
 # PIL can open is converted to JPEG before dispatch.  Defined at module level
 # to avoid recreating the set literal on every request.
 _INPAINT_PASSTHROUGH_FORMATS: frozenset[str] = frozenset({"jpeg", "png"})
@@ -52,7 +52,7 @@ async def inpaint_image(
     auth_user: Optional[dict] = Depends(get_optional_user),
 ):
     """
-    Remove objects from an image using the RunPod GPU worker (LaMa).
+    Remove objects from an image using the Modal GPU worker (LaMa).
 
     Supports two billing paths:
       - Authenticated (Authorization: Bearer token present): deducts from
@@ -132,7 +132,7 @@ async def inpaint_image(
     )
 
     # Normalize unusual image formats to JPEG before sending to the GPU worker.
-    # RunPod / LaMa expects standard JPEG or PNG.  Formats like MPO, HEIC, AVIF,
+    # The LaMa GPU worker expects standard JPEG or PNG.  Formats like MPO, HEIC, AVIF,
     # TIFF, PSD, TGA, ICO, DDS etc. must be converted first.
     # JPEG and PNG are passed through unchanged to avoid an unnecessary re-encode.
     try:

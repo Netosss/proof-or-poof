@@ -141,7 +141,7 @@ class Settings(BaseSettings):
         0.0019, description="RunPod A5000/L4 rate for detection"
     )
     inpaint_rate_per_sec: float = Field(
-        0.00031, description="RunPod RTX 4090 rate for inpainting"
+        0.000222, description="Modal L4 rate for inpainting"
     )
     cpu_rate_per_sec: float = Field(
         0.0001, description="Estimated Railway CPU rate"

@@ -8,6 +8,7 @@ aiofiles
 pydantic
 pydantic-settings
 runpod
+modal
 python-dotenv
 opencv-python-headless
 Pillow
