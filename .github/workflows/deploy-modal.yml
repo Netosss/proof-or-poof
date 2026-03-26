@@ -30,6 +30,8 @@ jobs:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
         run: |
+          export MODAL_TOKEN_ID=$(echo -n "$MODAL_TOKEN_ID" | tr -d '[:space:]')
+          export MODAL_TOKEN_SECRET=$(echo -n "$MODAL_TOKEN_SECRET" | tr -d '[:space:]')
           modal environment create "pr-${{ github.event.pull_request.number }}" 2>/dev/null || true
           modal deploy worker/modal_app.py --env "pr-${{ github.event.pull_request.number }}"
 
@@ -51,4 +53,7 @@ jobs:
         env:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-        run: modal deploy worker/modal_app.py --env main
+        run: |
+          export MODAL_TOKEN_ID=$(echo -n "$MODAL_TOKEN_ID" | tr -d '[:space:]')
+          export MODAL_TOKEN_SECRET=$(echo -n "$MODAL_TOKEN_SECRET" | tr -d '[:space:]')
+          modal deploy worker/modal_app.py --env main
