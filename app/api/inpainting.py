@@ -18,7 +18,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Request, UploadFile
 from fastapi.responses import Response
-from PIL import Image, ImageOps
+from PIL import Image
 
 from app.config import settings
 from app.core.auth import check_ip_device_limit, get_client_ip, validate_device_id, verify_turnstile
@@ -131,43 +131,28 @@ async def inpaint_image(
         mode="inpaint",
     )
 
-    # Normalize orientation and format before sending to the GPU worker.
-    # 1) EXIF transpose — iPhone photos embed rotation in EXIF metadata.
-    #    PIL reads the raw (un-rotated) pixels; the mask from the frontend
-    #    matches the browser-displayed (rotated) view.  Without transpose the
-    #    image/mask dimensions can mismatch, producing garbled inpainting.
-    # 2) Format conversion — LaMa expects JPEG or PNG.  MPO, HEIC, AVIF,
-    #    TIFF, etc. are re-encoded to JPEG.
+    # Normalize unusual image formats to JPEG before sending to the GPU worker.
+    # The LaMa GPU worker expects standard JPEG or PNG.  Formats like MPO, HEIC, AVIF,
+    # TIFF, PSD, TGA, ICO, DDS etc. must be converted first.
+    # JPEG and PNG are passed through unchanged to avoid an unnecessary re-encode.
     try:
         buf = io.BytesIO(image_bytes)
         with Image.open(buf) as probe_img:
             detected_fmt = (probe_img.format or "unknown").lower()
             needs_conversion = detected_fmt not in _INPAINT_PASSTHROUGH_FORMATS
-            try:
-                orientation = probe_img.getexif().get(274, 1)
-            except Exception:
-                orientation = 1
-            has_exif_rotation = orientation != 1
 
-        if has_exif_rotation or needs_conversion:
+        if needs_conversion:
             buf.seek(0)
             original_size = len(image_bytes)
             with Image.open(buf) as src_img:
-                corrected = ImageOps.exif_transpose(src_img)
                 out = io.BytesIO()
-                if needs_conversion:
-                    corrected.convert("RGB").save(out, format="JPEG", quality=95)
-                else:
-                    save_fmt = "PNG" if detected_fmt == "png" else "JPEG"
-                    corrected.convert("RGB").save(out, format=save_fmt, quality=95)
+                src_img.convert("RGB").save(out, format="JPEG", quality=95)
             image_bytes = out.getvalue()
             image_size_mb = round(len(image_bytes) / (1024 * 1024), 2)
             logger.info("inpaint_image_normalized", extra={
                 "action": "inpaint_image_normalized",
                 "inpaint_request_id": request_id,
                 "original_format": detected_fmt,
-                "exif_rotated": has_exif_rotation,
-                "format_converted": needs_conversion,
                 "original_size_bytes": original_size,
                 "converted_size_bytes": len(image_bytes),
             })
