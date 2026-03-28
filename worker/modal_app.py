@@ -37,7 +37,7 @@ image = (
     image=image,
     gpu="L4",
     timeout=30,
-    scaledown_window=30,
+    scaledown_window=300,
     enable_memory_snapshot=True,
     experimental_options={"enable_gpu_snapshot": True},
 )
