@@ -3,8 +3,9 @@ import io
 import gc
 import torch
 import logging
+import numpy as np
 import pillow_heif
-from PIL import Image
+from PIL import Image, ImageOps
 from simple_lama_inpainting import SimpleLama
 
 # ------------------------------------------------------------------------
@@ -56,36 +57,44 @@ class FauxLensRemover:
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         mask = Image.open(io.BytesIO(mask_bytes)).convert("L")
 
-        # THE MEMORY FIX: 1536px cap for Float32
-        # Float32 uses double the VRAM. 2048px will exceed 24GB and cause GPU freezing/swapping.
-        MAX_SIZE = 1536 
+        MAX_SIZE = 1536
         BUCKET = 64
         w, h = img.size
+        original_size = (w, h)
         scale = min(1.0, MAX_SIZE / max(w, h))
-        
-        if scale < 1.0 or w % BUCKET != 0 or h % BUCKET != 0:
-            new_w = max(BUCKET, (int(w * scale) // BUCKET) * BUCKET)
-            new_h = max(BUCKET, (int(h * scale) // BUCKET) * BUCKET)
-            img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-            mask = mask.resize((new_w, new_h), Image.Resampling.NEAREST)
+
+        if scale < 1.0:
+            scaled_w, scaled_h = int(w * scale), int(h * scale)
+            img = img.resize((scaled_w, scaled_h), Image.Resampling.LANCZOS)
+            mask = mask.resize((scaled_w, scaled_h), Image.Resampling.NEAREST)
+        else:
+            scaled_w, scaled_h = w, h
+
+        pad_w = (BUCKET - scaled_w % BUCKET) % BUCKET
+        pad_h = (BUCKET - scaled_h % BUCKET) % BUCKET
+        if pad_w or pad_h:
+            img = Image.fromarray(
+                np.pad(np.array(img), ((0, pad_h), (0, pad_w), (0, 0)), mode="edge")
+            )
+            mask = ImageOps.expand(mask, (0, 0, pad_w, pad_h), fill=0)
 
         if img.size != mask.size:
-             mask = mask.resize(img.size, Image.Resampling.NEAREST)
+            mask = mask.resize(img.size, Image.Resampling.NEAREST)
 
-        # RTX 4090 Inference in Float32 (Accurate, no black boxes)
         logger.info(f"Running inference on size {img.size}")
         with torch.inference_mode():
             result = self.model(img, mask)
         logger.info("Inference complete")
 
-        # Removed the manual Tensor conversion block. 
-        # The SimpleLama wrapper natively returns a PIL Image.
+        if pad_w or pad_h:
+            result = result.crop((0, 0, scaled_w, scaled_h))
+        if (scaled_w, scaled_h) != original_size:
+            result = result.resize(original_size, Image.Resampling.LANCZOS)
 
         out_io = io.BytesIO()
         result.save(out_io, format="PNG")
-        
-        # Standard GC, avoiding empty_cache() to keep CUDA allocator fast
+
         del img, mask, result
-        gc.collect() 
-        
+        gc.collect()
+
         return out_io.getvalue()
