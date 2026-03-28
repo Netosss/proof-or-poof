@@ -21,7 +21,6 @@ image = (
         "torch==2.2.1",
         "torchvision",
         "Pillow>=10.0.0",
-        "pillow-heif>=0.15.0",
         "simple-lama-inpainting==0.1.1",
     )
     .apt_install("wget", "libgl1-mesa-glx", "libglib2.0-0")
