@@ -1,7 +1,6 @@
 """
 Modal GPU worker for LaMa inpainting.
 
-Replaces the RunPod-based worker (Dockerfile + handler.py + remover.py).
 The container image is defined programmatically; the model is baked in at
 build time so cold starts only need to restore from a GPU memory snapshot.
 
