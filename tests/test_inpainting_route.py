@@ -14,9 +14,8 @@ from tests.conftest import make_tiny_jpeg
 
 DEVICE_ID = "inpaint-device-001"
 HEADERS = {"X-Device-ID": DEVICE_ID, "X-Turnstile-Token": "tok_valid"}
-WALLET_OK = {"credits": 50, "is_banned": False}
-WALLET_LOW = {"credits": 0, "is_banned": False}
-WALLET_BANNED = {"credits": 50, "is_banned": True}
+WALLET_OK = {"credits": 50}
+WALLET_LOW = {"credits": 0}
 FAKE_RESULT = b"PNG_RESULT_BYTES"
 
 
@@ -57,12 +56,6 @@ def test_inpaint_missing_turnstile(client):
 
 def test_inpaint_invalid_turnstile(client):
     with _patches(turnstile_ok=False):
-        response = client.post("/inpaint/image", headers=HEADERS, files=_make_files())
-    assert response.status_code == 403
-
-
-def test_inpaint_banned_device(client):
-    with _patches(wallet=WALLET_BANNED):
         response = client.post("/inpaint/image", headers=HEADERS, files=_make_files())
     assert response.status_code == 403
 

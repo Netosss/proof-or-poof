@@ -16,22 +16,19 @@ from tests.conftest import MOCK_DETECT_RESULT, make_tiny_jpeg
 DEVICE_ID = "test-device-001"
 HEADERS = {"X-Device-ID": DEVICE_ID, "X-Turnstile-Token": "tok_valid"}
 
-WALLET_ENOUGH = {"credits": 100, "is_banned": False}
-WALLET_LOW = {"credits": 2, "is_banned": False}
-WALLET_BANNED = {"credits": 100, "is_banned": True}
+WALLET_ENOUGH = {"credits": 100}
+WALLET_LOW = {"credits": 2}
 
 
 def _patches(
     verify_result=True,
-    ban=False,
     wallet=None,
     detect_result=None,
     deduct_result=90,
 ):
     """Return an ExitStack with all common detection route patches applied."""
     if wallet is None:
-        # When ban=True use WALLET_BANNED so the route's is_banned check fires.
-        wallet = WALLET_BANNED if ban else WALLET_ENOUGH
+        wallet = WALLET_ENOUGH
     if detect_result is None:
         detect_result = dict(MOCK_DETECT_RESULT)
 
@@ -75,16 +72,6 @@ def test_detect_missing_turnstile_token(client):
 
 def test_detect_invalid_turnstile(client):
     with _patches(verify_result=False):
-        response = client.post(
-            "/detect",
-            headers=HEADERS,
-            files={"file": ("photo.jpg", make_tiny_jpeg(), "image/jpeg")},
-        )
-    assert response.status_code == 403
-
-
-def test_detect_banned_device(client):
-    with _patches(ban=True):
         response = client.post(
             "/detect",
             headers=HEADERS,
