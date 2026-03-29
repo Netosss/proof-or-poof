@@ -105,8 +105,6 @@ async def inpaint_image(
         await check_ip_device_limit(ip, device_id, token_already_verified=True)
 
         wallet = await get_guest_wallet(device_id)
-        if wallet.get("is_banned"):
-            raise HTTPException(status_code=403, detail="Device is banned")
 
     try:
         image_bytes = await image.read()

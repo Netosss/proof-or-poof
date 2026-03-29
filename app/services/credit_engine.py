@@ -203,7 +203,6 @@ async def get_or_create_user(uid: str, email: Optional[str],
                         transaction.update(g_ref, {
                             "credits": 0,
                             "is_migrated": True,
-                            "is_banned": True,
                         })
                     else:
                         starting_balance = 40

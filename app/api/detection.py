@@ -119,8 +119,6 @@ async def detect(
         await check_ip_device_limit(ip, device_id, token_already_verified=True)
 
         wallet = await get_guest_wallet(device_id)
-        if wallet.get("is_banned"):
-            raise HTTPException(status_code=403, detail="Device is banned")
 
     filename = "unknown"
     upload_content_type: str | None = None   # MIME from the multipart boundary
