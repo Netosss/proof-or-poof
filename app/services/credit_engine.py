@@ -73,7 +73,9 @@ async def consume_credits(user_id: str, cost: int, reason: str,
             raise HTTPException(status_code=404, detail="User account not found")
 
         data = snapshot.to_dict() or {}
-        current = data.get("credits_balance") or 0
+        current = data.get("credits_balance")
+        if current is None:
+            current = data.get("credits", 0)
         if current < cost:
             raise HTTPException(status_code=402, detail="Insufficient credits")
 
@@ -122,7 +124,9 @@ async def grant_credits(user_id: str, amount: int, reason: str,
             raise HTTPException(status_code=404, detail="User account not found")
 
         data = snapshot.to_dict() or {}
-        current = data.get("credits_balance") or 0
+        current = data.get("credits_balance")
+        if current is None:
+            current = data.get("credits", 0)
         new_balance = current + amount
         transaction.update(ref, {
             "credits_balance": new_balance,
@@ -151,69 +155,40 @@ async def grant_credits(user_id: str, amount: int, reason: str,
         raise HTTPException(status_code=500, detail="Credit transaction failed")
 
 
-async def get_or_create_user(uid: str, email: Optional[str],
-                             device_id: Optional[str] = None) -> dict:
+async def get_or_create_user(uid: str, email: Optional[str]) -> dict:
     """
-    Returns the user doc for `uid`, creating it if it does not exist.
+    Returns the user doc for `uid`, creating it with a signup bonus if it does not exist.
 
-    On creation, applies the strict migration rule — fully inside one
-    Firestore transaction to prevent TOCTOU race conditions.
+    Guest and authenticated wallets are kept entirely separate — no credit migration.
     """
     db = _get_db()
     user_ref = db.collection("users").document(uid)
-    guest_ref = db.collection("guest_wallets").document(device_id) if device_id else None
 
-    # Fast path: user already exists (non-transactional read is fine here —
-    # the transaction below double-checks atomically before writing).
+    # Fast path: user already exists.
     snapshot = await user_ref.get()
     if snapshot.exists:
         data = snapshot.to_dict()
+        balance = data.get("credits_balance")
+        if balance is None:
+            balance = data.get("credits", 0)
         return {
             "uid": uid,
             "email": data.get("email"),
-            "credits_balance": data.get("credits_balance", 0),
+            "credits_balance": balance,
             "is_new_user": False,
         }
 
     @async_transactional
-    async def _create_user(transaction, u_ref, g_ref):
+    async def _create_user(transaction, u_ref):
         u_snap = await u_ref.get(transaction=transaction)
         if u_snap.exists:
-            return u_snap.to_dict(), False
+            data = u_snap.to_dict()
+            balance = data.get("credits_balance")
+            if balance is None:
+                balance = data.get("credits", 0)
+            return data, balance, False
 
-        starting_balance = 0
-        bonus_reason = "signup_bonus"
-        bonus_ref_id = None
-        was_hijack_attempt = False
-
-        if g_ref is not None:
-            g_snap = await g_ref.get(transaction=transaction)
-            if g_snap.exists:
-                wallet = g_snap.to_dict()
-                if wallet.get("is_migrated"):
-                    was_hijack_attempt = True
-                    starting_balance = 0
-                    bonus_reason = "none"
-                else:
-                    guest_credits = wallet.get("credits", 0)
-                    if guest_credits > 0:
-                        starting_balance = guest_credits
-                        bonus_reason = "guest_migration"
-                        bonus_ref_id = device_id
-                        transaction.update(g_ref, {
-                            "credits": 0,
-                            "is_migrated": True,
-                        })
-                    else:
-                        starting_balance = 40
-                        bonus_reason = "signup_bonus"
-            else:
-                starting_balance = 40
-                bonus_reason = "signup_bonus"
-        else:
-            starting_balance = 40
-            bonus_reason = "signup_bonus"
-
+        starting_balance = 40
         now = datetime.now(timezone.utc)
         user_data = {
             "email": email,
@@ -222,28 +197,18 @@ async def get_or_create_user(uid: str, email: Optional[str],
             "created_at": now,
         }
         transaction.set(u_ref, user_data)
-
-        if bonus_reason != "none":
-            _append_ledger(
-                transaction, u_ref,
-                delta=starting_balance,
-                reason=bonus_reason,
-                reference_id=bonus_ref_id,
-                balance_after=starting_balance,
-            )
-
-        if was_hijack_attempt:
-            logger.warning("auth_hijack_blocked", extra={
-                "action": "auth_hijack_blocked",
-                "device_id": device_id,
-            })
-
-        return user_data, True
+        _append_ledger(
+            transaction, u_ref,
+            delta=starting_balance,
+            reason="signup_bonus",
+            reference_id=None,
+            balance_after=starting_balance,
+        )
+        return user_data, starting_balance, True
 
     try:
         txn = db.transaction()
-        data, is_new = await _create_user(txn, user_ref, guest_ref)
-        balance = data.get("credits_balance", 0)
+        data, balance, is_new = await _create_user(txn, user_ref)
         return {
             "uid": uid,
             "email": data.get("email") or email,
@@ -266,4 +231,8 @@ async def get_user_balance(user_id: str) -> int:
     doc = await db.collection("users").document(user_id).get()
     if not doc.exists:
         raise HTTPException(status_code=404, detail="User account not found")
-    return doc.to_dict().get("credits_balance", 0)
+    data = doc.to_dict()
+    balance = data.get("credits_balance")
+    if balance is None:
+        balance = data.get("credits", 0)
+    return balance

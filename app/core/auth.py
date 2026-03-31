@@ -26,13 +26,13 @@ _DEVICE_ID_MAX_LEN = 128
 _DEVICE_ID_RE = re.compile(r"^[a-zA-Z0-9\-_.]+$")
 
 
-def validate_device_id(device_id: str) -> None:
+def validate_device_id(device_id: str | None) -> None:
     """
-    Raises HTTP 400 if device_id is longer than 128 characters or contains
-    characters outside [a-zA-Z0-9-_.].  Prevents Firestore key injection and
-    Redis key-prefix abuse.
+    Raises HTTP 400 if device_id is missing, longer than 128 characters, or
+    contains characters outside [a-zA-Z0-9-_.].
+    Prevents Firestore key injection and Redis key-prefix abuse.
     """
-    if len(device_id) > _DEVICE_ID_MAX_LEN or not _DEVICE_ID_RE.match(device_id):
+    if not device_id or len(device_id) > _DEVICE_ID_MAX_LEN or not _DEVICE_ID_RE.match(device_id):
         raise HTTPException(status_code=400, detail="Invalid X-Device-ID")
 
 

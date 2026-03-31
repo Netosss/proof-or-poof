@@ -3,12 +3,11 @@ Auth routes: Google Sign-In via Firebase.
 
 POST /api/auth/me
   Verifies the Firebase ID token, creates the user account if it is their
-  first visit (applying the strict guest-credit migration rule), and returns
-  the user's current state.
+  first visit (granting a signup bonus), and returns the user's current state.
 
-The frontend should call this endpoint immediately after a successful
-Google Sign-In, passing the optional device_id of the current guest
-session so any accumulated guest credits can be migrated.
+Guest and authenticated wallets are kept entirely separate — no credit migration.
+The optional device_id in the request body is accepted for backward compatibility
+but is no longer used.
 """
 
 import logging
@@ -46,8 +45,7 @@ async def auth_me(
     Register or retrieve the authenticated user.
 
     - Verifies the Firebase ID token (Authorization: Bearer).
-    - Creates the user account on first call, applying the strict
-      guest-credit migration rule (see credit_engine.get_or_create_user).
+    - Creates the user account on first call with a signup bonus.
     - Returns current balance and whether this is the user's first login
       so the frontend can show an onboarding screen.
     """
@@ -55,7 +53,7 @@ async def auth_me(
     email = user.get("email")
     user_id_var.set(uid)
 
-    result = await get_or_create_user(uid, email, device_id=body.device_id)
+    result = await get_or_create_user(uid, email)
 
     logger.info("auth_me_success", extra={
         "action": "auth_me_success",

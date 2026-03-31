@@ -13,11 +13,11 @@ from google.cloud.firestore_v1.async_transaction import async_transactional
 
 from app.config import settings
 from app.core.auth import check_ip_device_limit, get_client_ip, validate_device_id
-from app.core.firebase_auth import get_current_user
+from app.core.firebase_auth import get_current_user, get_optional_user
 from app.core.rate_limiter import check_rate_limit
 from app.integrations import firebase as firebase_module
 from app.schemas.credits import RechargeRequest
-from app.services.credit_engine import grant_credits
+from app.services.credit_engine import grant_credits, get_user_balance
 from app.services.credits_service import get_guest_wallet, perform_recharge
 from app.services.finance_service import log_transaction
 
@@ -38,18 +38,27 @@ class AdRewardResponse(BaseModel):
 @router.get("/api/user/balance")
 async def get_balance(
     request: Request,
-    device_id: str = Header(..., alias="X-Device-ID"),
-    turnstile_token: Optional[str] = Header(None, alias="X-Turnstile-Token")
+    device_id: Optional[str] = Header(None, alias="X-Device-ID"),
+    turnstile_token: Optional[str] = Header(None, alias="X-Turnstile-Token"),
+    auth_user: Optional[dict] = Depends(get_optional_user),
 ):
     """
-    Returns the current credit balance for a guest device.
-    Auto-creates a wallet with welcome credits if one does not exist.
+    Returns the current credit balance.
+
+    - Authenticated (Authorization: Bearer token): reads from users/{uid}.
+      Subject to a per-uid rate limit.
+    - Guest (no Authorization header): reads from guest_wallets/{device_id}.
+      Subject to IP/device rate limiting as before.
     """
-    validate_device_id(device_id)
-    ip = get_client_ip(request)
-    await check_ip_device_limit(ip, device_id, turnstile_token)
-    wallet = await get_guest_wallet(device_id)
-    balance = wallet.get("credits", 0)
+    if auth_user:
+        await check_rate_limit(f"balance:{auth_user['uid']}")
+        balance = await get_user_balance(auth_user["uid"])
+    else:
+        validate_device_id(device_id)
+        ip = get_client_ip(request)
+        await check_ip_device_limit(ip, device_id, turnstile_token)
+        wallet = await get_guest_wallet(device_id)
+        balance = wallet.get("credits", 0)
     logger.info("balance_queried", extra={"action": "balance_queried", "balance": balance})
     return {"balance": balance}
 
