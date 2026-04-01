@@ -10,6 +10,7 @@ the HTTP response. The AsyncClient is used directly — no thread pool needed.
 """
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timezone
 
@@ -41,13 +42,17 @@ async def _async_log(category: str, cost: float, meta: dict) -> None:
             "meta": meta,
         }
         await db.collection("financial_events").add(event)
+        try:
+            meta_json = json.dumps(meta, default=str)
+        except Exception:
+            meta_json = "{}"
         logger.info("finance_transaction", extra={
             "action": "finance_transaction",
             "category": category,
             "amount": float(cost),          # signed: negative = expense
             "cost_usd": abs(float(cost)),   # always positive — use this for chart aggregations
             "transaction_type": transaction_type,
-            **meta,
+            "meta": meta_json,
         })
     except Exception as e:
         logger.error("finance_log_error", extra={

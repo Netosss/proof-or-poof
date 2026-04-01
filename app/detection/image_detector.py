@@ -116,9 +116,13 @@ async def detect_ai_media_image_logic(
             file_size = trusted_metadata["fileSize"]
 
     slim_log = {k: (str(v)[:20] + "..." if len(str(v)) > 20 else str(v)) for k, v in exif.items()}
+    try:
+        exif_json = json.dumps(slim_log, default=str)
+    except Exception:
+        exif_json = "{}"
     logger.info("metadata_raw", extra={
         "action": "metadata_raw",
-        "exif_slim": slim_log,
+        "exif_slim": exif_json,
         "exif_key_count": len(exif),
         "dimensions": f"{width}x{height}",
         "file_size_bytes": file_size,
