@@ -73,10 +73,10 @@ class Settings(BaseSettings):
         10, description="Credits charged per /detect call"
     )
     inpaint_credit_cost: int = Field(
-        30, description="Credits charged per /inpaint call"
+        20, description="Credits charged per /inpaint call"
     )
     default_recharge_amount: int = Field(
-        5, description="Default credits per ad-reward recharge"
+        20, description="Default credits per ad-reward recharge"
     )
 
     # ------------------------------------------------------------------ #
@@ -147,7 +147,7 @@ class Settings(BaseSettings):
         0.0001, description="Estimated Railway CPU rate"
     )
     gemini_fixed_cost: float = Field(
-        0.0024, description="Cost per Gemini 3.0 Pro analysis request"
+        0.0033, description="Cost per Gemini 3 Flash Preview request (verified: ~6,380 input tokens × $0.50/1M + ~27 output tokens × $3.00/1M)"
     )
     ad_revenue_per_reward: float = Field(
         0.015, description="Avg eCPM for a verified ad view"

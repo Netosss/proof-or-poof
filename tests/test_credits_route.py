@@ -157,7 +157,7 @@ def test_add_credits_post_valid(client):
     ):
         response = client.post(
             "/api/credits/add",
-            json={"device_id": DEVICE_ID, "amount": 5, "secret_key": SECRET},
+            json={"device_id": DEVICE_ID, "amount": 20, "secret_key": SECRET},
         )
     assert response.status_code == 200
     assert response.json()["status"] == "success"
@@ -173,7 +173,7 @@ def test_add_credits_post_wrong_secret(client):
     ):
         response = client.post(
             "/api/credits/add",
-            json={"device_id": DEVICE_ID, "amount": 5, "secret_key": "wrong"},
+            json={"device_id": DEVICE_ID, "amount": 20, "secret_key": "wrong"},
         )
     assert response.status_code == 403
 
@@ -187,7 +187,7 @@ def test_add_credits_post_db_unavailable(client):
     ):
         response = client.post(
             "/api/credits/add",
-            json={"device_id": DEVICE_ID, "amount": 5, "secret_key": SECRET},
+            json={"device_id": DEVICE_ID, "amount": 20, "secret_key": SECRET},
         )
     assert response.status_code == 503
 

@@ -117,9 +117,9 @@ async def test_deduct_guest_credits_sufficient(mock_firebase, monkeypatch):
 
     from app.services.credits_service import deduct_guest_credits
     with _tx_patch():
-        new_balance = await deduct_guest_credits(DEVICE, cost=5)
+        new_balance = await deduct_guest_credits(DEVICE, cost=10)
 
-    assert new_balance == 15
+    assert new_balance == 10
 
 
 @pytest.mark.asyncio
@@ -131,7 +131,7 @@ async def test_deduct_guest_credits_insufficient_raises_402(mock_firebase, monke
     from app.services.credits_service import deduct_guest_credits
     with _tx_patch():
         with pytest.raises(HTTPException) as exc:
-            await deduct_guest_credits(DEVICE, cost=5)
+            await deduct_guest_credits(DEVICE, cost=10)
     assert exc.value.status_code == 402
 
 
@@ -148,7 +148,7 @@ async def test_perform_recharge_wrong_secret_raises_403(mock_firebase, monkeypat
     from app.services.credits_service import perform_recharge
     with _tx_patch():
         with pytest.raises(HTTPException) as exc:
-            await perform_recharge(DEVICE, amount=5, secret_key="wrong-key")
+            await perform_recharge(DEVICE, amount=20, secret_key="wrong-key")
     assert exc.value.status_code == 403
 
 
@@ -164,7 +164,7 @@ async def test_perform_recharge_valid_existing_wallet(mock_firebase, monkeypatch
         patch.dict(os.environ, {"RECHARGE_SECRET_KEY": SECRET}),
         patch("app.services.credits_service.RECHARGE_SECRET_KEY", SECRET),
     ):
-        result = await perform_recharge(DEVICE, amount=5, secret_key=SECRET)
+        result = await perform_recharge(DEVICE, amount=20, secret_key=SECRET)
 
     assert result["status"] == "success"
-    assert result["new_balance"] == 15
+    assert result["new_balance"] == 30

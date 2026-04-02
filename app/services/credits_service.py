@@ -56,7 +56,7 @@ async def check_ban_status(device_id: str) -> bool:
     return wallet.get("is_banned", False)
 
 
-async def deduct_guest_credits(device_id: str, cost: int = 5) -> int:
+async def deduct_guest_credits(device_id: str, cost: int = 10) -> int:
     """
     Deducts credits from the guest wallet atomically.
     Raises HTTPException(402) if insufficient funds.
