@@ -56,6 +56,13 @@ class DetectionResponse(BaseModel):
 
 class DetectionResult(BaseModel):
     """Gemini structured output schema — one result per image frame."""
+    visual_scan: str = Field(
+        description=(
+            "Brief 2-3 sentence forensic scan describing the most notable "
+            "observations — any anomalies found, or which authenticity markers "
+            "are present if the image appears genuine. Write BEFORE scoring."
+        )
+    )
     confidence: float = Field(description="Confidence score between 0.0 and 1.0")
     signal_category: SIGNAL_CATEGORIES = Field(
         description=(

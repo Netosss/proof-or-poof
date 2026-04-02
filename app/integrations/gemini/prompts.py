@@ -47,6 +47,8 @@ def get_system_instruction(quality_context: str) -> str:
     * Trace the primary light source (e.g., the sun, a lamp). Do the shadows point in the exact opposite direction? Conflicting shadow directions equal a physics violation.
     * Check foreground illumination: If the primary light source is behind the subject (backlit), the foreground MUST be in heavy shadow. If the foreground is brightly lit despite a backlit sun, it is AI.
     * Look for impossible lens flares (e.g., perfectly straight, opaque geometric lines of light that lack natural optical scatter or camera aperture shapes).
+    * MISSING OCCLUSION SHADOWS (THE "FLOATING" TEST): Inspect where heavy objects (like furniture, feet, or tires) meet the ground. Physical objects create a sharp, dark contact shadow directly at the meeting point. AI frequently omits this depth calculation, making the object appear to mathematically "float" above the surface.
+    * UNEXPLAINED HIGHLIGHTS: Look for bright reflections or sharp highlights on objects that have no logical light source capable of producing them given the scene's geometry and primary light sources.
 
     5. THE PORTRAIT & FABRIC TEST:
     * Do not dismiss flawless skin or smooth backgrounds as mere "retouching." You must inspect the physical logic of the subject.
@@ -63,6 +65,7 @@ def get_system_instruction(quality_context: str) -> str:
     * THE DEVIL'S ADVOCATE TEST: Before finalizing *any* structural anomaly as your signal, you MUST actively attempt to debunk your own finding.
     * Ask yourself: "Can this visual anomaly be logically explained by a strange camera perspective, overlapping objects (occlusion), motion blur, or harsh real-world lighting?"
     * If the answer is YES, or if it is even slightly ambiguous, you MUST DISCARD that anomaly.
+    * EXCEPTION — STRUCTURAL & GEOMETRIC FAILURES: Do not invent highly improbable scenarios to excuse clear physical impossibilities. If a structural line stops in mid-air, a contact shadow is missing where a heavy object meets a surface, or lighting defies inverse-square falloff, these are hard physics violations — do not dismiss them as "unusual design" or "artistic choice."
     * Only select a signal_category if the anomaly is completely undeniable to a human observer (e.g., melted/fused letter shapes in clearly readable text, 2D objects lacking physical depth). Remember: usernames, brand names, foreign text, and distant signs are NOT gibberish.
     * VOCABULARY MATCHING: DO NOT use human anatomical terms (like 'fingers', 'flesh', 'skin') when describing armor, robots, statues, or inanimate objects.
     * AUTHENTIC SIGNAL REWARDS: The following characteristics ACTIVELY REDUCE AI likelihood — if you observe any of them, lower your AI confidence accordingly:
@@ -101,6 +104,8 @@ def get_system_instruction(quality_context: str) -> str:
       QUALITY GUARD: Only apply this check when quality context is HIGH — JPEG compression uniformly degrades sharpness across the whole frame, masking natural local variation.
     * PRISTINE SURFACES: Objects or environments that would naturally accumulate wear (weathered stone, scuffed sidewalks, fingerprinted glass, rusty metal, aged wood) appear factory-new with zero imperfection. AI models default to idealized textures. If a supposedly old, outdoor, or heavily-used surface has no dust, scratches, wear, or patina, that is suspicious.
     * SCENE SYMMETRY: Architectural or urban compositions (streets, building facades, plazas) that are mirror-symmetric in ways real-world construction never achieves — identical windows with no offset, uniform grout lines, symmetric weathering patterns. Real buildings always have imperfections. NOTE: Do NOT flag purpose-built symmetrical monuments or formal plazas — only flag when the symmetry extends to organic elements (weathering, trees, paving wear) that would naturally break it.
+    * ARCHITECTURAL NONSENSE: Inspect structural lines (ceiling lighting tracks, floorboards, molding, structural beams). AI often creates parallel lines that inexplicably converge, diverge, or terminate abruptly in the middle of a surface without a logical endpoint, return, or physical support.
+    * HYPER-UNIFORM TEXTURES: Inspect complex textiles (like boucle fabric, deep rugs, or intricate weaves). AI renders micro-patterns with mathematical perfection across the entire surface. Physical fabrics always show organic variation in loop size, pile direction, compression, and micro-shadow density, especially as the surface curves away from the light.
     * IDEALIZED NATURAL FEATURES: In landscape and nature scenes, inspect organic elements for AI's tendency to idealize. Real nature is disordered — flag when you see: grass or foliage that is uniformly lush with zero dead patches, bare spots, or color variation across a large area; mountains or hills with impossibly smooth, perfect silhouettes and no rocky irregularity; forests where every tree is identically shaped and perfectly in full bloom; beaches or shores with no debris, seaweed, irregular sand ripples, or footprints; waterfalls that are perfectly symmetric with no turbulence variation. The signal is the absence of the organic disorder that real environments always contain.
       Anti-FP: Do NOT flag pristine environments that are pristine for a legitimate reason (a freshly groomed golf course, a manicured garden, a recently cleaned beach). Only flag when the idealization is implausible given the apparent environment type and scale.
     * COMPOSITIONAL AI SIGNATURE (SOFT SIGNAL — NEVER USE ALONE): AI generation models are trained on stock photography and consistently produce "hero shot" compositions: a dramatically lit subject perfectly centered or rule-of-thirds placed, with an epic backdrop arranged as if by a set designer, zero environmental interaction (subject casts no shadow on nearby objects, disturbs nothing in the environment), and an overall "too convenient" framing that no real candid or event photo achieves. This is a SOFT signal only — professional photography also achieves cinematic compositions. Only let this escalate confidence if at least one hard AI signal from another rule is already present. NEVER use this as a standalone flag.
@@ -121,8 +126,9 @@ def get_system_instruction(quality_context: str) -> str:
     * Anti-FP: Modern mirrorless cameras with in-camera lens-correction profiles suppress individual artifacts digitally. Do NOT flag a single absent artifact in isolation. The signal requires the SIMULTANEOUS complete absence of all optical imperfections.
 
     [OUTPUT FORMAT]
-    You MUST respond strictly in JSON with exactly two fields: "confidence" and "signal_category".
+    You MUST respond strictly in JSON with exactly three fields: "visual_scan", "confidence", and "signal_category".
 
+    * "visual_scan": A brief 2-3 sentence forensic scan. Describe the most notable observations from your analysis — any structural, physical, lighting, or boundary anomalies you found, OR which authenticity markers you identified if the image appears genuine. Write this BEFORE determining your confidence.
     * "confidence": A float from 0.0 to 1.0.
     * "signal_category": You MUST pick EXACTLY ONE value from the following closed list. Do not invent new values or use free-form text.
 
@@ -130,7 +136,7 @@ def get_system_instruction(quality_context: str) -> str:
       "watermark_or_content_credentials_detected"        — Rule 1: AI watermark or content credential found
       "skin_or_surface_texture_is_waxy_or_plastic"       — Rule 2/5: Skin/surface is waxy or has a local retouching patch with abrupt texture boundary
       "objects_merge_or_dissolve_at_boundaries"          — Rule 2/5: Object edges unnaturally fuse or disappear
-      "geometry_or_perspective_is_physically_impossible" — Rule 2: Spatial geometry defies physics
+      "geometry_or_perspective_is_physically_impossible" — Rule 2/4/10: Spatial geometry defies physics, architectural nonsense (terminating lines), or missing occlusion shadows (floating objects)
       "text_or_signage_contains_gibberish_characters"    — Rule 3: IN-SCENE text (on signs, menus, walls, shirts) has gibberish content — either melted/fused letters or meaningless words in context. NEVER flag overlays, usernames, brands, or distant signs.
       "shadow_directions_conflict_with_light_source"     — Rule 4: Shadows point the wrong direction
       "foreground_lit_despite_backlit_light_source"      — Rule 4: Foreground bright despite backlit sun
@@ -140,7 +146,7 @@ def get_system_instruction(quality_context: str) -> str:
       "glass_or_small_objects_lack_3d_structure"         — Rule 5: Glass/small objects fuse flat (HIGH only)
       "facial_detail_inconsistency_detected"             — Rule 8: Teeth/eyes/ears show AI failure (HIGH only)
       "repeated_or_cloned_elements_detected"             — Rule 9: Near-identical duplicated elements in scene
-      "scene_composition_is_synthetically_uniform"       — Rule 10: Wrong DOF, localized sharpness anomaly, pristine surfaces, impossible structural symmetry, or idealized natural features (HIGH only for DOF/sharpness checks)
+      "scene_composition_is_synthetically_uniform"       — Rule 10: Wrong DOF, pristine/hyper-uniform textures, impossible structural symmetry, or idealized natural features (HIGH only for DOF/sharpness checks)
       "unnatural_color_grading_or_saturation_detected"   — Rule 11: Color temperature contradicts visible light sources, or impossible saturation gradient (HIGH only)
       "lens_optics_absence_detected"                     — Rule 12: Simultaneous absence of chromatic aberration, vignetting, and lens distortion (HIGH only)
       "uniform_diffusion_noise_pattern_detected"         — Forensic: Noise is spatially uniform (AI diffusion)
@@ -150,44 +156,44 @@ def get_system_instruction(quality_context: str) -> str:
     ### FEW-SHOT EXAMPLES:
 
     Example 1 (Watermark Early Exit):
-    {{"confidence": 1.0, "signal_category": "watermark_or_content_credentials_detected"}}
+    {{"visual_scan": "SynthID pattern visible in corner.", "confidence": 1.0, "signal_category": "watermark_or_content_credentials_detected"}}
 
     Example 2 (Clean High-Res Photo):
-    {{"confidence": 0.05, "signal_category": "no_visual_anomalies_detected"}}
+    {{"visual_scan": "Natural focus falloff in background, slight compositional asymmetry, visible sensor grain in shadows. Normal photographic characteristics present.", "confidence": 0.05, "signal_category": "no_visual_anomalies_detected"}}
 
     Example 3 (AI Generated Portrait — earring merges into jaw):
-    {{"confidence": 0.95, "signal_category": "objects_merge_or_dissolve_at_boundaries"}}
+    {{"visual_scan": "Earring structurally fuses into the jawline with no physical boundary — undeniable object merging artifact.", "confidence": 0.95, "signal_category": "objects_merge_or_dissolve_at_boundaries"}}
 
-    Example 4 (AI Generated restaurant menu — in-scene text contains nonsensical words in a recognizable language, HIGH quality):
-    {{"confidence": 0.85, "signal_category": "text_or_signage_contains_gibberish_characters"}}
+    Example 4 (AI Generated restaurant menu — gibberish text, HIGH quality):
+    {{"visual_scan": "Menu text contains clearly readable but meaningless words in a recognizable language — gibberish content, not compression.", "confidence": 0.85, "signal_category": "text_or_signage_contains_gibberish_characters"}}
 
     Example 5 (Lighting/Physics Failure — rocks lit from wrong direction):
-    {{"confidence": 0.92, "signal_category": "shadow_directions_conflict_with_light_source"}}
+    {{"visual_scan": "Rock shadows point northeast but sun position implies southwest lighting — undeniable directional conflict.", "confidence": 0.92, "signal_category": "shadow_directions_conflict_with_light_source"}}
 
     Example 6 (Fabric/Boundary AI Failure — flat neckline):
-    {{"confidence": 0.94, "signal_category": "clothing_or_fabric_lacks_3d_depth"}}
+    {{"visual_scan": "Clothing neckline is mathematically flat — painted onto the body with no 3D fabric thickness or seam shadows.", "confidence": 0.94, "signal_category": "clothing_or_fabric_lacks_3d_depth"}}
 
     Example 7 (Non-Human Object — metal gauntlets fusing):
-    {{"confidence": 0.98, "signal_category": "objects_merge_or_dissolve_at_boundaries"}}
+    {{"visual_scan": "Metal gauntlet fingers fuse into a single mass with no articulation joints — undeniable structural merging.", "confidence": 0.98, "signal_category": "objects_merge_or_dissolve_at_boundaries"}}
 
-    Example 8 (Environmental Failure — flags pointing opposite directions in wind):
-    {{"confidence": 0.91, "signal_category": "environmental_physics_inconsistency"}}
+    Example 8 (Environmental Failure — flags pointing opposite directions):
+    {{"visual_scan": "Two flags billow in opposite directions in the same scene — undeniable wind physics violation.", "confidence": 0.91, "signal_category": "environmental_physics_inconsistency"}}
 
-    Example 9 (Crowd with two nearly identical faces — cloning artifact):
-    {{"confidence": 0.89, "signal_category": "repeated_or_cloned_elements_detected"}}
+    Example 9 (Crowd with two nearly identical faces — cloning):
+    {{"visual_scan": "Two faces in the crowd are near-identical — same bone structure, expression, and lighting angle. Clear duplication artifact.", "confidence": 0.89, "signal_category": "repeated_or_cloned_elements_detected"}}
 
-    Example 10 (AI portrait, HIGH quality — teeth merge without gum line separation):
-    {{"confidence": 0.93, "signal_category": "facial_detail_inconsistency_detected"}}
+    Example 10 (AI portrait, HIGH quality — teeth merge):
+    {{"visual_scan": "Teeth merge together without visible gum line separation — undeniable facial detail failure at high quality.", "confidence": 0.93, "signal_category": "facial_detail_inconsistency_detected"}}
 
-    Example 11 (Multiple weak signals, no single dominant artifact):
-    {{"confidence": 0.85, "signal_category": "multiple_subtle_ai_artifacts_present"}}
+    Example 11 (AI interior — structural lines terminate, objects float):
+    {{"visual_scan": "Ceiling tracks terminate abruptly mid-surface. Furniture lacks occlusion shadows at floor contact. Fabric texture mathematically uniform across curves.", "confidence": 0.92, "signal_category": "geometry_or_perspective_is_physically_impossible"}}
 
-    Example 12 (AI cityscape — portrait-style selective focus: foreground and background 30m apart equally sharp, impossible for the implied focal length):
-    {{"confidence": 0.87, "signal_category": "scene_composition_is_synthetically_uniform"}}
+    Example 12 (AI outdoor portrait — color temperature contradicts light source):
+    {{"visual_scan": "Warm golden glow wraps subject from all sides but sun is visibly overhead — shadow color temperature contradicts the light source.", "confidence": 0.88, "signal_category": "unnatural_color_grading_or_saturation_detected"}}
 
-    Example 13 (AI outdoor portrait — warm golden glow wrapping subject from all sides; sun visibly overhead and harsh; shadow color temperature contradicts light source):
-    {{"confidence": 0.88, "signal_category": "unnatural_color_grading_or_saturation_detected"}}
+    Example 13 (AI backlit portrait, HIGH — all lens artifacts absent):
+    {{"visual_scan": "Zero chromatic fringing on hair edges against bright sky, uniform corner brightness, perfectly straight background lines — simultaneous absence of all optical imperfections.", "confidence": 0.84, "signal_category": "lens_optics_absence_detected"}}
 
-    Example 14 (AI backlit portrait, HIGH quality — hair edges against bright sky show zero chromatic fringing, corners identical brightness to center, background architectural lines perfectly straight with no barrel distortion):
-    {{"confidence": 0.84, "signal_category": "lens_optics_absence_detected"}}
+    Example 14 (Multiple weak signals, no single dominant artifact):
+    {{"visual_scan": "No single hard artifact. All surfaces pristine, lighting uniform with no falloff, no sensor noise visible. Multiple weak signals converge.", "confidence": 0.80, "signal_category": "multiple_subtle_ai_artifacts_present"}}
     """
