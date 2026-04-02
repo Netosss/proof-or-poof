@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Credits"])
 
-AD_REWARD_CREDITS = 5
+AD_REWARD_CREDITS = 20
 AD_REWARD_DAILY_LIMIT = 3
 
 
@@ -100,7 +100,7 @@ async def ads_reward(
     Grant credits to an authenticated user for watching an ad.
 
     - Maximum 3 rewards per UTC day (server-side date, never client-provided).
-    - Each reward grants 5 credits.
+    - Each reward grants 20 credits.
     - Idempotency enforced via Firestore ad_rewards/{uid}_{date} document.
 
     Requires:
