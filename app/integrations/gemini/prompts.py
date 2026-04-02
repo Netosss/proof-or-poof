@@ -18,8 +18,10 @@ def get_system_instruction(quality_context: str) -> str:
     {quality_context}
 
     [FORENSIC RULES]
+    CRITICAL — ANTI-ANCHORING: Do NOT let your first impression of an image bias your analysis. A polished, well-lit, photorealistic image is NOT evidence of authenticity — modern AI excels at exactly this. Complete ALL applicable rule checks below regardless of how convincing the image appears at first glance.
+
     1. THE "WATERMARK" CHECK (EARLY EXIT):
-    * Actively scan corners and borders for SynthID patterns, DALL-E color strips, or "CR" (Content Credentials) icons.
+    * BEFORE analyzing any visual content, scan ALL four corners and ALL edges of the image for SynthID patterns, DALL-E color strips, small star/sparkle icons, or "CR" (Content Credentials) icons. These are often tiny and easy to miss — look carefully.
     * IF FOUND: Stop all further analysis immediately. Return confidence 1.0 and signal_category "watermark_or_content_credentials_detected".
 
     2. CONTEXT MATTERS (PHOTOREALISM VS. ART):
@@ -128,7 +130,7 @@ def get_system_instruction(quality_context: str) -> str:
     [OUTPUT FORMAT]
     You MUST respond strictly in JSON with exactly three fields: "visual_scan", "confidence", and "signal_category".
 
-    * "visual_scan": A brief 2-3 sentence forensic scan. Describe the most notable observations from your analysis — any structural, physical, lighting, or boundary anomalies you found, OR which authenticity markers you identified if the image appears genuine. Write this BEFORE determining your confidence.
+    * "visual_scan": A brief 2-3 sentence forensic scan. FIRST describe any structural, physical, lighting, or boundary anomalies you found after applying ALL rules above. Only describe authenticity markers if you completed every rule check and found zero anomalies. Write this BEFORE determining your confidence.
     * "confidence": A float from 0.0 to 1.0.
     * "signal_category": You MUST pick EXACTLY ONE value from the following closed list. Do not invent new values or use free-form text.
 
@@ -196,4 +198,11 @@ def get_system_instruction(quality_context: str) -> str:
 
     Example 14 (Multiple weak signals, no single dominant artifact):
     {{"visual_scan": "No single hard artifact. All surfaces pristine, lighting uniform with no falloff, no sensor noise visible. Multiple weak signals converge.", "confidence": 0.80, "signal_category": "multiple_subtle_ai_artifacts_present"}}
+
+    Example 15 (AI Lifestyle/Travel Product — object fusion and impossible attachments):
+    {{"visual_scan": "Foreground luggage tags fuse directly into the solid plastic shell without any visible clip, zipper, or string. A fabric strap forms an impossible continuous loop around the metal handle. Background books and slippers structurally merge into undefined masses.", "confidence": 0.96, "signal_category": "objects_merge_or_dissolve_at_boundaries"}}
+
+    Example 16 (AI Styled Product/Scene — polished look but secondary objects dissolve):
+    {{"visual_scan": "Primary subject is well-lit and photorealistic, but secondary objects lose structural integrity — a cable merges into the surface it rests on with no endpoint, decorative items in the periphery dissolve into shapeless blobs lacking distinct edges or physical separation.", "confidence": 0.93, "signal_category": "objects_merge_or_dissolve_at_boundaries"}}
+
     """

@@ -189,6 +189,7 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image], pre_calculate
         parsed_result = response.parsed
 
         result = {
+            "visual_scan": parsed_result.visual_scan,
             "confidence": parsed_result.confidence,
             "signal_category": parsed_result.signal_category,
             "quality_score": quality_score
