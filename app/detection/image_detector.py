@@ -288,7 +288,7 @@ async def detect_ai_media_image_logic(
         if is_gemini_used:
             is_ai_likely = forensic_probability > settings.ai_confidence_threshold
             raw_conf = forensic_probability if is_ai_likely else (1.0 - forensic_probability)
-            final_conf = boost_score(raw_conf, is_ai_likely=is_ai_likely)
+            final_conf = min(0.99, boost_score(raw_conf, is_ai_likely=is_ai_likely))
 
             cached_signal = cached_result.get("signal_category", "multiple_subtle_ai_artifacts_present")
             cached_explanation = _label_for(cached_signal)
@@ -407,7 +407,7 @@ async def detect_ai_media_image_logic(
 
         is_ai_likely = gemini_score > settings.ai_confidence_threshold
         raw_conf = gemini_score if is_ai_likely else (1.0 - gemini_score)
-        final_conf = boost_score(raw_conf, is_ai_likely=is_ai_likely)
+        final_conf = min(0.99, boost_score(raw_conf, is_ai_likely=is_ai_likely))
 
         return {
             "summary": "Likely AI-Generated" if is_ai_likely else "Likely Authentic",
