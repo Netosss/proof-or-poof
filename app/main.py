@@ -16,21 +16,20 @@ import os
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-
-import sentry_sdk
 from contextlib import asynccontextmanager
 
+import sentry_sdk
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.logging_config import configure_json_logging, device_id_var, request_id_var
 from app.api import auth, checkout, credits, detection, inpainting, reports, system, webhooks
 from app.integrations import firebase as firebase_module
 from app.integrations import http_client as http_module
 from app.integrations import redis_client as redis_module
+from app.logging_config import configure_json_logging, device_id_var, request_id_var
 
 load_dotenv()
 
@@ -62,16 +61,22 @@ async def lifespan(app: FastAPI):
         await redis_module.initialize()
         await http_module.initialize()
     except Exception as e:
-        logger.critical("startup_failed", extra={
-            "action": "startup_failed",
-            "error": str(e),
-        })
+        logger.critical(
+            "startup_failed",
+            extra={
+                "action": "startup_failed",
+                "error": str(e),
+            },
+        )
         raise
 
-    logger.info("startup_complete", extra={
-        "action": "startup_complete",
-        "services": ["firebase", "redis", "http_session"],
-    })
+    logger.info(
+        "startup_complete",
+        extra={
+            "action": "startup_complete",
+            "services": ["firebase", "redis", "http_session"],
+        },
+    )
 
     yield
 
@@ -96,24 +101,29 @@ async def request_logging_middleware(request: Request, call_next):
 
     # Tag the Sentry scope so any error captured during this request carries
     # the device_id and client IP — makes crash reports actionable.
-    sentry_sdk.set_user({
-        "id": device_id or "anonymous",
-        "ip_address": request.client.host if request.client else None,
-    })
+    sentry_sdk.set_user(
+        {
+            "id": device_id or "anonymous",
+            "ip_address": request.client.host if request.client else None,
+        }
+    )
 
     t0 = time.perf_counter()
     response = await call_next(request)
     duration_ms = round((time.perf_counter() - t0) * 1000, 1)
 
-    logger.info("request_completed", extra={
-        "action": "request_completed",
-        "method": request.method,
-        "path": request.url.path,
-        "status_code": response.status_code,
-        "duration_ms": duration_ms,
-        "ip": request.client.host if request.client else "",
-        "user_agent": request.headers.get("user-agent", ""),
-    })
+    logger.info(
+        "request_completed",
+        extra={
+            "action": "request_completed",
+            "method": request.method,
+            "path": request.url.path,
+            "status_code": response.status_code,
+            "duration_ms": duration_ms,
+            "ip": request.client.host if request.client else "",
+            "user_agent": request.headers.get("user-agent", ""),
+        },
+    )
     return response
 
 
@@ -149,14 +159,17 @@ async def custom_http_exception_handler(request: Request, exc: StarletteHTTPExce
 
     response_data = {"detail": exc.detail}
     log_level = logger.warning if exc.status_code < 500 else logger.error
-    log_level("http_exception_response", extra={
-        "action": "http_exception_response",
-        "status_code": exc.status_code,
-        "detail": str(exc.detail)[:500],
-        "path": request.url.path,
-        "method": request.method,
-        "user_agent": request.headers.get("user-agent", "")[:200],
-    })
+    log_level(
+        "http_exception_response",
+        extra={
+            "action": "http_exception_response",
+            "status_code": exc.status_code,
+            "detail": str(exc.detail)[:500],
+            "path": request.url.path,
+            "method": request.method,
+            "user_agent": request.headers.get("user-agent", "")[:200],
+        },
+    )
 
     # Send unexpected server errors to Sentry for developer alerting and
     # stack-trace grouping.  4xx are expected user errors — they belong in
@@ -179,6 +192,49 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["X-User-Balance", "X-Op-Ref"],
 )
+
+
+# ---------------------------------------------------------------------------
+# Mobile Turnstile captcha page — served to Android WebView for token solving
+# ---------------------------------------------------------------------------
+_MOBILE_CAPTCHA_HTML = """<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body style="margin:0;padding:0;background:#000;">
+<div id="cf-turnstile"></div>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit" async defer></script>
+<script>
+  function initTurnstile() {
+    if (!window.turnstile) { setTimeout(initTurnstile, 100); return; }
+    turnstile.render('#cf-turnstile', {
+      sitekey: '0x4AAAAAACORe05eEDdcyhJA',
+      callback: function(token) {
+        if (window.Android) Android.onTokenReceived(token);
+      },
+      'error-callback': function() {
+        if (window.Android) Android.onTokenError();
+      },
+      'expired-callback': function() {
+        if (window.Android) Android.onTokenExpired();
+      },
+      execution: 'render',
+      appearance: 'interaction-only',
+      theme: 'dark',
+    });
+  }
+  document.addEventListener('DOMContentLoaded', initTurnstile);
+</script>
+</body>
+</html>"""
+
+
+@app.get("/mobile-captcha.html", include_in_schema=False)
+async def mobile_captcha_page():
+    return HTMLResponse(content=_MOBILE_CAPTCHA_HTML)
+
 
 # ---------------------------------------------------------------------------
 # Sentry verification route — dev only
