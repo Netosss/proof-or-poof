@@ -11,15 +11,16 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import tempfile
 import time
+from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, UploadFile
 
 from app.config import settings
 from app.core.auth import check_ip_device_limit, get_client_ip, validate_device_id, verify_turnstile
 from app.core.dependencies import security_manager
-from app.core.file_validator import ALLOWED_VIDEO_EXTENSIONS
 from app.core.firebase_auth import get_optional_user
 from app.detection.pipeline import detect_ai_media
 from app.integrations import redis_client as redis_module
@@ -27,8 +28,9 @@ from app.logging_config import user_id_var
 from app.schemas.detection import DetectionResponse
 from app.services.credit_engine import consume_credits, get_user_balance
 from app.services.credits_service import deduct_guest_credits, get_guest_wallet
-from app.services.detection_service import _generate_short_id, download_media_to_disk
+from app.services.detection_service import _generate_short_id, download_media_to_disk, log_memory
 from app.services.finance_service import log_transaction
+from app.core.file_validator import ALLOWED_VIDEO_EXTENSIONS
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +66,9 @@ def _stream_upload_to_disk(upload_file: UploadFile, dest_path: str) -> None:
                 break
             total += len(chunk)
             if total > max_bytes:
-                raise ValueError(f"Upload too large (max {max_bytes // (1024 * 1024)} MB)")
+                raise ValueError(
+                    f"Upload too large (max {max_bytes // (1024 * 1024)} MB)"
+                )
             fp.write(chunk)
 
 
@@ -72,9 +76,8 @@ def _stream_upload_to_disk(upload_file: UploadFile, dest_path: str) -> None:
 async def detect(
     request: Request,
     device_id: str = Header(..., alias="X-Device-ID"),
-    turnstile_token: str | None = Header(None, alias="X-Turnstile-Token"),
-    extension_source: str | None = Header(None, alias="X-Extension-Source"),
-    auth_user: dict | None = Depends(get_optional_user),
+    turnstile_token: Optional[str] = Header(None, alias="X-Turnstile-Token"),
+    auth_user: Optional[dict] = Depends(get_optional_user),
 ):
     """
     Detect AI-generated content in images/videos.
@@ -94,7 +97,7 @@ async def detect(
         if not turnstile_token:
             raise HTTPException(
                 status_code=403,
-                detail={"code": "CAPTCHA_REQUIRED", "message": "Verification needed"},
+                detail={"code": "CAPTCHA_REQUIRED", "message": "Verification needed"}
             )
         is_human = await verify_turnstile(turnstile_token)
         if not is_human:
@@ -103,32 +106,22 @@ async def detect(
     else:
         validate_device_id(device_id)
 
-        is_extension = extension_source == "true"
+        if not turnstile_token:
+            raise HTTPException(
+                status_code=403,
+                detail={"code": "CAPTCHA_REQUIRED", "message": "Verification needed"}
+            )
 
-        if is_extension:
-            # Extension-opened tabs have no Referer and no Turnstile widget.
-            # Skip CAPTCHA verification; rely on device-ID + IP rate limiting.
-            await check_ip_device_limit(ip, device_id, token_already_verified=False)
-        else:
-            if not turnstile_token:
-                raise HTTPException(
-                    status_code=403,
-                    detail={"code": "CAPTCHA_REQUIRED", "message": "Verification needed"},
-                )
+        is_human = await verify_turnstile(turnstile_token)
+        if not is_human:
+            raise HTTPException(status_code=403, detail="Invalid CAPTCHA")
 
-            is_human = await verify_turnstile(turnstile_token)
-            if not is_human:
-                raise HTTPException(
-                    status_code=403,
-                    detail={"code": "CAPTCHA_REQUIRED", "message": "Verification needed"},
-                )
-
-            await check_ip_device_limit(ip, device_id, token_already_verified=True)
+        await check_ip_device_limit(ip, device_id, token_already_verified=True)
 
         wallet = await get_guest_wallet(device_id)
 
     filename = "unknown"
-    upload_content_type: str | None = None  # MIME from the multipart boundary
+    upload_content_type: str | None = None   # MIME from the multipart boundary
     sidecar_metadata = None
 
     # Create the temp file up front so all ingestion paths stream directly to
@@ -160,21 +153,15 @@ async def detect(
             if trusted_metadata_obj and isinstance(trusted_metadata_obj, str):
                 try:
                     sidecar_metadata = json.loads(trusted_metadata_obj)
-                    logger.info(
-                        "sidecar_metadata_received",
-                        extra={
-                            "action": "sidecar_metadata_received",
-                            "keys": list(sidecar_metadata.keys()),
-                        },
-                    )
+                    logger.info("sidecar_metadata_received", extra={
+                        "action": "sidecar_metadata_received",
+                        "keys": list(sidecar_metadata.keys()),
+                    })
                 except json.JSONDecodeError as e:
-                    logger.warning(
-                        "sidecar_metadata_invalid",
-                        extra={
-                            "action": "sidecar_metadata_invalid",
-                            "error": str(e),
-                        },
-                    )
+                    logger.warning("sidecar_metadata_invalid", extra={
+                        "action": "sidecar_metadata_invalid",
+                        "error": str(e),
+                    })
 
             if file_obj:
                 if not isinstance(file_obj, UploadFile):
@@ -192,14 +179,12 @@ async def detect(
                 else:
                     raise HTTPException(status_code=400, detail="Invalid url field")
             else:
-                raise HTTPException(
-                    status_code=400, detail="Must provide 'file' or 'url' in form data"
-                )
+                raise HTTPException(status_code=400, detail="Must provide 'file' or 'url' in form data")
 
         else:
             raise HTTPException(
                 status_code=415,
-                detail="Unsupported Media Type. Use multipart/form-data or application/json",
+                detail="Unsupported Media Type. Use multipart/form-data or application/json"
             )
 
         # Measure size from disk — never trust a client-supplied Content-Length.
@@ -219,70 +204,54 @@ async def detect(
 
             current_balance = await get_user_balance(uid)
             if current_balance < settings.detect_credit_cost:
-                logger.warning(
-                    "insufficient_credits",
-                    extra={
-                        "action": "insufficient_credits",
-                        "endpoint": "detect",
-                        "has": current_balance,
-                        "need": settings.detect_credit_cost,
-                        "user_type": "authenticated",
-                    },
-                )
+                logger.warning("insufficient_credits", extra={
+                    "action": "insufficient_credits",
+                    "endpoint": "detect",
+                    "has": current_balance,
+                    "need": settings.detect_credit_cost,
+                    "user_type": "authenticated",
+                })
                 raise HTTPException(status_code=402, detail="Insufficient credits")
 
             start_time = time.time()
 
             result = await security_manager.secure_execute(
-                request,
-                filename,
-                filesize,
-                temp_path,
+                request, filename, filesize, temp_path,
                 lambda path: detect_ai_media(path, trusted_metadata=sidecar_metadata),
-                uid=uid,
+                uid=uid
             )
 
             if result.get("summary") in ["Analysis Failed", "File too large to scan"]:
                 new_balance = await get_user_balance(uid)
             else:
-                new_balance = await consume_credits(
-                    uid, settings.detect_credit_cost, "detect", filename
-                )
+                new_balance = await consume_credits(uid, settings.detect_credit_cost, "detect", filename)
 
         else:
             current_credits = wallet.get("credits", 0)
 
             if current_credits < settings.detect_credit_cost:
-                logger.warning(
-                    "insufficient_credits",
-                    extra={
-                        "action": "insufficient_credits",
-                        "endpoint": "detect",
-                        "has": current_credits,
-                        "need": settings.detect_credit_cost,
-                        "user_type": "guest",
-                    },
-                )
+                logger.warning("insufficient_credits", extra={
+                    "action": "insufficient_credits",
+                    "endpoint": "detect",
+                    "has": current_credits,
+                    "need": settings.detect_credit_cost,
+                    "user_type": "guest",
+                })
                 raise HTTPException(status_code=402, detail="Insufficient credits")
 
             start_time = time.time()
 
             result = await security_manager.secure_execute(
-                request,
-                filename,
-                filesize,
-                temp_path,
+                request, filename, filesize, temp_path,
                 lambda path: detect_ai_media(path, trusted_metadata=sidecar_metadata),
-                uid=device_id,
+                uid=device_id
             )
 
             if result.get("summary") in ["Analysis Failed", "File too large to scan"]:
                 wallet = await get_guest_wallet(device_id)
                 new_balance = wallet.get("credits", 0)
             else:
-                new_balance = await deduct_guest_credits(
-                    device_id, cost=settings.detect_credit_cost
-                )
+                new_balance = await deduct_guest_credits(device_id, cost=settings.detect_credit_cost)
 
         duration = time.time() - start_time
 
@@ -297,19 +266,13 @@ async def detect(
         elif is_gemini_used:
             cost = settings.gemini_fixed_cost
             gemini_usage = result.get("usage", {})
-            log_transaction(
-                "GEMINI", -cost, {"file": filename, "device_id": device_id, "usage": gemini_usage}
-            )
+            log_transaction("GEMINI", -cost, {"file": filename, "device_id": device_id, "usage": gemini_usage})
         elif actual_gpu_sec > 0:
             cost = actual_gpu_sec * settings.gpu_rate_per_sec
-            log_transaction(
-                "GPU", -cost, {"file": filename, "device_id": device_id, "duration": actual_gpu_sec}
-            )
+            log_transaction("GPU", -cost, {"file": filename, "device_id": device_id, "duration": actual_gpu_sec})
         else:
             cost = duration * settings.cpu_rate_per_sec
-            log_transaction(
-                "CPU", -cost, {"file": filename, "device_id": device_id, "duration": duration}
-            )
+            log_transaction("CPU", -cost, {"file": filename, "device_id": device_id, "duration": duration})
 
         result.pop("gpu_time_ms", None)
         result.pop("is_gemini_used", None)
@@ -321,31 +284,26 @@ async def detect(
         rc = redis_module.client
         if rc:
             shareable = {k: v for k, v in result.items() if k != "new_balance"}
-            await rc.setex(
-                f"report:{short_id}", settings.report_cache_ttl_sec, json.dumps(shareable)
-            )
+            await rc.setex(f"report:{short_id}", settings.report_cache_ttl_sec, json.dumps(shareable))
         result["short_id"] = short_id
 
         failed = result.get("summary") in ("Analysis Failed", "File too large to scan")
         credits_consumed = 0 if failed else settings.detect_credit_cost
 
-        logger.info(
-            "scan_completed",
-            extra={
-                "action": "scan_completed",
-                "outcome": result.get("summary"),
-                "confidence_score": result.get("confidence_score"),
-                "is_gemini_used": is_gemini_used,
-                "is_cached": is_cached,
-                "is_short_circuited": result.get("is_short_circuited", False),
-                "media_type": "video" if suffix in VIDEO_SUFFIXES else "image",
-                "user_type": "authenticated" if auth_user else "guest",
-                "duration_ms": round(duration * 1000, 1),
-                "cost_usd": cost,
-                "credits_consumed": credits_consumed,
-                "media_file": filename,
-            },
-        )
+        logger.info("scan_completed", extra={
+            "action": "scan_completed",
+            "outcome": result.get("summary"),
+            "confidence_score": result.get("confidence_score"),
+            "is_gemini_used": is_gemini_used,
+            "is_cached": is_cached,
+            "is_short_circuited": result.get("is_short_circuited", False),
+            "media_type": "video" if suffix in VIDEO_SUFFIXES else "image",
+            "user_type": "authenticated" if auth_user else "guest",
+            "duration_ms": round(duration * 1000, 1),
+            "cost_usd": cost,
+            "credits_consumed": credits_consumed,
+            "media_file": filename,
+        })
 
         return result
 

@@ -14,6 +14,7 @@ import io
 import logging
 import time
 import uuid
+from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Request, UploadFile
 from fastapi.responses import Response
@@ -46,9 +47,9 @@ async def inpaint_image(
     image: UploadFile = File(...),
     mask: UploadFile = File(...),
     device_id: str = Header(..., alias="X-Device-ID"),
-    turnstile_token: str | None = Header(None, alias="X-Turnstile-Token"),
-    op_ref: str | None = Header(None, alias="X-Op-Ref"),
-    auth_user: dict | None = Depends(get_optional_user),
+    turnstile_token: Optional[str] = Header(None, alias="X-Turnstile-Token"),
+    op_ref: Optional[str] = Header(None, alias="X-Op-Ref"),
+    auth_user: Optional[dict] = Depends(get_optional_user),
 ):
     """
     Remove objects from an image using the Modal GPU worker (LaMa).
@@ -67,51 +68,39 @@ async def inpaint_image(
 
     if auth_user:
         uid = auth_user["uid"]
-        logger.info(
-            "inpaint_request_started",
-            extra={
-                "action": "inpaint_request_started",
-                "inpaint_request_id": request_id,
-                "media_file": image.filename,
-                "user_type": "authenticated",
-            },
-        )
+        logger.info("inpaint_request_started", extra={
+            "action": "inpaint_request_started",
+            "inpaint_request_id": request_id,
+            "media_file": image.filename,
+            "user_type": "authenticated",
+        })
 
         if not turnstile_token:
             raise HTTPException(
                 status_code=403,
-                detail={"code": "CAPTCHA_REQUIRED", "message": "Verification needed"},
+                detail={"code": "CAPTCHA_REQUIRED", "message": "Verification needed"}
             )
         is_human = await verify_turnstile(turnstile_token)
         if not is_human:
-            raise HTTPException(
-                status_code=403,
-                detail={"code": "CAPTCHA_REQUIRED", "message": "Verification needed"},
-            )
+            raise HTTPException(status_code=403, detail="Invalid CAPTCHA")
 
     else:
         validate_device_id(device_id)
-        logger.info(
-            "inpaint_request_started",
-            extra={
-                "action": "inpaint_request_started",
-                "inpaint_request_id": request_id,
-                "media_file": image.filename,
-                "user_type": "guest",
-            },
-        )
+        logger.info("inpaint_request_started", extra={
+            "action": "inpaint_request_started",
+            "inpaint_request_id": request_id,
+            "media_file": image.filename,
+            "user_type": "guest",
+        })
 
         if not turnstile_token:
             raise HTTPException(
                 status_code=403,
-                detail={"code": "CAPTCHA_REQUIRED", "message": "Verification needed"},
+                detail={"code": "CAPTCHA_REQUIRED", "message": "Verification needed"}
             )
         is_human = await verify_turnstile(turnstile_token)
         if not is_human:
-            raise HTTPException(
-                status_code=403,
-                detail={"code": "CAPTCHA_REQUIRED", "message": "Verification needed"},
-            )
+            raise HTTPException(status_code=403, detail="Invalid CAPTCHA")
 
         await check_ip_device_limit(ip, device_id, token_already_verified=True)
 
@@ -122,14 +111,11 @@ async def inpaint_image(
         mask_bytes = await mask.read()
         image_size_mb = round(len(image_bytes) / (1024 * 1024), 2)
     except Exception as e:
-        logger.error(
-            "inpaint_file_read_error",
-            extra={
-                "action": "inpaint_file_read_error",
-                "inpaint_request_id": request_id,
-                "error": str(e),
-            },
-        )
+        logger.error("inpaint_file_read_error", extra={
+            "action": "inpaint_file_read_error",
+            "inpaint_request_id": request_id,
+            "error": str(e),
+        })
         raise HTTPException(status_code=400, detail="Error reading upload files")
 
     # Validate MIME type and size before touching billing or the GPU.
@@ -161,29 +147,23 @@ async def inpaint_image(
                 src_img.convert("RGB").save(out, format="JPEG", quality=95)
             image_bytes = out.getvalue()
             image_size_mb = round(len(image_bytes) / (1024 * 1024), 2)
-            logger.info(
-                "inpaint_image_normalized",
-                extra={
-                    "action": "inpaint_image_normalized",
-                    "inpaint_request_id": request_id,
-                    "original_format": detected_fmt,
-                    "original_size_bytes": original_size,
-                    "converted_size_bytes": len(image_bytes),
-                },
-            )
+            logger.info("inpaint_image_normalized", extra={
+                "action": "inpaint_image_normalized",
+                "inpaint_request_id": request_id,
+                "original_format": detected_fmt,
+                "original_size_bytes": original_size,
+                "converted_size_bytes": len(image_bytes),
+            })
     except HTTPException:
         raise
     except Exception as conv_err:
-        logger.warning(
-            "inpaint_image_normalization_failed",
-            extra={
-                "action": "inpaint_image_normalization_failed",
-                "inpaint_request_id": request_id,
-                "media_file": image.filename,
-                "error": str(conv_err),
-                "error_type": type(conv_err).__name__,
-            },
-        )
+        logger.warning("inpaint_image_normalization_failed", extra={
+            "action": "inpaint_image_normalization_failed",
+            "inpaint_request_id": request_id,
+            "media_file": image.filename,
+            "error": str(conv_err),
+            "error_type": type(conv_err).__name__,
+        })
         raise HTTPException(
             status_code=400,
             detail=(
@@ -201,69 +181,53 @@ async def inpaint_image(
         if op_ref and rc:
             is_free_retry = bool(await rc.getdel(f"op_ref:{uid}:{op_ref}"))
             if is_free_retry:
-                logger.info(
-                    "inpaint_free_retry_used",
-                    extra={
-                        "action": "inpaint_free_retry_used",
-                        "inpaint_request_id": request_id,
-                        "user_type": "authenticated",
-                    },
-                )
+                logger.info("inpaint_free_retry_used", extra={
+                    "action": "inpaint_free_retry_used",
+                    "inpaint_request_id": request_id,
+                    "user_type": "authenticated",
+                })
 
         if not is_free_retry:
             current_balance = await get_user_balance(uid)
             if current_balance < settings.inpaint_credit_cost:
-                logger.warning(
-                    "insufficient_credits",
-                    extra={
-                        "action": "insufficient_credits",
-                        "endpoint": "inpaint",
-                        "has": current_balance,
-                        "need": settings.inpaint_credit_cost,
-                        "user_type": "authenticated",
-                    },
-                )
+                logger.warning("insufficient_credits", extra={
+                    "action": "insufficient_credits",
+                    "endpoint": "inpaint",
+                    "has": current_balance,
+                    "need": settings.inpaint_credit_cost,
+                    "user_type": "authenticated",
+                })
                 raise HTTPException(status_code=402, detail="Insufficient credits")
 
         try:
             start_time = time.time()
-            logger.info(
-                "inpaint_gpu_dispatched",
-                extra={
-                    "action": "inpaint_gpu_dispatched",
-                    "inpaint_request_id": request_id,
-                    "user_type": "authenticated",
-                },
-            )
+            logger.info("inpaint_gpu_dispatched", extra={
+                "action": "inpaint_gpu_dispatched",
+                "inpaint_request_id": request_id,
+                "user_type": "authenticated",
+            })
             result_bytes = await run_gpu_inpainting(image_bytes, mask_bytes)
             duration = time.time() - start_time
             usd_cost = duration * settings.inpaint_rate_per_sec
 
-            logger.info(
-                "inpaint_completed",
-                extra={
-                    "action": "inpaint_completed",
-                    "inpaint_request_id": request_id,
-                    "duration_ms": round(duration * 1000, 1),
-                    "cost_usd": round(usd_cost, 6),
-                    "credits_consumed": 0 if is_free_retry else settings.inpaint_credit_cost,
-                    "user_type": "authenticated",
-                    "is_free_retry": is_free_retry,
-                    "image_size_mb": image_size_mb,
-                },
-            )
+            logger.info("inpaint_completed", extra={
+                "action": "inpaint_completed",
+                "inpaint_request_id": request_id,
+                "duration_ms": round(duration * 1000, 1),
+                "cost_usd": round(usd_cost, 6),
+                "credits_consumed": 0 if is_free_retry else settings.inpaint_credit_cost,
+                "user_type": "authenticated",
+                "is_free_retry": is_free_retry,
+                "image_size_mb": image_size_mb,
+            })
 
-            log_transaction(
-                "INPAINT", -usd_cost, {"uid": uid, "duration": duration, "request_id": request_id}
-            )
+            log_transaction("INPAINT", -usd_cost, {"uid": uid, "duration": duration, "request_id": request_id})
 
             if is_free_retry:
                 new_balance = await get_user_balance(uid)
                 headers = {"X-User-Balance": str(new_balance)}
             else:
-                new_balance = await consume_credits(
-                    uid, settings.inpaint_credit_cost, "inpaint", request_id
-                )
+                new_balance = await consume_credits(uid, settings.inpaint_credit_cost, "inpaint", request_id)
                 new_op_ref = str(uuid.uuid4())
                 if rc:
                     await rc.set(f"op_ref:{uid}:{new_op_ref}", "1", ex=600)
@@ -273,16 +237,12 @@ async def inpaint_image(
         except Exception as e:
             if is_free_retry and rc:
                 await rc.set(f"op_ref:{uid}:{op_ref}", "1", ex=600)
-            logger.error(
-                "inpaint_gpu_failed",
-                extra={
-                    "action": "inpaint_gpu_failed",
-                    "inpaint_request_id": request_id,
-                    "error": str(e),
-                    "user_type": "authenticated",
-                },
-                exc_info=True,
-            )
+            logger.error("inpaint_gpu_failed", extra={
+                "action": "inpaint_gpu_failed",
+                "inpaint_request_id": request_id,
+                "error": str(e),
+                "user_type": "authenticated",
+            }, exc_info=True)
             raise HTTPException(status_code=500, detail="Inpainting service unavailable")
 
     else:
@@ -290,71 +250,53 @@ async def inpaint_image(
         if op_ref and rc:
             is_free_retry = bool(await rc.getdel(f"op_ref:{device_id}:{op_ref}"))
             if is_free_retry:
-                logger.info(
-                    "inpaint_free_retry_used",
-                    extra={
-                        "action": "inpaint_free_retry_used",
-                        "inpaint_request_id": request_id,
-                        "user_type": "guest",
-                    },
-                )
+                logger.info("inpaint_free_retry_used", extra={
+                    "action": "inpaint_free_retry_used",
+                    "inpaint_request_id": request_id,
+                    "user_type": "guest",
+                })
 
         current_credits = wallet.get("credits", 0)
 
         if not is_free_retry and current_credits < settings.inpaint_credit_cost:
-            logger.warning(
-                "insufficient_credits",
-                extra={
+                logger.warning("insufficient_credits", extra={
                     "action": "insufficient_credits",
                     "endpoint": "inpaint",
                     "has": current_credits,
                     "need": settings.inpaint_credit_cost,
                     "user_type": "guest",
-                },
-            )
-            raise HTTPException(status_code=402, detail="Insufficient credits")
+                })
+                raise HTTPException(status_code=402, detail="Insufficient credits")
 
         try:
             start_time = time.time()
-            logger.info(
-                "inpaint_gpu_dispatched",
-                extra={
-                    "action": "inpaint_gpu_dispatched",
-                    "inpaint_request_id": request_id,
-                    "user_type": "guest",
-                },
-            )
+            logger.info("inpaint_gpu_dispatched", extra={
+                "action": "inpaint_gpu_dispatched",
+                "inpaint_request_id": request_id,
+                "user_type": "guest",
+            })
             result_bytes = await run_gpu_inpainting(image_bytes, mask_bytes)
             duration = time.time() - start_time
             usd_cost = duration * settings.inpaint_rate_per_sec
 
-            logger.info(
-                "inpaint_completed",
-                extra={
-                    "action": "inpaint_completed",
-                    "inpaint_request_id": request_id,
-                    "duration_ms": round(duration * 1000, 1),
-                    "cost_usd": round(usd_cost, 6),
-                    "credits_consumed": 0 if is_free_retry else settings.inpaint_credit_cost,
-                    "user_type": "guest",
-                    "is_free_retry": is_free_retry,
-                    "image_size_mb": image_size_mb,
-                },
-            )
+            logger.info("inpaint_completed", extra={
+                "action": "inpaint_completed",
+                "inpaint_request_id": request_id,
+                "duration_ms": round(duration * 1000, 1),
+                "cost_usd": round(usd_cost, 6),
+                "credits_consumed": 0 if is_free_retry else settings.inpaint_credit_cost,
+                "user_type": "guest",
+                "is_free_retry": is_free_retry,
+                "image_size_mb": image_size_mb,
+            })
 
-            log_transaction(
-                "INPAINT",
-                -usd_cost,
-                {"device_id": device_id, "duration": duration, "request_id": request_id},
-            )
+            log_transaction("INPAINT", -usd_cost, {"device_id": device_id, "duration": duration, "request_id": request_id})
 
             if is_free_retry:
                 new_balance = current_credits
                 headers = {"X-User-Balance": str(new_balance)}
             else:
-                new_balance = await deduct_guest_credits(
-                    device_id, cost=settings.inpaint_credit_cost
-                )
+                new_balance = await deduct_guest_credits(device_id, cost=settings.inpaint_credit_cost)
                 new_op_ref = str(uuid.uuid4())
                 if rc:
                     await rc.set(f"op_ref:{device_id}:{new_op_ref}", "1", ex=600)
@@ -364,14 +306,10 @@ async def inpaint_image(
         except Exception as e:
             if is_free_retry and rc:
                 await rc.set(f"op_ref:{device_id}:{op_ref}", "1", ex=600)
-            logger.error(
-                "inpaint_gpu_failed",
-                extra={
-                    "action": "inpaint_gpu_failed",
-                    "inpaint_request_id": request_id,
-                    "error": str(e),
-                    "user_type": "guest",
-                },
-                exc_info=True,
-            )
+            logger.error("inpaint_gpu_failed", extra={
+                "action": "inpaint_gpu_failed",
+                "inpaint_request_id": request_id,
+                "error": str(e),
+                "user_type": "guest",
+            }, exc_info=True)
             raise HTTPException(status_code=500, detail="Inpainting service unavailable")
