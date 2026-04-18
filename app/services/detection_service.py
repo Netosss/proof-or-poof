@@ -20,7 +20,6 @@ already-resolved IP to aiohttp via a custom TCPConnector and a spoofed Host
 header, which is disproportionate to the risk for this use case.
 """
 
-import aiofiles
 import asyncio
 import base64
 import ipaddress
@@ -31,6 +30,7 @@ import socket
 import string
 from urllib.parse import urlparse
 
+import aiofiles
 import aiohttp
 import psutil
 from fastapi import HTTPException
@@ -47,13 +47,13 @@ _BLOCKED_NETWORKS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
     ipaddress.ip_network("10.0.0.0/8"),
     ipaddress.ip_network("172.16.0.0/12"),
     ipaddress.ip_network("192.168.0.0/16"),
-    ipaddress.ip_network("127.0.0.0/8"),        # loopback
-    ipaddress.ip_network("169.254.0.0/16"),      # link-local / AWS metadata
-    ipaddress.ip_network("100.64.0.0/10"),       # Carrier-grade NAT (Railway internal)
+    ipaddress.ip_network("127.0.0.0/8"),  # loopback
+    ipaddress.ip_network("169.254.0.0/16"),  # link-local / AWS metadata
+    ipaddress.ip_network("100.64.0.0/10"),  # Carrier-grade NAT (Railway internal)
     ipaddress.ip_network("0.0.0.0/8"),
-    ipaddress.ip_network("::1/128"),             # IPv6 loopback
-    ipaddress.ip_network("fc00::/7"),            # IPv6 unique local
-    ipaddress.ip_network("fe80::/10"),           # IPv6 link-local
+    ipaddress.ip_network("::1/128"),  # IPv6 loopback
+    ipaddress.ip_network("fc00::/7"),  # IPv6 unique local
+    ipaddress.ip_network("fe80::/10"),  # IPv6 link-local
 )
 
 
@@ -98,34 +98,59 @@ async def _assert_url_safe(url: str) -> None:
     for addr_info in addr_infos:
         ip_str = addr_info[4][0]
         if _is_blocked_ip(ip_str):
-            logger.warning("ssrf_attempt_blocked", extra={
-                "action": "ssrf_attempt_blocked",
-                "hostname": hostname,
-                "resolved_ip": ip_str,
-            })
+            logger.warning(
+                "ssrf_attempt_blocked",
+                extra={
+                    "action": "ssrf_attempt_blocked",
+                    "hostname": hostname,
+                    "resolved_ip": ip_str,
+                },
+            )
             raise HTTPException(status_code=400, detail="URL points to a disallowed address")
 
 
 def _suffix_from_content_type(content_type: str, url: str) -> str:
     """Best-effort file extension from Content-Type header or URL path."""
     ct = content_type.lower()
-    if "png" in ct:        return ".png"
-    if "jpeg" in ct or "jpg" in ct:  return ".jpg"
-    if "webp" in ct:       return ".webp"
-    if "gif" in ct:        return ".gif"
-    if "heic" in ct:       return ".heic"
-    if "heif" in ct:       return ".heif"
-    if "tiff" in ct:       return ".tiff"
-    if "bmp" in ct:        return ".bmp"
-    if "mp4" in ct:        return ".mp4"
-    if "quicktime" in ct or "mov" in ct: return ".mov"
-    if "webm" in ct:       return ".webm"
+    if "png" in ct:
+        return ".png"
+    if "jpeg" in ct or "jpg" in ct:
+        return ".jpg"
+    if "webp" in ct:
+        return ".webp"
+    if "gif" in ct:
+        return ".gif"
+    if "heic" in ct:
+        return ".heic"
+    if "heif" in ct:
+        return ".heif"
+    if "tiff" in ct:
+        return ".tiff"
+    if "bmp" in ct:
+        return ".bmp"
+    if "mp4" in ct:
+        return ".mp4"
+    if "quicktime" in ct or "mov" in ct:
+        return ".mov"
+    if "webm" in ct:
+        return ".webm"
 
     # Fall back to URL path extension when Content-Type is generic.
     if not ct or "application" in ct or "octet-stream" in ct:
         lower_url = url.lower().split("?")[0]  # strip query string
-        for ext in (".png", ".webp", ".gif", ".heic", ".heif",
-                    ".tiff", ".tif", ".bmp", ".mp4", ".mov", ".webm"):
+        for ext in (
+            ".png",
+            ".webp",
+            ".gif",
+            ".heic",
+            ".heif",
+            ".tiff",
+            ".tif",
+            ".bmp",
+            ".mp4",
+            ".mov",
+            ".webm",
+        ):
             if lower_url.endswith(ext):
                 return ext
 
@@ -134,7 +159,7 @@ def _suffix_from_content_type(content_type: str, url: str) -> str:
 
 def _generate_short_id(length: int = settings.short_id_length) -> str:
     alphabet = string.ascii_letters + string.digits
-    return ''.join(secrets.choice(alphabet) for _ in range(length))
+    return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
 def log_memory(stage: str) -> None:
@@ -144,13 +169,16 @@ def log_memory(stage: str) -> None:
     process = psutil.Process(os.getpid())
     mem_info = process.memory_info()
     sys_mem = psutil.virtual_memory()
-    logger.debug("memory_usage", extra={
-        "action": "memory_usage",
-        "stage": stage,
-        "process_rss_mb": round(mem_info.rss / 1024 / 1024, 2),
-        "system_available_mb": round(sys_mem.available / 1024 / 1024, 2),
-        "system_total_mb": round(sys_mem.total / 1024 / 1024, 2),
-    })
+    logger.debug(
+        "memory_usage",
+        extra={
+            "action": "memory_usage",
+            "stage": stage,
+            "process_rss_mb": round(mem_info.rss / 1024 / 1024, 2),
+            "system_available_mb": round(sys_mem.available / 1024 / 1024, 2),
+            "system_total_mb": round(sys_mem.total / 1024 / 1024, 2),
+        },
+    )
 
 
 async def download_media_to_disk(
@@ -206,7 +234,9 @@ async def download_media_to_disk(
         except HTTPException:
             raise
         except Exception as exc:
-            logger.error("url_decode_failed", extra={"action": "url_decode_failed", "error": str(exc)})
+            logger.error(
+                "url_decode_failed", extra={"action": "url_decode_failed", "error": str(exc)}
+            )
             raise HTTPException(status_code=400, detail="Invalid data URI")
 
     # --- HTTPS URL ---
@@ -216,20 +246,44 @@ async def download_media_to_disk(
 
     async with http_module.request_session() as session:
         try:
-            # allow_redirects=False: prevents SSRF via redirect chains where
-            # the initial URL is safe (https://attacker.com) but a 302 Location
-            # header points to an internal address (http://169.254.169.254/...).
+            location = None
             async with session.get(url, allow_redirects=False) as response:
                 if response.status in (301, 302, 303, 307, 308):
-                    raise HTTPException(status_code=400, detail="Redirects are not permitted")
+                    loc = response.headers.get("Location", "")
+                    if not loc:
+                        raise HTTPException(
+                            status_code=400, detail="Invalid redirect from media URL"
+                        )
+                    await _assert_url_safe(loc)
+                    location = loc
+                elif response.status != 200:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Failed to fetch media from URL: Status {response.status}",
+                    )
+                else:
+                    # Direct 200 — stream inside this context.
+                    total = 0
+                    async with aiofiles.open(dest_path, "wb") as f:
+                        async for chunk in response.content.iter_chunked(65_536):
+                            total += len(chunk)
+                            if total > max_size:
+                                raise HTTPException(
+                                    status_code=400,
+                                    detail=f"File too large (max {max_size // (1024 * 1024)} MB)",
+                                )
+                            await f.write(chunk)
+                    content_type = response.headers.get("Content-Type", "")
+                    suffix = _suffix_from_content_type(content_type, url)
+                    return f"downloaded_media{suffix}"
+
+            # One validated redirect — fetch the SSRF-checked target.
+            async with session.get(location, allow_redirects=False) as response:
                 if response.status != 200:
                     raise HTTPException(
                         status_code=400,
                         detail=f"Failed to fetch media from URL: Status {response.status}",
                     )
-
-                # Stream chunks directly to disk — never assembles the full
-                # payload in RAM (fixes the b"".join() memory exhaustion bug).
                 total = 0
                 async with aiofiles.open(dest_path, "wb") as f:
                     async for chunk in response.content.iter_chunked(65_536):
@@ -240,9 +294,8 @@ async def download_media_to_disk(
                                 detail=f"File too large (max {max_size // (1024 * 1024)} MB)",
                             )
                         await f.write(chunk)
-
                 content_type = response.headers.get("Content-Type", "")
-                suffix = _suffix_from_content_type(content_type, url)
+                suffix = _suffix_from_content_type(content_type, location)
                 return f"downloaded_media{suffix}"
 
         except HTTPException:
