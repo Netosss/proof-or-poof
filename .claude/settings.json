@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /Users/netanel.ossi/Desktop/fauxlens/backend-python/.claude/scripts/backend-stop.sh",
+            "timeout": 90,
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}
