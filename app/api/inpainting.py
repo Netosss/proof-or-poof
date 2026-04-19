@@ -75,14 +75,8 @@ async def inpaint_image(
             "user_type": "authenticated",
         })
 
-        if not turnstile_token:
-            raise HTTPException(
-                status_code=403,
-                detail={"code": "CAPTCHA_REQUIRED", "message": "Verification needed"}
-            )
-        is_human = await verify_turnstile(turnstile_token)
-        if not is_human:
-            raise HTTPException(status_code=403, detail="Invalid CAPTCHA")
+        # Firebase-authenticated users are already proven human via Google auth.
+        pass
 
     else:
         validate_device_id(device_id)
