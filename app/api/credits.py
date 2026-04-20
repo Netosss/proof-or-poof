@@ -55,7 +55,7 @@ async def get_balance(
         await check_rate_limit(f"balance:{auth_user['uid']}")
         balance = await get_user_balance(auth_user["uid"])
     else:
-        user_id_var.set(device_id or "")
+        user_id_var.set("")
         validate_device_id(device_id)
         ip = get_client_ip(request)
         await check_ip_device_limit(ip, device_id, turnstile_token)

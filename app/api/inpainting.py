@@ -63,7 +63,7 @@ async def inpaint_image(
     request_id = str(uuid.uuid4())
     ip = get_client_ip(request)
 
-    user_id_var.set(auth_user["uid"] if auth_user else device_id)
+    user_id_var.set(auth_user["uid"] if auth_user else "")
 
     if auth_user:
         uid = auth_user["uid"]

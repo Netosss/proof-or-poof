@@ -87,7 +87,7 @@ async def detect(
     """
     ip = get_client_ip(request)
 
-    user_id_var.set(auth_user["uid"] if auth_user else device_id)
+    user_id_var.set(auth_user["uid"] if auth_user else "")
 
     if auth_user:
         # Firebase-authenticated users are already proven human via Google auth.
