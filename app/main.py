@@ -23,13 +23,15 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
+from starlette.datastructures import MutableHeaders
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.api import auth, checkout, credits, detection, inpainting, reports, system, webhooks
 from app.integrations import firebase as firebase_module
 from app.integrations import http_client as http_module
 from app.integrations import redis_client as redis_module
-from app.logging_config import configure_json_logging, device_id_var, request_id_var
+from app.logging_config import configure_json_logging, device_id_var, request_id_var, user_id_var
 
 load_dotenv()
 
