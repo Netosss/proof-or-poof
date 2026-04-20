@@ -112,6 +112,9 @@ async def request_logging_middleware(request: Request, call_next):
     response = await call_next(request)
     duration_ms = round((time.perf_counter() - t0) * 1000, 1)
 
+    # Echo the request ID back so the frontend can include it in bug reports.
+    response.headers["X-Request-ID"] = req_id
+
     logger.info(
         "request_completed",
         extra={
@@ -203,7 +206,7 @@ _MOBILE_CAPTCHA_HTML = """<!DOCTYPE html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
 </head>
-<body style="margin:0;padding:0;background:#000;">
+<body style="margin:0;padding:0;background:transparent;">
 <div id="cf-turnstile"></div>
 <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit" async defer></script>
 <script>

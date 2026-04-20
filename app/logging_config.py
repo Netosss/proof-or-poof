@@ -31,6 +31,7 @@ from pythonjsonlogger import jsonlogger
 request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="")
 device_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("device_id", default="")
 user_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("user_id", default="")
+user_email_var: contextvars.ContextVar[str] = contextvars.ContextVar("user_email", default="")
 
 # Map Python log levels to Axiom/standard severity strings (lowercase).
 # Without this, Axiom sees no "severity" field and defaults everything to "error".
@@ -58,10 +59,7 @@ class RequestContextFilter(logging.Filter):
         record.request_id = request_id_var.get("")
         record.device_id = device_id_var.get("")
         record.user_id = user_id_var.get("")
-        # Axiom uses "severity" / "level" to colour-code and filter log entries.
-        # Python's default levelname ("INFO", "WARNING") is not recognised, so
-        # Axiom falls back to "error" for every record.  Inject both field names
-        # with the correct lowercase value to fix the severity display.
+        record.user_email = user_email_var.get("")
         sev = _LEVEL_TO_SEVERITY.get(record.levelno, "info")
         record.severity = sev
         record.level = sev
@@ -87,17 +85,13 @@ class _SafeAxiomHandler(logging.Handler):
             self._inner.emit(record)
         except Exception as exc:
             # Write directly to stderr — can't use the logger (infinite loop).
-            sys.stderr.write(
-                f'{{"level":"ERROR","message":"axiom_emit_error","error":"{exc}"}}\n'
-            )
+            sys.stderr.write(f'{{"level":"ERROR","message":"axiom_emit_error","error":"{exc}"}}\n')
 
     def flush(self) -> None:
         try:
             self._inner.flush()
         except Exception as exc:
-            sys.stderr.write(
-                f'{{"level":"ERROR","message":"axiom_flush_error","error":"{exc}"}}\n'
-            )
+            sys.stderr.write(f'{{"level":"ERROR","message":"axiom_flush_error","error":"{exc}"}}\n')
 
 
 def configure_json_logging() -> None:
@@ -123,7 +117,7 @@ def configure_json_logging() -> None:
     stream_handler.setFormatter(
         jsonlogger.JsonFormatter(
             "%(asctime)s %(levelname)s %(name)s %(message)s "
-            "%(request_id)s %(device_id)s %(user_id)s %(severity)s"
+            "%(request_id)s %(device_id)s %(user_id)s %(user_email)s %(severity)s"
         )
     )
     handlers: list[logging.Handler] = [stream_handler]

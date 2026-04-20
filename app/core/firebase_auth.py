@@ -14,12 +14,12 @@ Usage:
 
 import asyncio
 import logging
-from typing import Optional
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-
 from firebase_admin import auth as firebase_auth
+
+from app.logging_config import user_email_var, user_id_var
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
 ) -> dict:
     """
     FastAPI dependency that verifies a Firebase ID token from the
@@ -51,10 +51,11 @@ async def get_current_user(
         # public keys on first call, then caches them). Run in a thread pool
         # to avoid blocking the async event loop.
         decoded = await asyncio.to_thread(firebase_auth.verify_id_token, token)
-        return {
-            "uid": decoded["uid"],
-            "email": decoded.get("email"),
-        }
+        uid = decoded["uid"]
+        email = decoded.get("email") or ""
+        user_id_var.set(uid)
+        user_email_var.set(email)
+        return {"uid": uid, "email": email or None}
     except firebase_auth.ExpiredIdTokenError:
         logger.warning("firebase_token_expired", extra={"action": "firebase_token_expired"})
         raise HTTPException(
@@ -63,20 +64,26 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
     except firebase_auth.InvalidIdTokenError as e:
-        logger.warning("firebase_token_invalid", extra={
-            "action": "firebase_token_invalid",
-            "error": str(e),
-        })
+        logger.warning(
+            "firebase_token_invalid",
+            extra={
+                "action": "firebase_token_invalid",
+                "error": str(e),
+            },
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token",
             headers={"WWW-Authenticate": "Bearer"},
         )
     except Exception as e:
-        logger.error("firebase_token_verify_error", extra={
-            "action": "firebase_token_verify_error",
-            "error": str(e),
-        })
+        logger.error(
+            "firebase_token_verify_error",
+            extra={
+                "action": "firebase_token_verify_error",
+                "error": str(e),
+            },
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication failed",
@@ -85,8 +92,8 @@ async def get_current_user(
 
 
 async def get_optional_user(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
-) -> Optional[dict]:
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> dict | None:
     """
     Like get_current_user but returns None instead of raising 401 when
     no Authorization header is present. Used by detect/inpaint endpoints

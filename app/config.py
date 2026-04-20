@@ -21,19 +21,15 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
-        case_sensitive=False,   # DETECT_CREDIT_COST == detect_credit_cost
-        extra="ignore",         # silently drop unknown env vars
+        case_sensitive=False,  # DETECT_CREDIT_COST == detect_credit_cost
+        extra="ignore",  # silently drop unknown env vars
     )
 
     # ------------------------------------------------------------------ #
     # Firestore TTLs (days)                                               #
     # ------------------------------------------------------------------ #
-    wallet_ttl_days: int = Field(
-        180, description="Guest wallet inactivity expiry (6 months)"
-    )
-    report_ttl_days: int = Field(
-        14, description="Shared report default lifetime"
-    )
+    wallet_ttl_days: int = Field(180, description="Guest wallet inactivity expiry (6 months)")
+    report_ttl_days: int = Field(14, description="Shared report default lifetime")
     report_extend_days: int = Field(
         14, description="Days added when a viral report is auto-extended"
     )
@@ -59,25 +55,15 @@ class Settings(BaseSettings):
     rate_limit_window_sec: int = Field(
         86_400, description="24 h — IP/device rate-limit sliding window"
     )
-    deepfake_dedupe_ttl_sec: int = Field(
-        600, description="10 min — per-device duplicate-scan lock"
-    )
+    deepfake_dedupe_ttl_sec: int = Field(600, description="10 min — per-device duplicate-scan lock")
 
     # ------------------------------------------------------------------ #
     # Credits & Billing                                                   #
     # ------------------------------------------------------------------ #
-    welcome_credits: int = Field(
-        40, description="Credits granted to every brand-new wallet"
-    )
-    detect_credit_cost: int = Field(
-        10, description="Credits charged per /detect call"
-    )
-    inpaint_credit_cost: int = Field(
-        20, description="Credits charged per /inpaint call"
-    )
-    default_recharge_amount: int = Field(
-        20, description="Default credits per ad-reward recharge"
-    )
+    welcome_credits: int = Field(40, description="Credits granted to every brand-new wallet")
+    detect_credit_cost: int = Field(10, description="Credits charged per /detect call")
+    inpaint_credit_cost: int = Field(20, description="Credits charged per /inpaint call")
+    default_recharge_amount: int = Field(20, description="Default credits per ad-reward recharge")
 
     # ------------------------------------------------------------------ #
     # Lemon Squeezy variant → credit mapping                             #
@@ -137,34 +123,21 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ #
     # Pricing (USD per unit)                                              #
     # ------------------------------------------------------------------ #
-    gpu_rate_per_sec: float = Field(
-        0.0019, description="RunPod A5000/L4 rate for detection"
-    )
-    inpaint_rate_per_sec: float = Field(
-        0.000222, description="Modal L4 rate for inpainting"
-    )
-    cpu_rate_per_sec: float = Field(
-        0.0001, description="Estimated Railway CPU rate"
-    )
+    gpu_rate_per_sec: float = Field(0.0019, description="RunPod A5000/L4 rate for detection")
+    inpaint_rate_per_sec: float = Field(0.000222, description="Modal L4 rate for inpainting")
+    cpu_rate_per_sec: float = Field(0.0001, description="Estimated Railway CPU rate")
     gemini_fixed_cost: float = Field(
-        0.0033, description="Cost per Gemini 3 Flash Preview request (verified: ~6,380 input tokens × $0.50/1M + ~27 output tokens × $3.00/1M)"
+        0.0033,
+        description="Cost per Gemini 3 Flash Preview request (verified: ~6,380 input tokens × $0.50/1M + ~27 output tokens × $3.00/1M)",
     )
-    ad_revenue_per_reward: float = Field(
-        0.015, description="Avg eCPM for a verified ad view"
-    )
+    ad_revenue_per_reward: float = Field(0.015, description="Avg eCPM for a verified ad view")
 
     # ------------------------------------------------------------------ #
     # File Size Limits                                                    #
     # ------------------------------------------------------------------ #
-    max_image_download_mb: int = Field(
-        50, description="Max MB for URL / data-URI downloads"
-    )
-    max_image_upload_mb: int = Field(
-        20, description="Max MB for multipart image uploads"
-    )
-    max_video_upload_mb: int = Field(
-        200, description="Max MB for video uploads"
-    )
+    max_image_download_mb: int = Field(50, description="Max MB for URL / data-URI downloads")
+    max_image_upload_mb: int = Field(20, description="Max MB for multipart image uploads")
+    max_video_upload_mb: int = Field(200, description="Max MB for video uploads")
     pil_max_image_pixels: int = Field(
         20_000_000, description="PIL decompression-bomb guard (pixels)"
     )
@@ -172,9 +145,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ #
     # Rate Limiting                                                       #
     # ------------------------------------------------------------------ #
-    max_new_devices_per_ip: int = Field(
-        3, description="New wallets allowed per IP per 24 h window"
-    )
+    max_new_devices_per_ip: int = Field(3, description="New wallets allowed per IP per 24 h window")
     rate_limit_request_window_sec: int = Field(
         60, description="Sliding window for per-user request rate (seconds)"
     )
@@ -202,12 +173,8 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ #
     # Detector: Local Cache (Redis-absent fallback)                       #
     # ------------------------------------------------------------------ #
-    local_cache_max_size: int = Field(
-        100, description="Max entries in the in-memory LRU cache"
-    )
-    local_cache_ttl_sec: int = Field(
-        3_600, description="1 h — local cache entry lifetime"
-    )
+    local_cache_max_size: int = Field(100, description="Max entries in the in-memory LRU cache")
+    local_cache_ttl_sec: int = Field(3_600, description="1 h — local cache entry lifetime")
 
     # ------------------------------------------------------------------ #
     # Detector: Hashing                                                   #
@@ -215,22 +182,14 @@ class Settings(BaseSettings):
     hash_chunk_threshold_mb: int = Field(
         10, description="Below this file size (MB), hash the full file"
     )
-    hash_chunk_size_kb: int = Field(
-        512, description="Chunk size (KB) for large-file smart hash"
-    )
-    image_hash_header_mb: int = Field(
-        2, description="Bytes read (MB) for path-based image hash"
-    )
+    hash_chunk_size_kb: int = Field(512, description="Chunk size (KB) for large-file smart hash")
+    image_hash_header_mb: int = Field(2, description="Bytes read (MB) for path-based image hash")
 
     # ------------------------------------------------------------------ #
     # Detector: Video Processing                                          #
     # ------------------------------------------------------------------ #
-    video_header_read_mb: int = Field(
-        1, description="Video container header read size (MB)"
-    )
-    ffprobe_timeout_sec: int = Field(
-        10, description="Timeout for ffprobe subprocess (seconds)"
-    )
+    video_header_read_mb: int = Field(1, description="Video container header read size (MB)")
+    ffprobe_timeout_sec: int = Field(10, description="Timeout for ffprobe subprocess (seconds)")
     video_jpeg_quality: int = Field(
         95, description="JPEG quality when encoding video frames for analysis"
     )
@@ -251,33 +210,19 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ #
     # Gemini Client                                                       #
     # ------------------------------------------------------------------ #
-    gemini_http_timeout_ms: int = Field(
-        15_000, description="HTTP client total timeout (ms)"
-    )
-    gemini_max_retries: int = Field(
-        2, description="Max retry attempts on transient errors"
-    )
-    gemini_retry_initial_delay: float = Field(
-        1.0, description="First retry delay (seconds)"
-    )
-    gemini_retry_max_delay: float = Field(
-        5.0, description="Max retry back-off delay (seconds)"
-    )
-    gemini_retry_exp_base: float = Field(
-        2.0, description="Exponential back-off multiplier"
-    )
-    gemini_max_pixels: int = Field(
-        4_194_304, description="2048×2048 — resize cap before upload"
-    )
+    gemini_http_timeout_ms: int = Field(15_000, description="HTTP client total timeout (ms)")
+    gemini_max_retries: int = Field(2, description="Max retry attempts on transient errors")
+    gemini_retry_initial_delay: float = Field(1.0, description="First retry delay (seconds)")
+    gemini_retry_max_delay: float = Field(5.0, description="Max retry back-off delay (seconds)")
+    gemini_retry_exp_base: float = Field(2.0, description="Exponential back-off multiplier")
+    gemini_max_pixels: int = Field(4_194_304, description="2048×2048 — resize cap before upload")
     gemini_jpeg_quality: int = Field(
         95, description="JPEG quality for single-image forensic upload"
     )
     gemini_batch_jpeg_quality: int = Field(
         85, description="JPEG quality for batch / video-frame upload"
     )
-    gemini_temperature: float = Field(
-        1.0, description="Sampling temperature for Gemini model"
-    )
+    gemini_temperature: float = Field(1.0, description="Sampling temperature for Gemini model")
     gemini_ai_vote_threshold: float = Field(
         0.5, description="Per-frame confidence threshold for an AI vote"
     )
@@ -286,30 +231,54 @@ class Settings(BaseSettings):
     # Gemini Quality Scoring                                              #
     # ------------------------------------------------------------------ #
     quality_score_init: int = Field(100, description="Starting quality score")
-    quality_dqt_severe_threshold: int = Field(30, description="DQT avg > this → severe JPEG compression")
-    quality_dqt_severe_penalty: int = Field(40, description="Score deduction for severe compression")
-    quality_dqt_moderate_threshold: int = Field(20, description="DQT avg > this → moderate compression")
-    quality_dqt_moderate_penalty: int = Field(20, description="Score deduction for moderate compression")
+    quality_dqt_severe_threshold: int = Field(
+        30, description="DQT avg > this → severe JPEG compression"
+    )
+    quality_dqt_severe_penalty: int = Field(
+        40, description="Score deduction for severe compression"
+    )
+    quality_dqt_moderate_threshold: int = Field(
+        20, description="DQT avg > this → moderate compression"
+    )
+    quality_dqt_moderate_penalty: int = Field(
+        20, description="Score deduction for moderate compression"
+    )
     quality_pixels_tiny: int = Field(250_000, description="< this → 'tiny' resolution")
     quality_pixels_tiny_penalty: int = Field(50, description="Score deduction for tiny resolution")
     quality_pixels_small: int = Field(800_000, description="< this → 'small' resolution")
-    quality_pixels_small_penalty: int = Field(40, description="Score deduction for small resolution")
-    quality_blur_zero_threshold: int = Field(10, description="Laplacian var < this → near-zero detail")
+    quality_pixels_small_penalty: int = Field(
+        40, description="Score deduction for small resolution"
+    )
+    quality_blur_zero_threshold: int = Field(
+        10, description="Laplacian var < this → near-zero detail"
+    )
     quality_blur_zero_penalty: int = Field(60, description="Score deduction for near-zero detail")
-    quality_blur_extreme_threshold: int = Field(25, description="Laplacian var < this → extreme blur")
+    quality_blur_extreme_threshold: int = Field(
+        25, description="Laplacian var < this → extreme blur"
+    )
     quality_blur_extreme_penalty: int = Field(25, description="Score deduction for extreme blur")
     quality_blur_soft_threshold: int = Field(50, description="Laplacian var < this → soft/smooth")
     quality_blur_soft_penalty: int = Field(10, description="Score deduction for soft focus")
-    quality_sharp_high_threshold: int = Field(2000, description="Laplacian var > this → exceptional sharpness")
+    quality_sharp_high_threshold: int = Field(
+        2000, description="Laplacian var > this → exceptional sharpness"
+    )
     quality_sharp_high_bonus: int = Field(20, description="Score bonus for exceptional sharpness")
-    quality_sharp_med_threshold: int = Field(1500, description="Laplacian var > this → high sharpness")
+    quality_sharp_med_threshold: int = Field(
+        1500, description="Laplacian var > this → high sharpness"
+    )
     quality_sharp_med_bonus: int = Field(15, description="Score bonus for high sharpness")
-    quality_sharp_uncomp_threshold: int = Field(600, description="Sharp + uncompressed bonus threshold")
+    quality_sharp_uncomp_threshold: int = Field(
+        600, description="Sharp + uncompressed bonus threshold"
+    )
     quality_sharp_uncomp_bonus: int = Field(20, description="Score bonus for sharp + uncompressed")
     quality_sharp_ok_threshold: int = Field(300, description="Moderately sharp + uncompressed")
     quality_sharp_ok_bonus: int = Field(10, description="Score bonus for moderately sharp")
-    quality_low_threshold: int = Field(50, description="Score < this → 'low quality' Gemini context")
-    quality_medium_threshold: int = Field(80, description="Score < this → 'medium quality' Gemini context")
+    quality_low_threshold: int = Field(
+        50, description="Score < this → 'low quality' Gemini context"
+    )
+    quality_medium_threshold: int = Field(
+        80, description="Score < this → 'medium quality' Gemini context"
+    )
 
     # ------------------------------------------------------------------ #
     # Forensic Pre-processing                                             #

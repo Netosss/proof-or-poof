@@ -30,6 +30,7 @@ router = APIRouter(tags=["Checkout"])
 LEMONSQUEEZY_STORE_ID = os.getenv("LEMONSQUEEZY_STORE_ID", "")
 LEMONSQUEEZY_CHECKOUT_URL = "https://api.lemonsqueezy.com/v1/checkouts"
 
+
 # Resolved at startup — picks the right API key for the current environment.
 # APP_ENV=dev  → LEMONSQUEEZY_API_KEY_TEST_MODE (LS test mode key)
 # APP_ENV=prod → LEMONSQUEEZY_API_KEY           (LS live key)
@@ -39,12 +40,16 @@ def _resolve_api_key() -> str:
     if settings.is_dev:
         key = os.getenv("LEMONSQUEEZY_API_KEY_TEST_MODE", "")
         if not key:
-            logger.warning("checkout_config_warning", extra={
-                "action": "checkout_config_warning",
-                "detail": "APP_ENV=dev but LEMONSQUEEZY_API_KEY_TEST_MODE is not set",
-            })
+            logger.warning(
+                "checkout_config_warning",
+                extra={
+                    "action": "checkout_config_warning",
+                    "detail": "APP_ENV=dev but LEMONSQUEEZY_API_KEY_TEST_MODE is not set",
+                },
+            )
         return key
     return os.getenv("LEMONSQUEEZY_API_KEY", "")
+
 
 LEMONSQUEEZY_API_KEY = _resolve_api_key()
 
@@ -74,18 +79,24 @@ async def create_checkout(
     """
     if not LEMONSQUEEZY_API_KEY:
         key_name = "LEMONSQUEEZY_API_KEY_TEST_MODE" if settings.is_dev else "LEMONSQUEEZY_API_KEY"
-        logger.error("checkout_config_error", extra={
-            "action": "checkout_config_error",
-            "missing_key": key_name,
-            "app_env": settings.app_env,
-        })
+        logger.error(
+            "checkout_config_error",
+            extra={
+                "action": "checkout_config_error",
+                "missing_key": key_name,
+                "app_env": settings.app_env,
+            },
+        )
         raise HTTPException(status_code=503, detail="Payment service not configured")
 
     if not LEMONSQUEEZY_STORE_ID:
-        logger.error("checkout_config_error", extra={
-            "action": "checkout_config_error",
-            "missing_key": "LEMONSQUEEZY_STORE_ID",
-        })
+        logger.error(
+            "checkout_config_error",
+            extra={
+                "action": "checkout_config_error",
+                "missing_key": "LEMONSQUEEZY_STORE_ID",
+            },
+        )
         raise HTTPException(status_code=503, detail="Payment service not configured")
 
     uid = user["uid"]
@@ -105,12 +116,8 @@ async def create_checkout(
                 },
             },
             "relationships": {
-                "store": {
-                    "data": {"type": "stores", "id": LEMONSQUEEZY_STORE_ID}
-                },
-                "variant": {
-                    "data": {"type": "variants", "id": body.variant_id}
-                },
+                "store": {"data": {"type": "stores", "id": LEMONSQUEEZY_STORE_ID}},
+                "variant": {"data": {"type": "variants", "id": body.variant_id}},
             },
         }
     }
@@ -130,40 +137,51 @@ async def create_checkout(
             ) as resp:
                 if resp.status not in (200, 201):
                     error_body = await resp.text()
-                    logger.error("checkout_api_error", extra={
-                        "action": "checkout_api_error",
-                        "status_code": resp.status,
-                        "error_body": error_body[:200],
-                    })
-                    raise HTTPException(
-                        status_code=502,
-                        detail="Failed to create checkout session"
+                    logger.error(
+                        "checkout_api_error",
+                        extra={
+                            "action": "checkout_api_error",
+                            "status_code": resp.status,
+                            "error_body": error_body[:200],
+                        },
                     )
+                    raise HTTPException(status_code=502, detail="Failed to create checkout session")
 
                 data = await resp.json()
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("checkout_unexpected_error", extra={
-            "action": "checkout_unexpected_error",
-            "error": str(e),
-        })
+        logger.error(
+            "checkout_unexpected_error",
+            extra={
+                "action": "checkout_unexpected_error",
+                "error": str(e),
+            },
+        )
         raise HTTPException(status_code=502, detail="Failed to create checkout session")
 
     try:
         checkout_url = data["data"]["attributes"]["url"]
     except (KeyError, TypeError) as e:
-        logger.error("checkout_response_error", extra={
-            "action": "checkout_response_error",
-            "error": str(e),
-        })
+        logger.error(
+            "checkout_response_error",
+            extra={
+                "action": "checkout_response_error",
+                "error": str(e),
+            },
+        )
         raise HTTPException(status_code=502, detail="Invalid response from payment service")
 
-    logger.info("checkout_created", extra={
-        "action": "checkout_created",
-        "variant_id": body.variant_id,
-    })
+    logger.info(
+        "checkout_created",
+        extra={
+            "action": "checkout_created",
+            "user_id": uid,
+            "user_email": user.get("email") or "",
+            "variant_id": body.variant_id,
+        },
+    )
     return CheckoutResponse(checkout_url=checkout_url)
 
 
@@ -195,13 +213,15 @@ async def debug_list_variants(user: dict = Depends(get_current_user)):
         variants = []
         for item in raw.get("data", []):
             attrs = item.get("attributes", {})
-            variants.append({
-                "variant_id": item.get("id"),
-                "product_name": attrs.get("product_name"),
-                "name": attrs.get("name"),
-                "price_usd": attrs.get("price", 0) / 100,
-                "status": attrs.get("status"),
-            })
+            variants.append(
+                {
+                    "variant_id": item.get("id"),
+                    "product_name": attrs.get("product_name"),
+                    "name": attrs.get("name"),
+                    "price_usd": attrs.get("price", 0) / 100,
+                    "status": attrs.get("status"),
+                }
+            )
 
         current_mapping = settings.lemon_squeezy_variants
 
