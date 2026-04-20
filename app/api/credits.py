@@ -67,6 +67,7 @@ async def get_balance(
 
 @router.post("/api/credits/add")
 async def add_credits_post(request: Request, payload: RechargeRequest):
+    user_id_var.set(payload.device_id)
     await check_rate_limit(f"recharge:{get_client_ip(request)}")
     result = await perform_recharge(payload.device_id, payload.amount, payload.secret_key)
     log_transaction(
@@ -84,6 +85,7 @@ async def add_credits_get(
     amount: int = settings.default_recharge_amount,
     key: str = Query(..., alias="secret_key"),
 ):
+    user_id_var.set(user_id)
     await check_rate_limit(f"recharge:{get_client_ip(request)}")
     result = await perform_recharge(user_id, amount, key)
     log_transaction(
@@ -107,6 +109,7 @@ async def ads_reward(
       Authorization: Bearer <firebase_id_token>
     """
     uid = user["uid"]
+    user_id_var.set(uid)
     db = firebase_module.db
     if not db:
         raise HTTPException(status_code=503, detail="Database service unavailable.")
