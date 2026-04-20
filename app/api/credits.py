@@ -3,21 +3,21 @@ Credit management routes: balance check, top-up (POST & GET webhook), ads reward
 """
 
 import logging
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
-from pydantic import BaseModel
 from google.cloud.firestore_v1 import SERVER_TIMESTAMP
 from google.cloud.firestore_v1.async_transaction import async_transactional
+from pydantic import BaseModel
 
 from app.config import settings
 from app.core.auth import check_ip_device_limit, get_client_ip, validate_device_id
 from app.core.firebase_auth import get_current_user, get_optional_user
 from app.core.rate_limiter import check_rate_limit
 from app.integrations import firebase as firebase_module
+from app.logging_config import user_id_var
 from app.schemas.credits import RechargeRequest
-from app.services.credit_engine import grant_credits, get_user_balance
+from app.services.credit_engine import get_user_balance, grant_credits
 from app.services.credits_service import get_guest_wallet, perform_recharge
 from app.services.finance_service import log_transaction
 
@@ -38,9 +38,9 @@ class AdRewardResponse(BaseModel):
 @router.get("/api/user/balance")
 async def get_balance(
     request: Request,
-    device_id: Optional[str] = Header(None, alias="X-Device-ID"),
-    turnstile_token: Optional[str] = Header(None, alias="X-Turnstile-Token"),
-    auth_user: Optional[dict] = Depends(get_optional_user),
+    device_id: str | None = Header(None, alias="X-Device-ID"),
+    turnstile_token: str | None = Header(None, alias="X-Turnstile-Token"),
+    auth_user: dict | None = Depends(get_optional_user),
 ):
     """
     Returns the current credit balance.
@@ -51,9 +51,11 @@ async def get_balance(
       Subject to IP/device rate limiting as before.
     """
     if auth_user:
+        user_id_var.set(auth_user["uid"])
         await check_rate_limit(f"balance:{auth_user['uid']}")
         balance = await get_user_balance(auth_user["uid"])
     else:
+        user_id_var.set(device_id or "")
         validate_device_id(device_id)
         ip = get_client_ip(request)
         await check_ip_device_limit(ip, device_id, turnstile_token)
@@ -65,12 +67,13 @@ async def get_balance(
 
 @router.post("/api/credits/add")
 async def add_credits_post(request: Request, payload: RechargeRequest):
+    user_id_var.set(payload.device_id)
     await check_rate_limit(f"recharge:{get_client_ip(request)}")
     result = await perform_recharge(payload.device_id, payload.amount, payload.secret_key)
     log_transaction(
         "AD_REWARD",
         settings.ad_revenue_per_reward,
-        {"device_id": payload.device_id, "credits": payload.amount}
+        {"device_id": payload.device_id, "credits": payload.amount},
     )
     return result
 
@@ -80,14 +83,13 @@ async def add_credits_get(
     request: Request,
     user_id: str = Query(..., alias="device_id"),
     amount: int = settings.default_recharge_amount,
-    key: str = Query(..., alias="secret_key")
+    key: str = Query(..., alias="secret_key"),
 ):
+    user_id_var.set(user_id)
     await check_rate_limit(f"recharge:{get_client_ip(request)}")
     result = await perform_recharge(user_id, amount, key)
     log_transaction(
-        "AD_REWARD",
-        settings.ad_revenue_per_reward,
-        {"device_id": user_id, "credits": amount}
+        "AD_REWARD", settings.ad_revenue_per_reward, {"device_id": user_id, "credits": amount}
     )
     return result
 
@@ -107,11 +109,12 @@ async def ads_reward(
       Authorization: Bearer <firebase_id_token>
     """
     uid = user["uid"]
+    user_id_var.set(uid)
     db = firebase_module.db
     if not db:
         raise HTTPException(status_code=503, detail="Database service unavailable.")
 
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
     doc_id = f"{uid}_{today}"
     reward_ref = db.collection("ad_rewards").document(doc_id)
 
@@ -123,12 +126,16 @@ async def ads_reward(
         if count >= AD_REWARD_DAILY_LIMIT:
             return None, count
 
-        transaction.set(ref, {
-            "user_id": uid,
-            "date": today,
-            "count": count + 1,
-            "last_reward_at": SERVER_TIMESTAMP,
-        }, merge=True)
+        transaction.set(
+            ref,
+            {
+                "user_id": uid,
+                "date": today,
+                "count": count + 1,
+                "last_reward_at": SERVER_TIMESTAMP,
+            },
+            merge=True,
+        )
         return AD_REWARD_CREDITS, count + 1
 
     try:
@@ -141,23 +148,26 @@ async def ads_reward(
     if credits_to_grant is None:
         raise HTTPException(
             status_code=429,
-            detail=f"Daily ad reward limit reached ({AD_REWARD_DAILY_LIMIT} per day)"
+            detail=f"Daily ad reward limit reached ({AD_REWARD_DAILY_LIMIT} per day)",
         )
 
     new_balance = await grant_credits(uid, credits_to_grant, "ad_reward", doc_id)
     log_transaction(
         "AD_REWARD",
         settings.ad_revenue_per_reward,
-        {"uid": uid, "credits": credits_to_grant, "rewards_today": new_count}
+        {"uid": uid, "credits": credits_to_grant, "rewards_today": new_count},
     )
 
-    logger.info("ads_reward_granted", extra={
-        "action": "ads_reward_granted",
-        "credits_granted": credits_to_grant,
-        "rewards_today": new_count,
-        "daily_limit": AD_REWARD_DAILY_LIMIT,
-        "new_balance": new_balance,
-    })
+    logger.info(
+        "ads_reward_granted",
+        extra={
+            "action": "ads_reward_granted",
+            "credits_granted": credits_to_grant,
+            "rewards_today": new_count,
+            "daily_limit": AD_REWARD_DAILY_LIMIT,
+            "new_balance": new_balance,
+        },
+    )
 
     return AdRewardResponse(
         credits_granted=credits_to_grant,
