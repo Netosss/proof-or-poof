@@ -36,36 +36,43 @@ def validate_device_id(device_id: str | None) -> None:
         raise HTTPException(status_code=400, detail="Invalid X-Device-ID")
 
 
+async def _call_siteverify(sess, secret: str, token: str) -> bool:
+    url = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+    async with sess.post(url, data={"secret": secret, "response": token}) as response:
+        result = await response.json()
+        return bool(result.get("success"))
+
+
 async def verify_turnstile(token: str) -> bool:
-    """Verifies a Cloudflare Turnstile token using the shared HTTP session."""
-    secret = os.getenv("TURNSTILE_SECRET_KEY")
-    if not secret:
+    """Verifies a Cloudflare Turnstile token.
+
+    Tries all configured secret keys so web and mobile sitekeys can coexist
+    without breaking each other when a new key is added.
+    """
+    secrets = [s for s in [
+        os.getenv("TURNSTILE_SECRET_KEY"),
+        os.getenv("TURNSTILE_MOBILE_SECRET_KEY"),
+    ] if s]
+
+    if not secrets:
         if os.getenv("APP_ENV") != "dev":
-            # In production, a missing key is a misconfiguration — fail loudly.
-            raise HTTPException(
-                status_code=500,
-                detail="Verification service misconfigured"
-            )
+            raise HTTPException(status_code=500, detail="Verification service misconfigured")
         logger.warning("turnstile_config_missing", extra={
             "action": "turnstile_config_missing",
-            "detail": "TURNSTILE_SECRET_KEY not set, skipping validation (DEV MODE)",
+            "detail": "No TURNSTILE_SECRET_KEY set, skipping validation (DEV MODE)",
         })
         return True
 
-    url = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
-    payload = {"secret": secret, "response": token}
-
     try:
         async with http_module.request_session() as sess:
-            async with sess.post(url, data=payload) as response:
-                result = await response.json()
-                if not result.get("success"):
-                    logger.warning("turnstile_validation_failed", extra={
-                        "action": "turnstile_validation_failed",
-                        "error_codes": result.get("error-codes", []),
-                    })
-                    return False
-                return True
+            for secret in secrets:
+                if await _call_siteverify(sess, secret, token):
+                    return True
+            logger.warning("turnstile_validation_failed", extra={
+                "action": "turnstile_validation_failed",
+                "keys_tried": len(secrets),
+            })
+            return False
     except HTTPException:
         raise
     except Exception as e:
