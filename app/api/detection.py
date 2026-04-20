@@ -94,9 +94,14 @@ async def detect(
     user_id_var.set(auth_user["uid"] if auth_user else "")
 
     if auth_user:
-        # Firebase-authenticated users are already proven human via Google auth.
-        # Turnstile is enforced for guests only to prevent anonymous abuse.
-        pass
+        if not turnstile_token:
+            raise HTTPException(
+                status_code=403,
+                detail={"code": "CAPTCHA_REQUIRED", "message": "Verification needed"}
+            )
+        is_human = await verify_turnstile(turnstile_token)
+        if not is_human:
+            raise HTTPException(status_code=403, detail="Invalid CAPTCHA")
 
     else:
         validate_device_id(device_id)

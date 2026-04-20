@@ -213,7 +213,7 @@ _MOBILE_CAPTCHA_HTML = """<!DOCTYPE html>
   function initTurnstile() {
     if (!window.turnstile) { setTimeout(initTurnstile, 100); return; }
     turnstile.render('#cf-turnstile', {
-      sitekey: '0x4AAAAAAC_98UvlWKoA3QBq',
+      sitekey: '0x4AAAAAACORe05eEDdcyhJA',
       callback: function(token) {
         if (window.Android) Android.onTokenReceived(token);
       },
