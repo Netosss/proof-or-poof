@@ -90,44 +90,60 @@ app = FastAPI(title="AI Provenance & Cleansing API", lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------
-# Request lifecycle middleware — sets context vars and logs every request
+# Request lifecycle middleware — sets context vars and logs every request.
+# Pure ASGI (no BaseHTTPMiddleware) so the inner app runs in the SAME asyncio
+# task: ContextVar mutations in route handlers (e.g. user_id_var.set()) are
+# visible here after `await self.app(...)` returns.
 # ---------------------------------------------------------------------------
-@app.middleware("http")
-async def request_logging_middleware(request: Request, call_next):
-    req_id = str(uuid.uuid4())
-    device_id = request.headers.get("X-Device-ID", "")
-    request_id_var.set(req_id)
-    device_id_var.set(device_id)
+class _RequestLoggingMiddleware:
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
 
-    # Tag the Sentry scope so any error captured during this request carries
-    # the device_id and client IP — makes crash reports actionable.
-    sentry_sdk.set_user(
-        {
-            "id": device_id or "anonymous",
-            "ip_address": request.client.host if request.client else None,
-        }
-    )
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
 
-    t0 = time.perf_counter()
-    response = await call_next(request)
-    duration_ms = round((time.perf_counter() - t0) * 1000, 1)
+        request = Request(scope, receive)
+        req_id = str(uuid.uuid4())
+        device_id = request.headers.get("X-Device-ID", "")
+        request_id_var.set(req_id)
+        device_id_var.set(device_id)
 
-    # Echo the request ID back so the frontend can include it in bug reports.
-    response.headers["X-Request-ID"] = req_id
+        sentry_sdk.set_user(
+            {
+                "id": device_id or "anonymous",
+                "ip_address": request.client.host if request.client else None,
+            }
+        )
 
-    logger.info(
-        "request_completed",
-        extra={
-            "action": "request_completed",
-            "method": request.method,
-            "path": request.url.path,
-            "status_code": response.status_code,
-            "duration_ms": duration_ms,
-            "ip": request.client.host if request.client else "",
-            "user_agent": request.headers.get("user-agent", ""),
-        },
-    )
-    return response
+        t0 = time.perf_counter()
+        status_code = 500
+
+        async def send_wrapper(message) -> None:
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                status_code = message["status"]
+                headers = MutableHeaders(scope=message)
+                headers.append("X-Request-ID", req_id)
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
+        duration_ms = round((time.perf_counter() - t0) * 1000, 1)
+
+        logger.info(
+            "request_completed",
+            extra={
+                "action": "request_completed",
+                "method": request.method,
+                "path": request.url.path,
+                "status_code": status_code,
+                "duration_ms": duration_ms,
+                "ip": request.client.host if request.client else "",
+                "user_agent": request.headers.get("user-agent", ""),
+                "user_id": user_id_var.get(""),
+            },
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +211,7 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["X-User-Balance", "X-Op-Ref"],
 )
+app.add_middleware(_RequestLoggingMiddleware)
 
 
 # ---------------------------------------------------------------------------

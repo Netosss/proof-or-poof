@@ -60,7 +60,6 @@ class RequestContextFilter(logging.Filter):
         record.request_id = request_id_var.get("")
         record.device_id = device_id_var.get("")
         record.user_id = user_id_var.get("")
-        record.user_email = user_email_var.get("")
         sev = _LEVEL_TO_SEVERITY.get(record.levelno, "info")
         record.severity = sev
         record.level = sev
@@ -116,7 +115,7 @@ def configure_json_logging() -> None:
     stream_handler.setFormatter(
         jsonlogger.JsonFormatter(
             "%(asctime)s %(levelname)s %(name)s %(message)s "
-            "%(request_id)s %(device_id)s %(user_id)s %(user_email)s %(severity)s"
+            "%(request_id)s %(device_id)s %(user_id)s %(severity)s"
         )
     )
     stream_handler.addFilter(ctx_filter)
