@@ -277,7 +277,7 @@ class Settings(BaseSettings):
         50, description="Score < this → 'low quality' Gemini context"
     )
     quality_medium_threshold: int = Field(
-        80, description="Score < this → 'medium quality' Gemini context"
+        75, description="Score < this → 'medium quality' Gemini context"
     )
 
     # ------------------------------------------------------------------ #

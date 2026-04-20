@@ -206,7 +206,7 @@ def get_forensic_metadata_score(exif: dict) -> tuple:
         signals.append("Wide Gamut / Uncalibrated Color Space (Human Typical)")
 
     if "icc_profile" in exif:
-        score += 0.15
+        score += 0.05
         signals.append("ICC Color Profile detected")
 
     if "Orientation" in exif:
