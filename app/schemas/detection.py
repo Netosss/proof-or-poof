@@ -31,6 +31,12 @@ SIGNAL_CATEGORIES = Literal[
     "facial_detail_inconsistency_detected",
     # Rule 9 — Repetition / cloning
     "repeated_or_cloned_elements_detected",
+    # Rule 10 — Architectural / scene composition
+    "scene_composition_is_synthetically_uniform",
+    # Rule 11 — Color grading
+    "unnatural_color_grading_or_saturation_detected",
+    # Rule 12 — Lens optics
+    "lens_optics_absence_detected",
     # Catch-all for multi-signal or ambiguous cases
     "multiple_subtle_ai_artifacts_present",
     # Clean image
