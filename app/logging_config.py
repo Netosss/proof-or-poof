@@ -48,8 +48,9 @@ class RequestContextFilter(logging.Filter):
     """
     Injects per-request context and severity into every LogRecord.
 
-    Applied to the root logger so it runs exactly once per record regardless
-    of how many handlers are attached.  Fields injected:
+    Added to each handler so it runs for every record that reaches the handler,
+    whether the record originates from the root logger or a child logger.
+    Fields injected:
       - request_id, device_id, user_id  — from ContextVars set by middleware
       - severity                         — lowercase level name ("info", "warning", …)
       - level                            — alias for severity (Axiom accepts both)
@@ -101,16 +102,14 @@ def configure_json_logging() -> None:
       2. _SafeAxiomHandler — direct SDK delivery to Axiom
                              (only when AXIOM_TOKEN env var is present)
 
-    A single RequestContextFilter is added to the ROOT LOGGER so it runs
-    exactly once per LogRecord (not once per handler).  This ensures
-    request_id / device_id / severity are available to every handler,
-    including the AxiomHandler which stores record.__dict__ directly.
+    RequestContextFilter is added to each handler (not the root logger).
+    root.addFilter() only runs when root.handle() is called directly — child
+    logger records propagate via callHandlers() which invokes handler.handle(),
+    which runs handler-level filters only.  Adding the filter to each handler
+    guarantees request_id / device_id / user_id / severity appear in every record.
     """
     root = logging.getLogger()
     ctx_filter = RequestContextFilter()
-
-    # Apply filter at the root logger level — runs once per record.
-    root.addFilter(ctx_filter)
 
     # --- 1. Stdout / Railway handler (always active) ---
     stream_handler = logging.StreamHandler()
@@ -120,6 +119,7 @@ def configure_json_logging() -> None:
             "%(request_id)s %(device_id)s %(user_id)s %(user_email)s %(severity)s"
         )
     )
+    stream_handler.addFilter(ctx_filter)
     handlers: list[logging.Handler] = [stream_handler]
 
     # --- 2. Axiom handler (only when AXIOM_TOKEN is configured) ---
@@ -137,6 +137,7 @@ def configure_json_logging() -> None:
             # Wrap in a safe handler that surfaces flush errors to stderr
             # and marks the internal timer as daemon.
             safe_handler = _SafeAxiomHandler(raw_handler)
+            safe_handler.addFilter(ctx_filter)
             handlers.append(safe_handler)
 
             # Confirm Axiom is wired up — visible in Railway and in Axiom.
