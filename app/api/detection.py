@@ -136,7 +136,14 @@ async def detect(
                 raise HTTPException(status_code=400, detail="Invalid JSON body")
 
         elif "multipart/form-data" in content_type:
-            form = await request.form()
+            try:
+                form = await request.form()
+            except ClientDisconnect:
+                logger.info(
+                    "client_disconnected_during_upload",
+                    extra={"action": "client_disconnected_during_upload"},
+                )
+                return
             file_obj = form.get("file")
             url_obj = form.get("url")
             trusted_metadata_obj = form.get("trusted_metadata")
