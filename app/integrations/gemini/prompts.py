@@ -25,9 +25,9 @@ def get_system_instruction(quality_context: str) -> str:
     * IF FOUND: Stop all further analysis immediately. Return confidence 1.0 and signal_category "watermark_or_content_credentials_detected".
 
     2. CONTEXT MATTERS (PHOTOREALISM VS. ART):
-    * Photorealism: Be strict. Hunt for "plastic/waxy" skin, non-Euclidean geometry, and physical impossibilities.
+    * Photorealism: Be strict. Hunt for "plastic/waxy" skin (HIGH quality only — at LOW or MEDIUM, smooth skin is expected from compression and retouching), non-Euclidean geometry, and physical impossibilities.
     * Object merging: Inspect foreground/background boundary zones for objects that unnaturally fuse together.
-      NOTE: At LOW or MEDIUM quality, blur naturally merges nearby objects — only flag merging if it occurs between objects that are spatially far apart and have no optical reason to blend.
+      NOTE: At LOW or MEDIUM quality, blur naturally merges nearby objects (e.g., collar into neck, fabric into skin, ear cartilage into head, hair into shoulder) — only flag merging if it occurs between objects that are spatially far apart and have no optical reason to blend.
     * Art/Cartoons/Renders: DO NOT flag stylized anatomy or unnatural lighting. Instead, check INTERNAL CONSISTENCY. Look for gibberish signatures/pseudo-watermarks in corners, or "meaningless details" (e.g., complex armor, jewelry, or architecture that resolves into chaotic, undefined scribbles upon zooming in).
 
     3. THE "TEXT" TRAP (USE EXTREME CAUTION — HIGH FALSE-POSITIVE RISK):
@@ -55,7 +55,10 @@ def get_system_instruction(quality_context: str) -> str:
 
     5. THE PORTRAIT & FABRIC TEST:
     * Do not dismiss flawless skin or smooth backgrounds as mere "retouching." You must inspect the physical logic of the subject.
+      QUALITY GUARD: At LOW or MEDIUM quality, smooth skin, uniform lighting, and plain backgrounds are expected from JPEG compression, professional retouching, and studio photography — do not use these as AI signals.
+    * TEXTILE PATTERN CONSISTENCY: In clothing with geometric patterns (stripes, checks, plaids, grids), verify that the pattern lines are geometrically continuous and consistent in width and spacing across the garment. AI consistently fails this — stripes break, change width, merge into solid masses, or become misaligned at body contours. This check is valid at MEDIUM and HIGH quality. QUALITY GUARD: At LOW quality, JPEG DCT block artifacts independently break fine geometric patterns — do not flag textile inconsistency unless quality context is MEDIUM or higher.
     * FABRIC PHYSICS: Inspect clothing collars, necklines, and hems. AI consistently fails to render 3D fabric thickness, physical seams, or the micro-shadows where cloth rests on skin. Look for necklines that look mathematically "painted" flat onto the 2D surface of the body.
+      QUALITY GUARD: At LOW or MEDIUM quality, JPEG compression naturally destroys collar edge depth, seam micro-shadows, and fabric 3D detail. Do NOT flag flat-looking fabric or collar edges as AI unless quality context is HIGH.
     * EDGE DISSOLVING: Inspect where stray hairs meet a heavily blurred background. Real hair simply goes out of focus (optical blur); AI-generated hair structurally melts, smudges, or bleeds directly into the background colors.
       QUALITY GUARD: At LOW or MEDIUM quality, JPEG compression naturally destroys fine hair detail and causes edge bleeding. Do NOT flag hair edge dissolving unless quality context is HIGH.
     * SMALL OBJECTS & TRANSPARENCY: Inspect glass and small items (e.g., keys, jewelry). AI often fuses small mechanical parts into a single meaningless lump, or renders internal glass mechanisms without 3D thickness.
@@ -88,7 +91,7 @@ def get_system_instruction(quality_context: str) -> str:
     * Motion blur: Fast-moving subjects (athletes, vehicles, animals) should have directional motion blur. An object frozen in mid-action with zero blur in an otherwise sharp scene is suspicious.
 
     8. FACIAL MICRO-DETAILS (HIGH QUALITY ONLY):
-    * QUALITY GUARD: Only apply this rule when quality context is HIGH. At LOW or MEDIUM quality, fine facial details are naturally destroyed by compression — do not use them as AI signals.
+    * QUALITY GUARD: Only apply this rule when quality context is HIGH. At LOW or MEDIUM quality, fine facial details are naturally destroyed by compression — do not use teeth, eyes, or ear anatomy as AI signals, not even as supporting evidence in a multi-signal observation.
     * When a human face is clearly visible and close up, inspect three specific areas AI consistently fails:
     * TEETH: Look for perfect bilateral symmetry, missing gum line shadow, or individual teeth that merge without visible separation between them.
     * EYES: Check that both irises match in color and pattern, and that catchlight reflections are consistent with the scene's light source direction.
@@ -206,5 +209,11 @@ def get_system_instruction(quality_context: str) -> str:
 
     Example 16 (AI Styled Product/Scene — polished look but secondary objects dissolve):
     {{"visual_scan": "Primary subject is well-lit and photorealistic, but secondary objects lose structural integrity — a cable merges into the surface it rests on with no endpoint, decorative items in the periphery dissolve into shapeless blobs lacking distinct edges or physical separation.", "confidence": 0.93, "signal_category": "objects_merge_or_dissolve_at_boundaries"}}
+
+    Example 17 (AI outdoor portrait, HIGH quality — authentic-looking skin and bokeh do NOT override structural failures found during full rule checklist):
+    {{"visual_scan": "Background bokeh and skin micro-texture appear natural, but mandatory Rule 5 checks at HIGH quality reveal two independent structural failures: the shirt collar has zero 3D thickness at the neckline — a flat painted edge with no seam shadow where fabric meets skin — and stray hair strands at the temple dissolve directly into background blur rather than showing optical defocus. Two undeniable structural failures confirm AI generation.", "confidence": 0.92, "signal_category": "clothing_or_fabric_lacks_3d_depth"}}
+
+    Example 18 (Real portrait, MEDIUM quality — full rule checklist finds zero structural failures; appearance signals are disabled at this tier):
+    {{"visual_scan": "MEDIUM quality portrait. Subject clothing shows no geometric pattern to test for consistency. No object merging between spatially distant regions, no impossible geometry, no physics violations present. Smooth skin and uniform lighting visible, but both are disabled signals at MEDIUM quality — expected from compression and photography. No active-rule failures found.", "confidence": 0.15, "signal_category": "no_visual_anomalies_detected"}}
 
     """
