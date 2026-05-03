@@ -15,6 +15,7 @@ import tempfile
 import time
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, UploadFile
+from starlette.requests import ClientDisconnect
 
 from app.config import settings
 from app.core.auth import check_ip_device_limit, get_client_ip, validate_device_id, verify_turnstile
