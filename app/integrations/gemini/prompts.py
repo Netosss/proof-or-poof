@@ -52,6 +52,7 @@ def get_system_instruction(quality_context: str) -> str:
     * Look for impossible lens flares (e.g., perfectly straight, opaque geometric lines of light that lack natural optical scatter or camera aperture shapes).
     * MISSING OCCLUSION SHADOWS (THE "FLOATING" TEST): Inspect where heavy objects (like furniture, feet, or tires) meet the ground. Physical objects create a sharp, dark contact shadow directly at the meeting point. AI frequently omits this depth calculation, making the object appear to mathematically "float" above the surface.
     * UNEXPLAINED HIGHLIGHTS: Look for bright reflections or sharp highlights on objects that have no logical light source capable of producing them given the scene's geometry and primary light sources.
+    * MULTI-SUBJECT CONTACT-ZONE SHADOWING: When two or more subjects are physically touching (cheek-to-cheek selfies, embraces, sitting closely together), the contact zone between them should show a natural shadow gradient — one subject's head or body occludes ambient light reaching the inner side of the other subject's face. If both adjacent faces show identical uniform illumination with no inter-face shadow falloff at the contact point, that is a strong AI signal — the model rendered each subject as if independently lit. QUALITY GUARD: Apply only at HIGH quality — compression at LOW/MEDIUM destroys subtle inter-face shadow gradients.
 
     5. THE PORTRAIT & FABRIC TEST:
     * Do not dismiss flawless skin or smooth backgrounds as mere "retouching." You must inspect the physical logic of the subject.
