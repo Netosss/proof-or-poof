@@ -122,12 +122,10 @@ def get_quality_context(image_source: Union[str, Image.Image, bytes]) -> tuple[s
         elif score < settings.quality_medium_threshold:
             return (
                 f"**CONTEXT: MEDIUM QUALITY ({', '.join(issues)}).** "
-                f"INSTRUCTION: Image has reduced quality. The following signals are DISABLED at this quality level — do NOT use them even as supporting evidence: "
-                f"smooth or flat-looking skin, flat fabric surfaces or collar edges, soft hair boundaries, uniform scene lighting, absence of sensor noise, fine facial detail (teeth, eyes, ears). "
-                f"JPEG compression naturally produces all of these effects — they are not AI signals at this quality. "
-                f"EXCEPTION: physics violations that compression cannot produce remain valid — including: spatially distant objects fusing with no physical boundary where optical blur cannot be the cause, and geometry that is structurally impossible. "
-                f"Only flag STRUCTURAL IMPOSSIBILITIES or undeniable physics violations compression cannot explain. "
-                f"If unsure, return confidence <= 0.4 and signal_category 'no_visual_anomalies_detected'.",
+                f"INSTRUCTION: Image has reduced quality. DO NOT flag soft edges or indistinct textures as AI. "
+                f"However, compression does NOT explain structural impossibilities "
+                f"(like extra fingers, gibberish text, or impossible physics). "
+                f"If you see these CLEAR logic errors, FLAG THEM.",
                 score
             )
 
