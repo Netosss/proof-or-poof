@@ -128,8 +128,19 @@ async def cmd_list_applications(args):
 
 
 async def cmd_approve_application(args):
-    """Approve a sandbox application: provision partner + grant credits + link records."""
-    from app.services.api_credentials import create_credential
+    """Approve a sandbox application: provision partner + grant credits + link records.
+
+    Intentionally does NOT issue an API credential. The partner signs in to
+    the dashboard and clicks "New API key" themselves — that path is the
+    same one paying customers use, keeps the operator's terminal clean of
+    plaintext secrets, and teaches the partner the "secret shown once"
+    affordance on their very first interaction with the product.
+
+    Prints a `mailto:` link the operator can paste into their browser to
+    send a transactional sign-in email. Zero SMTP infra required.
+    """
+    import urllib.parse
+
     from app.services.enterprise_applications import (
         get_application,
         mark_application_approved,
@@ -161,33 +172,60 @@ async def cmd_approve_application(args):
 
     credits = args.credits
     await grant_credit(
-        partner_id, amount=credits, reason="sandbox_grant",
+        partner_id,
+        amount=credits,
+        reason="sandbox_grant",
         reference_id=f"application:{app_doc['id']}",
     )
 
     await mark_application_approved(app_doc["id"], partner_id)
+
+    dashboard_url = "https://fauxlens.com/enterprise/dashboard"
+    contact_email = app_doc["contact_email"]
+    company_name = app_doc["company_name"]
+
+    # Compose a transactional sign-in email. Keep it short, no marketing —
+    # the partner applied N hours ago and just needs the link.
+    subject = f"Your Faux Lens sandbox is ready, {company_name}"
+    body = (
+        f"Hi,\n\n"
+        f"Your Faux Lens enterprise sandbox is approved and ready.\n\n"
+        f"Sign in here with the same Google account you applied with:\n"
+        f"  {dashboard_url}\n\n"
+        f"You'll see {credits} sandbox credits on your dashboard. Click "
+        f"'New API key' to issue your first credential pair — you'll get "
+        f"the public key and signing secret once, so copy them somewhere "
+        f"safe before closing the page.\n\n"
+        f"Docs: https://fauxlens.com/enterprise/docs\n\n"
+        f"Reply to this email if anything's unclear.\n\n"
+        f"— Faux Lens"
+    )
+    mailto = (
+        f"mailto:{contact_email}"
+        f"?subject={urllib.parse.quote(subject)}"
+        f"&body={urllib.parse.quote(body)}"
+    )
 
     print("=" * 70)
     print("Sandbox provisioned")
     print("=" * 70)
     print(f"  application_id: {app_doc['id']}")
     print(f"  partner_id:     {partner_id}")
-    print(f"  company:        {app_doc['company_name']}")
-    print(f"  contact_email:  {app_doc['contact_email']}")
+    print(f"  company:        {company_name}")
+    print(f"  contact_email:  {contact_email}")
     print(f"  credits:        {credits}")
+    print(f"  firebase_uid:   {app_doc.get('firebase_uid')}")
     print()
-    print("Issuing first API key now:")
-
-    cred = await create_credential(partner_id)
+    print("No API credential was issued. The partner self-serves their first")
+    print("key from the dashboard — same flow paying customers use.")
+    print()
+    print("Next step — send the partner their sign-in link:")
     print("-" * 70)
-    print(f"  api_key:    {cred['api_key']}")
-    print(f"  secret_key: {cred['secret_key']}")
+    print(mailto)
     print("-" * 70)
     print()
-    print("Action items:")
-    print(f"  1. Email partner with sign-in instructions (Firebase UID linked: {app_doc.get('firebase_uid')})")
-    print( "  2. They sign in at https://fauxlens.com/enterprise/dashboard")
-    print(f"  3. Or send them the api_key + secret_key above directly")
+    print("Paste that URL into your browser; your default mail client opens")
+    print("with the message pre-filled. Hit send.")
 
 
 async def cmd_mint_checkout(args):
