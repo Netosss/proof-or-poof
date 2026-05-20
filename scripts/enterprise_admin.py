@@ -321,8 +321,11 @@ def main():
 
     p = sub.add_parser("approve-application")
     p.add_argument("--id", required=True, help="enterprise_applications document id")
-    p.add_argument("--credits", type=int, default=100,
-                   help="Sandbox credits to grant (default: 100)")
+    p.add_argument("--credits", type=int, default=50,
+                   help="Sandbox credits to grant (default: 50 — enough for a real "
+                        "evaluation of ~30-40 scans plus signing-mistake retries, "
+                        "without subsidising free production usage). Override per "
+                        "applicant if they have a legit reason for more.")
     p.set_defaults(func=cmd_approve_application)
 
     p = sub.add_parser("mint-checkout")
