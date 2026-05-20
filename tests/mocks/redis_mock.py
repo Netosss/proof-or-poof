@@ -170,6 +170,24 @@ class MockRedis:
         """No real subscribers in tests — always returns 0."""
         return 0
 
+    async def eval(self, script: str, numkeys: int, *args) -> int:
+        """
+        Minimal Lua eval shim for the scripts production code uses.
+
+        Implements the INCR-with-conditional-EXPIRE pattern from
+        `app.core.enterprise_rate_limiter._INCR_WITH_TTL_LUA` — atomic in
+        real Redis, simulated here as a single Python expression. Extend
+        this match table when production adds a new Lua script.
+        """
+        key = args[0]
+        if "INCR" in script and "EXPIRE" in script and "v == 1" in script:
+            ttl = int(args[1])
+            v = self._incr(key)
+            if v == 1:
+                self._expire(key, ttl)
+            return v
+        raise NotImplementedError("MockRedis.eval received an unrecognised script — add a handler.")
+
     async def aclose(self) -> None:
         """No-op: nothing to close for an in-memory mock."""
         pass

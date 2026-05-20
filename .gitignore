@@ -7,8 +7,13 @@ __pycache__/
 *.pyo
 *.pyd
 
-# Analysis results and logs
-scripts/
+# Local analysis/diagnostic tooling — generated outputs and ad-hoc scripts.
+# Operational scripts that the operator/CI needs are explicitly whitelisted below.
+# (dir-form `scripts/` would override the `!`-prefixed whitelist entries; the
+# `dir/*` form allows per-file exceptions.)
+scripts/*
+!scripts/enterprise_admin.py
+!scripts/sign_request.py
 results.jsonl
 dry_run_results.jsonl
 *.log
@@ -29,4 +34,6 @@ models/big-lama.pt
 
 # Local AI Prompt Testing
 test_prompt_accuracy.py
-test_prompt_gold.json
+test_prompt_gold.json.env
+
+.env

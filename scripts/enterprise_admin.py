@@ -1,0 +1,463 @@
+"""
+Enterprise partner administration CLI.
+
+Usage (run with `python -m scripts.enterprise_admin <command> [...]` from the
+backend-python directory, with .env loaded):
+
+    list-partners
+    create-partner --name "Acme Corp" --email "ops@acme.com" [--credits 0] [--rpm 60]
+    set-status     --partner-id <uuid> --status active|suspended|frozen
+    create-key     --partner-id <uuid> [--allowed-ip 1.2.3.0/24] [--expires-days 365]
+    revoke-key     --partner-id <uuid> --credential-id <uuid>
+    balance        --partner-id <uuid>
+    mint-checkout  --partner-id <uuid> --variant-id <ls_variant> [--store-id <ls_store>]
+
+Secrets are printed to stdout EXACTLY ONCE — copy them to your password manager
+immediately. They cannot be retrieved later (only re-issued via `revoke-key` +
+`create-key`).
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import logging
+import os
+import sys
+from pathlib import Path
+
+# Make `app.*` imports work when invoked as `python -m scripts.enterprise_admin`.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+# Load .env BEFORE importing any app modules so settings pick up the values.
+from dotenv import load_dotenv  # noqa: E402
+
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+
+# Initialise the same JSON-logging + Axiom setup the FastAPI server uses, so
+# CLI-emitted audit events (enterprise_application_approved,
+# enterprise_application_rejected) land in the same Axiom dataset as the
+# request-time events. Without this the umbrella events would only print to
+# stdout — fine for the operator, invisible to dashboards.
+from app.logging_config import configure_json_logging  # noqa: E402
+
+configure_json_logging()
+logger = logging.getLogger("enterprise_admin_cli")
+
+
+async def _bootstrap():
+    from app.integrations import firebase as firebase_module
+
+    firebase_module.initialize()
+
+
+async def cmd_list_partners(args):
+    from app.services.enterprise_partners import list_partners
+
+    partners = await list_partners(limit=args.limit)
+    for p in partners:
+        print(json.dumps(p, default=str))
+    if not partners:
+        print("(no partners)")
+
+
+async def cmd_create_partner(args):
+    from app.services.enterprise_partners import create_partner
+
+    p = await create_partner(
+        company_name=args.name,
+        contact_email=args.email,
+        initial_credits=args.credits,
+        rate_limit_per_min=args.rpm,
+    )
+    print("Created partner:")
+    print(json.dumps(p, indent=2, default=str))
+    print()
+    print(f"PARTNER_ID = {p['id']}")
+    print(f"Next step: scripts/enterprise_admin.py create-key --partner-id {p['id']}")
+
+
+async def cmd_set_status(args):
+    from app.services.enterprise_partners import set_partner_status
+
+    await set_partner_status(args.partner_id, args.status)
+    print(f"OK: partner {args.partner_id} status -> {args.status}")
+
+
+async def cmd_create_key(args):
+    from app.services.api_credentials import create_credential
+
+    cred = await create_credential(
+        args.partner_id,
+        allowed_ips=args.allowed_ip,
+        expires_in_days=args.expires_days,
+    )
+    print("=" * 70)
+    print("STORE THESE IMMEDIATELY — THEY ARE NOT RECOVERABLE")
+    print("=" * 70)
+    print(f"  api_key:    {cred['api_key']}")
+    print(f"  secret_key: {cred['secret_key']}")
+    print()
+    print(f"  credential_id: {cred['credential_id']}")
+    print(f"  api_key_prefix: {cred['api_key_prefix']}")
+    print("=" * 70)
+
+
+async def cmd_revoke_key(args):
+    from app.services.api_credentials import revoke_credential
+
+    await revoke_credential(args.partner_id, args.credential_id)
+    print(f"OK: credential {args.credential_id} revoked")
+
+
+async def cmd_balance(args):
+    from app.services.enterprise_credit_engine import get_partner_balance
+
+    balance = await get_partner_balance(args.partner_id)
+    print(f"partner_id={args.partner_id}  credit_balance={balance}")
+
+
+async def cmd_grant_credits(args):
+    """Manually grant credits to a partner (smoke tests, gifts, comp credits)."""
+    from app.services.enterprise_credit_engine import grant_credit
+
+    reason = args.reason or "manual_grant"
+    reference = args.reference or f"cli:{int(__import__('time').time())}"
+    new_balance = await grant_credit(
+        args.partner_id,
+        amount=args.amount,
+        reason=reason,
+        reference_id=reference,
+    )
+    print(f"OK: granted {args.amount} credits to {args.partner_id}")
+    print(f"    new_balance={new_balance}  reason={reason}  reference_id={reference}")
+
+
+async def cmd_list_applications(args):
+    """List pending enterprise applications awaiting operator review."""
+    from app.services.enterprise_applications import list_pending_applications
+
+    apps = await list_pending_applications(limit=args.limit)
+    if not apps:
+        print("(no pending applications)")
+        return
+    for a in apps:
+        flag = "  [FREE_EMAIL]" if a.get("free_email") else ""
+        print(
+            f"id={a['id']}  tier={a['tier']:8}  vol={a['expected_volume']:8}  "
+            f"{a['company_name']:30}  {a['contact_email']}{flag}"
+        )
+        if a.get("notes"):
+            print(f"    notes: {a['notes'][:120]}")
+
+
+async def cmd_approve_application(args):
+    """Approve a sandbox application: provision partner + grant credits + link records.
+
+    Intentionally does NOT issue an API credential. The partner signs in to
+    the dashboard and clicks "New API key" themselves — that path is the
+    same one paying customers use, keeps the operator's terminal clean of
+    plaintext secrets, and teaches the partner the "secret shown once"
+    affordance on their very first interaction with the product.
+
+    Prints a `mailto:` link the operator can paste into their browser to
+    send a transactional sign-in email. Zero SMTP infra required.
+    """
+    import urllib.parse
+
+    from app.services.enterprise_applications import (
+        get_application,
+        mark_application_approved,
+    )
+    from app.services.enterprise_credit_engine import grant_credit
+    from app.services.enterprise_partners import create_partner
+
+    app_doc = await get_application(args.id)
+    if not app_doc:
+        print(f"ERROR: application {args.id} not found")
+        return
+    if app_doc.get("status") != "pending":
+        print(f"ERROR: application status is {app_doc.get('status')!r}, not pending")
+        return
+    if app_doc.get("tier") != "sandbox":
+        print(f"NOTE: this is a {app_doc.get('tier')!r} application. Sandbox flow grants credits;")
+        print("      for paid tiers prefer Lemon Squeezy checkout. Continue anyway? [y/N]")
+        if input().strip().lower() != "y":
+            print("Aborted.")
+            return
+
+    partner = await create_partner(
+        company_name=app_doc["company_name"],
+        contact_email=app_doc["contact_email"],
+        initial_credits=0,  # granted via ledger entry below
+        firebase_uid=app_doc.get("firebase_uid"),
+    )
+    partner_id = partner["id"]
+
+    credits = args.credits
+    await grant_credit(
+        partner_id,
+        amount=credits,
+        reason="sandbox_grant",
+        reference_id=f"application:{app_doc['id']}",
+    )
+
+    await mark_application_approved(app_doc["id"], partner_id)
+
+    # Umbrella audit event: one log line per approval that links the
+    # application_id → partner_id → credit grant in a single record.
+    # Sub-events (enterprise_partner_created, enterprise_credit_granted)
+    # fire too, but this one is what you grep when an auditor or a
+    # future-you asks "what did I approve last week".
+    logger.info(
+        "enterprise_application_approved",
+        extra={
+            "action": "enterprise_application_approved",
+            "application_id": app_doc["id"],
+            "partner_id": partner_id,
+            "company_name": app_doc["company_name"],
+            "contact_email": app_doc["contact_email"],
+            "tier": app_doc.get("tier"),
+            "credits_granted": credits,
+            "firebase_uid": app_doc.get("firebase_uid"),
+            "source": "operator_cli",
+        },
+    )
+
+    dashboard_url = "https://fauxlens.com/enterprise/dashboard"
+    contact_email = app_doc["contact_email"]
+    company_name = app_doc["company_name"]
+
+    # Compose a transactional sign-in email. Keep it short, no marketing —
+    # the partner applied N hours ago and just needs the link.
+    subject = f"Your Faux Lens sandbox is ready, {company_name}"
+    body = (
+        f"Hi,\n\n"
+        f"Your Faux Lens enterprise sandbox is approved and ready.\n\n"
+        f"Sign in here with the same Google account you applied with:\n"
+        f"  {dashboard_url}\n\n"
+        f"You'll see {credits} sandbox credits on your dashboard. Click "
+        f"'New API key' to issue your first credential pair — you'll get "
+        f"the public key and signing secret once, so copy them somewhere "
+        f"safe before closing the page.\n\n"
+        f"Docs: https://fauxlens.com/enterprise/docs\n\n"
+        f"Reply to this email if anything's unclear.\n\n"
+        f"— Faux Lens"
+    )
+    mailto = (
+        f"mailto:{contact_email}"
+        f"?subject={urllib.parse.quote(subject)}"
+        f"&body={urllib.parse.quote(body)}"
+    )
+
+    print("=" * 70)
+    print("Sandbox provisioned")
+    print("=" * 70)
+    print(f"  application_id: {app_doc['id']}")
+    print(f"  partner_id:     {partner_id}")
+    print(f"  company:        {company_name}")
+    print(f"  contact_email:  {contact_email}")
+    print(f"  credits:        {credits}")
+    print(f"  firebase_uid:   {app_doc.get('firebase_uid')}")
+    print()
+    print("No API credential was issued. The partner self-serves their first")
+    print("key from the dashboard — same flow paying customers use.")
+    print()
+    print("Next step — send the partner their sign-in link:")
+    print("-" * 70)
+    print(mailto)
+    print("-" * 70)
+    print()
+    print("Paste that URL into your browser; your default mail client opens")
+    print("with the message pre-filled. Hit send.")
+
+
+async def cmd_reject_application(args):
+    """Reject a pending sandbox application.
+
+    Flips status to 'rejected' and stores an optional rejection_reason.
+    The dashboard's RejectedView reads this status and shows the
+    neutral 'we couldn't approve this' panel to the partner — they get
+    a Talk-to-us mailto and a pricing CTA, no surprise about being
+    rejected (no email is automatically sent; the partner only sees it
+    when they sign back in).
+    """
+    from app.services.enterprise_applications import (
+        get_application,
+        mark_application_rejected,
+    )
+
+    app_doc = await get_application(args.id)
+    if not app_doc:
+        print(f"ERROR: application {args.id} not found")
+        return
+    if app_doc.get("status") != "pending":
+        print(f"ERROR: application status is {app_doc.get('status')!r}, not pending")
+        return
+
+    await mark_application_rejected(app_doc["id"], reason=args.reason or "")
+
+    logger.info(
+        "enterprise_application_rejected",
+        extra={
+            "action": "enterprise_application_rejected",
+            "application_id": app_doc["id"],
+            "company_name": app_doc["company_name"],
+            "contact_email": app_doc["contact_email"],
+            "tier": app_doc.get("tier"),
+            "reason": args.reason or "",
+            "firebase_uid": app_doc.get("firebase_uid"),
+            "source": "operator_cli",
+        },
+    )
+
+    print("=" * 70)
+    print("Application rejected")
+    print("=" * 70)
+    print(f"  application_id: {app_doc['id']}")
+    print(f"  company:        {app_doc['company_name']}")
+    print(f"  contact_email:  {app_doc['contact_email']}")
+    print(f"  reason:         {args.reason or '(none recorded)'}")
+    print()
+    print("The partner sees the rejection panel on /enterprise/dashboard")
+    print("next time they sign in. No email is sent automatically — if you")
+    print("want to follow up personally, the partner's email is above.")
+
+
+async def cmd_mint_checkout(args):
+    """Print the JSON body to POST to Lemon Squeezy's `checkouts` API.
+
+    This intentionally does NOT call Lemon Squeezy directly — we keep the LS
+    API key out of this script. Paste the JSON into a curl call against:
+        POST https://api.lemonsqueezy.com/v1/checkouts
+    """
+    store_id = args.store_id or os.getenv("LEMONSQUEEZY_STORE_ID", "<STORE_ID>")
+    env_tag = "dev" if os.getenv("APP_ENV", "prod") == "dev" else "prod"
+    body = {
+        "data": {
+            "type": "checkouts",
+            "attributes": {
+                "checkout_data": {
+                    "custom": {
+                        "account_type": "enterprise",
+                        "partner_id": args.partner_id,
+                        "env": env_tag,
+                    }
+                }
+            },
+            "relationships": {
+                "store": {"data": {"type": "stores", "id": str(store_id)}},
+                "variant": {"data": {"type": "variants", "id": str(args.variant_id)}},
+            },
+        }
+    }
+    print(json.dumps(body, indent=2))
+    print()
+    print("Send via:")
+    print("  curl https://api.lemonsqueezy.com/v1/checkouts \\")
+    print("    -H 'Accept: application/vnd.api+json' \\")
+    print("    -H 'Content-Type: application/vnd.api+json' \\")
+    print('    -H "Authorization: Bearer $LEMONSQUEEZY_API_KEY" \\')
+    print("    -d @-  # paste the JSON above")
+
+
+def _add_common(p, parser_fn):
+    parser_fn(p)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Enterprise partner administration")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("list-partners")
+    p.add_argument("--limit", type=int, default=100)
+    p.set_defaults(func=cmd_list_partners)
+
+    p = sub.add_parser("create-partner")
+    p.add_argument("--name", required=True)
+    p.add_argument("--email", required=True)
+    p.add_argument("--credits", type=int, default=0)
+    p.add_argument(
+        "--rpm", type=int, default=None, help="Per-minute rate limit override (defaults to global)"
+    )
+    p.set_defaults(func=cmd_create_partner)
+
+    p = sub.add_parser("set-status")
+    p.add_argument("--partner-id", required=True)
+    p.add_argument("--status", required=True, choices=("active", "suspended", "frozen"))
+    p.set_defaults(func=cmd_set_status)
+
+    p = sub.add_parser("create-key")
+    p.add_argument("--partner-id", required=True)
+    p.add_argument(
+        "--allowed-ip",
+        action="append",
+        default=[],
+        help="CIDR allowlist (repeatable). Omit for unrestricted.",
+    )
+    p.add_argument("--expires-days", type=int, default=None)
+    p.set_defaults(func=cmd_create_key)
+
+    p = sub.add_parser("revoke-key")
+    p.add_argument("--partner-id", required=True)
+    p.add_argument("--credential-id", required=True)
+    p.set_defaults(func=cmd_revoke_key)
+
+    p = sub.add_parser("balance")
+    p.add_argument("--partner-id", required=True)
+    p.set_defaults(func=cmd_balance)
+
+    p = sub.add_parser("grant-credits")
+    p.add_argument("--partner-id", required=True)
+    p.add_argument("--amount", type=int, required=True)
+    p.add_argument("--reason", default=None, help="Ledger reason string (default: manual_grant)")
+    p.add_argument(
+        "--reference", default=None, help="Idempotency reference id (default: cli:<timestamp>)"
+    )
+    p.set_defaults(func=cmd_grant_credits)
+
+    p = sub.add_parser("list-applications")
+    p.add_argument("--limit", type=int, default=50)
+    p.set_defaults(func=cmd_list_applications)
+
+    p = sub.add_parser("approve-application")
+    p.add_argument("--id", required=True, help="enterprise_applications document id")
+    p.add_argument(
+        "--credits",
+        type=int,
+        default=50,
+        help="Sandbox credits to grant (default: 50 — enough for a real "
+        "evaluation of ~30-40 scans plus signing-mistake retries, "
+        "without subsidising free production usage). Override per "
+        "applicant if they have a legit reason for more.",
+    )
+    p.set_defaults(func=cmd_approve_application)
+
+    p = sub.add_parser("reject-application")
+    p.add_argument("--id", required=True, help="enterprise_applications document id")
+    p.add_argument(
+        "--reason",
+        default="",
+        help="Optional internal reason for rejection (stored on the doc, never "
+        "shown to the partner). Useful for audit trail.",
+    )
+    p.set_defaults(func=cmd_reject_application)
+
+    p = sub.add_parser("mint-checkout")
+    p.add_argument("--partner-id", required=True)
+    p.add_argument("--variant-id", required=True)
+    p.add_argument("--store-id", default=None)
+    p.set_defaults(func=cmd_mint_checkout)
+
+    args = parser.parse_args()
+
+    async def runner():
+        await _bootstrap()
+        await args.func(args)
+
+    asyncio.run(runner())
+
+
+if __name__ == "__main__":
+    main()

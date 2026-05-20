@@ -13,6 +13,7 @@ Responsibilities (only):
 import asyncio
 import logging
 import os
+import re
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -28,6 +29,9 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.api import auth, checkout, credits, detection, inpainting, reports, system, webhooks
+from app.api.enterprise import analyze as enterprise_analyze
+from app.api.enterprise import management as enterprise_management
+from app.core.enterprise_errors import build_envelope
 from app.integrations import firebase as firebase_module
 from app.integrations import http_client as http_module
 from app.integrations import redis_client as redis_module
@@ -155,11 +159,25 @@ class _RequestLoggingMiddleware:
 # ---------------------------------------------------------------------------
 @app.exception_handler(StarletteHTTPException)
 async def custom_http_exception_handler(request: Request, exc: StarletteHTTPException):
+    # Enterprise /v1/* routes get a Stripe-style error envelope and no CORS
+    # headers (S2S clients don't run in browsers — CORS is irrelevant and a
+    # browser hitting these endpoints should be told plainly).
+    is_enterprise = request.url.path.startswith("/v1/")
+
     headers = getattr(exc, "headers", None) or {}
-    headers["Access-Control-Allow-Origin"] = "https://fauxlens.com"
-    headers["Access-Control-Allow-Credentials"] = "true"
-    headers["Access-Control-Allow-Methods"] = "*"
-    headers["Access-Control-Allow-Headers"] = "*"
+    if not is_enterprise:
+        # Echo the request Origin when it matches the static allowlist OR the
+        # Firebase Hosting regex. Default to fauxlens.com so prod browsers
+        # still see CORS headers on errors when the Origin header is missing.
+        request_origin = request.headers.get("origin", "")
+        origin_allowed = request_origin in _cors_origins or (
+            bool(request_origin) and bool(re.match(_cors_origin_regex, request_origin))
+        )
+        allowed_origin = request_origin if origin_allowed else "https://fauxlens.com"
+        headers["Access-Control-Allow-Origin"] = allowed_origin
+        headers["Access-Control-Allow-Credentials"] = "true"
+        headers["Access-Control-Allow-Methods"] = "*"
+        headers["Access-Control-Allow-Headers"] = "*"
 
     # Drain the request body so HTTP/2 doesn't surface ERR_HTTP2_PROTOCOL_ERROR
     # to the browser.  Cap at 64 KB to prevent a DDoS vector where an attacker
@@ -178,7 +196,10 @@ async def custom_http_exception_handler(request: Request, exc: StarletteHTTPExce
             # "Stream consumed" — FastAPI already read the body. Fine to ignore.
             pass
 
-    response_data = {"detail": exc.detail}
+    if is_enterprise:
+        response_data = build_envelope(exc.status_code, exc.detail)
+    else:
+        response_data = {"detail": exc.detail}
     log_level = logger.warning if exc.status_code < 500 else logger.error
     log_level(
         "http_exception_response",
@@ -205,13 +226,53 @@ async def custom_http_exception_handler(request: Request, exc: StarletteHTTPExce
     )
 
 
+# Allow localhost when either APP_ENV=dev (default for local dev) OR the
+# explicit `ALLOW_LOCAL_DEV_ORIGIN` flag is set. The flag lets a founder run
+# the local frontend against a backend pointed at live Lemon Squeezy / live
+# Firebase without breaking CORS — useful for end-to-end checkout tests
+# before deploying. Real production (Railway) never sets this.
+_cors_origins = ["https://fauxlens.com"]
+_allow_local = (
+    os.getenv("APP_ENV", "prod") == "dev"
+    or os.getenv("ALLOW_LOCAL_DEV_ORIGIN", "").lower() in ("1", "true", "yes")
+)
+if _allow_local:
+    _cors_origins.extend([
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+    ])
+
+# Firebase Hosting canonical + preview channel URLs.
+#
+# Pattern is locked to the `proof-or-poof` project namespace, so no external
+# .web.app or .firebaseapp.com domain (which third parties cannot register
+# inside our Firebase project) can match. Matches:
+#   https://proof-or-poof.web.app                                   (canonical)
+#   https://proof-or-poof.firebaseapp.com                           (legacy)
+#   https://www.fauxlens.com                                        (with-www)
+#   https://proof-or-poof--<channel>.web.app                        (any preview)
+_cors_origin_regex = (
+    r"^https://(www\.fauxlens\.com"
+    r"|proof-or-poof(--[a-zA-Z0-9_-]+)?\.(web\.app|firebaseapp\.com))$"
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://fauxlens.com"],
+    allow_origins=_cors_origins,
+    allow_origin_regex=_cors_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-User-Balance", "X-Op-Ref"],
+    expose_headers=[
+        "X-User-Balance",
+        "X-Op-Ref",
+        "X-RateLimit-Limit",
+        "X-RateLimit-Remaining",
+        "X-RateLimit-Reset",
+        "X-Idempotent-Replay",
+        "X-Request-ID",
+    ],
 )
 app.add_middleware(_RequestLoggingMiddleware)
 
@@ -279,6 +340,8 @@ app.include_router(checkout.router)
 app.include_router(reports.router)
 app.include_router(inpainting.router)
 app.include_router(webhooks.router)
+app.include_router(enterprise_analyze.router)
+app.include_router(enterprise_management.router)
 
 
 @app.get("/favicon.ico", include_in_schema=False)

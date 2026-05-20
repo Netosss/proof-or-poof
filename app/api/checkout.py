@@ -27,15 +27,18 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Checkout"])
 
-LEMONSQUEEZY_STORE_ID = os.getenv("LEMONSQUEEZY_STORE_ID", "")
 LEMONSQUEEZY_CHECKOUT_URL = "https://api.lemonsqueezy.com/v1/checkouts"
 
 
-# Resolved at startup — picks the right API key for the current environment.
+# Resolved at REQUEST time — picks the right API key for the current environment.
 # APP_ENV=dev  → LEMONSQUEEZY_API_KEY_TEST_MODE (LS test mode key)
 # APP_ENV=prod → LEMONSQUEEZY_API_KEY           (LS live key)
 # The live key is NEVER loaded when APP_ENV=dev, preventing accidental
 # real charges during development.
+#
+# IMPORTANT: do not resolve env vars at module-import time — load_dotenv()
+# in main.py runs after these router modules have already been imported, so
+# a module-level os.getenv would silently read empty strings.
 def _resolve_api_key() -> str:
     if settings.is_dev:
         key = os.getenv("LEMONSQUEEZY_API_KEY_TEST_MODE", "")
@@ -51,7 +54,8 @@ def _resolve_api_key() -> str:
     return os.getenv("LEMONSQUEEZY_API_KEY", "")
 
 
-LEMONSQUEEZY_API_KEY = _resolve_api_key()
+def _resolve_store_id() -> str:
+    return os.getenv("LEMONSQUEEZY_STORE_ID", "")
 
 
 class CheckoutRequest(BaseModel):
@@ -77,7 +81,10 @@ async def create_checkout(
     Returns:
       { "checkout_url": "https://..." }
     """
-    if not LEMONSQUEEZY_API_KEY:
+    ls_api_key = _resolve_api_key()
+    ls_store_id = _resolve_store_id()
+
+    if not ls_api_key:
         key_name = "LEMONSQUEEZY_API_KEY_TEST_MODE" if settings.is_dev else "LEMONSQUEEZY_API_KEY"
         logger.error(
             "checkout_config_error",
@@ -89,7 +96,7 @@ async def create_checkout(
         )
         raise HTTPException(status_code=503, detail="Payment service not configured")
 
-    if not LEMONSQUEEZY_STORE_ID:
+    if not ls_store_id:
         logger.error(
             "checkout_config_error",
             extra={
@@ -116,14 +123,14 @@ async def create_checkout(
                 },
             },
             "relationships": {
-                "store": {"data": {"type": "stores", "id": LEMONSQUEEZY_STORE_ID}},
+                "store": {"data": {"type": "stores", "id": ls_store_id}},
                 "variant": {"data": {"type": "variants", "id": body.variant_id}},
             },
         }
     }
 
     headers = {
-        "Authorization": f"Bearer {LEMONSQUEEZY_API_KEY}",
+        "Authorization": f"Bearer {ls_api_key}",
         "Accept": "application/vnd.api+json",
         "Content-Type": "application/vnd.api+json",
     }
@@ -194,18 +201,20 @@ async def debug_list_variants(user: dict = Depends(get_current_user)):
 
     Requires: Authorization: Bearer <firebase_id_token>
     """
-    if not LEMONSQUEEZY_API_KEY:
+    ls_api_key = _resolve_api_key()
+    ls_store_id = _resolve_store_id()
+    if not ls_api_key:
         raise HTTPException(status_code=503, detail="LEMONSQUEEZY_API_KEY not set")
 
     headers = {
-        "Authorization": f"Bearer {LEMONSQUEEZY_API_KEY}",
+        "Authorization": f"Bearer {ls_api_key}",
         "Accept": "application/vnd.api+json",
     }
 
     try:
         async with request_session() as sess:
             async with sess.get(
-                f"https://api.lemonsqueezy.com/v1/variants?filter[store_id]={LEMONSQUEEZY_STORE_ID}",
+                f"https://api.lemonsqueezy.com/v1/variants?filter[store_id]={ls_store_id}",
                 headers=headers,
             ) as resp:
                 raw = await resp.json()

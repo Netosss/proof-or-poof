@@ -86,7 +86,7 @@ def test_runpod_webhook_unknown_job(client):
 
 def test_runpod_webhook_invalid_signature_rejected(client):
     """When RUNPOD_WEBHOOK_SECRET is set, a missing/wrong ?secret= param → 401."""
-    with patch("app.api.webhooks.RUNPOD_WEBHOOK_SECRET", "real-runpod-secret"):
+    with patch("app.api.webhooks._runpod_webhook_secret", return_value="real-runpod-secret"):
         response = client.post(
             "/webhook/runpod",
             json={"id": "fake-job", "status": "COMPLETED", "output": {"ai_score": 0.99}},
@@ -96,7 +96,7 @@ def test_runpod_webhook_invalid_signature_rejected(client):
 
 def test_runpod_webhook_wrong_secret_rejected(client):
     """Wrong ?secret= value → 401."""
-    with patch("app.api.webhooks.RUNPOD_WEBHOOK_SECRET", "real-runpod-secret"):
+    with patch("app.api.webhooks._runpod_webhook_secret", return_value="real-runpod-secret"):
         response = client.post(
             "/webhook/runpod?secret=wrong-value",
             json={"id": "fake-job", "status": "COMPLETED", "output": {"ai_score": 0.99}},
@@ -107,7 +107,7 @@ def test_runpod_webhook_wrong_secret_rejected(client):
 def test_runpod_webhook_valid_signature_accepted(client):
     """Correct ?secret= query param → request is processed (not 401)."""
     secret = "real-runpod-secret"
-    with patch("app.api.webhooks.RUNPOD_WEBHOOK_SECRET", secret):
+    with patch("app.api.webhooks._runpod_webhook_secret", return_value=secret):
         response = client.post(
             f"/webhook/runpod?secret={secret}",
             json={"id": "legit-job", "status": "COMPLETED", "output": None},
@@ -124,7 +124,7 @@ def test_lemonsqueezy_no_secret_returns_500(client):
     # When LEMONSQUEEZY_WEBHOOK_SECRET is unset, the server must fail loudly
     # with 500 (not silently swallow webhooks with 200) so a misconfigured
     # deployment is immediately visible and Lemon Squeezy retries automatically.
-    with patch("app.api.webhooks.LEMONSQUEEZY_WEBHOOK_SECRET", None):
+    with patch("app.api.webhooks._lemonsqueezy_webhook_secret", return_value=""):
         response = client.post(
             "/webhooks/lemonsqueezy",
             json={"meta": {"event_name": "order_created"}},
@@ -134,7 +134,7 @@ def test_lemonsqueezy_no_secret_returns_500(client):
 
 
 def test_lemonsqueezy_invalid_signature(client):
-    with patch("app.api.webhooks.LEMONSQUEEZY_WEBHOOK_SECRET", "real-secret"):
+    with patch("app.api.webhooks._lemonsqueezy_webhook_secret", return_value="real-secret"):
         response = client.post(
             "/webhooks/lemonsqueezy",
             content=b'{"meta": {"event_name": "order_created"}}',
@@ -161,7 +161,7 @@ def test_lemonsqueezy_order_created_not_paid_is_skipped(client):
     sig = hmac_mod.new(secret.encode(), payload_bytes, hashlib.sha256).hexdigest()
 
     with (
-        patch("app.api.webhooks.LEMONSQUEEZY_WEBHOOK_SECRET", secret),
+        patch("app.api.webhooks._lemonsqueezy_webhook_secret", return_value=secret),
         patch("app.api.webhooks.log_transaction") as mock_log,
     ):
         response = client.post(
