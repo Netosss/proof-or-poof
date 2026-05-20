@@ -28,7 +28,7 @@ Firestore layout:
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import HTTPException
 from google.cloud.firestore_v1 import SERVER_TIMESTAMP
@@ -40,33 +40,81 @@ def _is_sentinel(value) -> bool:
     """Detect Firestore sentinel objects so they don't leak into JSON responses."""
     return type(value).__name__ in ("ServerTimestamp", "Sentinel", "_UNSET_SENTINEL", "Increment")
 
+
 logger = logging.getLogger(__name__)
 
 
 # Curated list — small enough to maintain by hand, large enough to block the
 # common offenders. Expand from production logs as new patterns appear.
-_DISPOSABLE_EMAIL_DOMAINS: frozenset[str] = frozenset({
-    "mailinator.com", "guerrillamail.com", "tempmail.com", "10minutemail.com",
-    "trashmail.com", "throwaway.email", "yopmail.com", "fakeinbox.com",
-    "maildrop.cc", "sharklasers.com", "getairmail.com", "dispostable.com",
-    "mintemail.com", "mytrashmail.com", "spambox.us", "tempinbox.com",
-    "tempr.email", "33mail.com", "spamgourmet.com", "mail-temporaire.fr",
-    "anonbox.net", "byom.de", "tmpmail.org", "tmpmail.net", "burnermail.io",
-    "mohmal.com", "easytrashmail.com", "linshiyouxiang.net", "fakemail.net",
-    "emailondeck.com", "moakt.com", "harakirimail.com", "mintmail.cc",
-    "mail.tm", "mail7.io",
-})
+_DISPOSABLE_EMAIL_DOMAINS: frozenset[str] = frozenset(
+    {
+        "mailinator.com",
+        "guerrillamail.com",
+        "tempmail.com",
+        "10minutemail.com",
+        "trashmail.com",
+        "throwaway.email",
+        "yopmail.com",
+        "fakeinbox.com",
+        "maildrop.cc",
+        "sharklasers.com",
+        "getairmail.com",
+        "dispostable.com",
+        "mintemail.com",
+        "mytrashmail.com",
+        "spambox.us",
+        "tempinbox.com",
+        "tempr.email",
+        "33mail.com",
+        "spamgourmet.com",
+        "mail-temporaire.fr",
+        "anonbox.net",
+        "byom.de",
+        "tmpmail.org",
+        "tmpmail.net",
+        "burnermail.io",
+        "mohmal.com",
+        "easytrashmail.com",
+        "linshiyouxiang.net",
+        "fakemail.net",
+        "emailondeck.com",
+        "moakt.com",
+        "harakirimail.com",
+        "mintmail.cc",
+        "mail.tm",
+        "mail7.io",
+    }
+)
 
 # Personal email providers — flagged but not blocked.
-_FREE_EMAIL_DOMAINS: frozenset[str] = frozenset({
-    "gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "icloud.com",
-    "live.com", "msn.com", "aol.com", "protonmail.com", "proton.me",
-    "yandex.com", "yandex.ru", "gmx.com", "gmx.net", "mail.com", "zoho.com",
-    "tutanota.com", "fastmail.com", "qq.com", "163.com", "126.com", "naver.com",
-})
+_FREE_EMAIL_DOMAINS: frozenset[str] = frozenset(
+    {
+        "gmail.com",
+        "yahoo.com",
+        "outlook.com",
+        "hotmail.com",
+        "icloud.com",
+        "live.com",
+        "msn.com",
+        "aol.com",
+        "protonmail.com",
+        "proton.me",
+        "yandex.com",
+        "yandex.ru",
+        "gmx.com",
+        "gmx.net",
+        "mail.com",
+        "zoho.com",
+        "tutanota.com",
+        "fastmail.com",
+        "qq.com",
+        "163.com",
+        "126.com",
+        "naver.com",
+    }
+)
 
-ALLOWED_USE_CASES = ("newsroom", "trust_safety", "insurance", "marketplace",
-                     "research", "other")
+ALLOWED_USE_CASES = ("newsroom", "trust_safety", "insurance", "marketplace", "research", "other")
 ALLOWED_VOLUMES = ("under_2k", "2k_10k", "10k_25k", "over_25k")
 ALLOWED_TIERS = ("sandbox", "starter", "pro", "scale")
 
@@ -93,9 +141,7 @@ def is_free_email(email: str) -> bool:
 async def find_application_for_uid(firebase_uid: str) -> dict | None:
     """Return the most recent application for this Firebase user (any status)."""
     db = _get_db()
-    q = (db.collection("enterprise_applications")
-         .where("firebase_uid", "==", firebase_uid)
-         .limit(1))
+    q = db.collection("enterprise_applications").where("firebase_uid", "==", firebase_uid).limit(1)
     async for snap in q.stream():
         return {"id": snap.id, **snap.to_dict()}
     return None
@@ -120,7 +166,9 @@ async def create_application(
     if use_case not in ALLOWED_USE_CASES:
         raise HTTPException(status_code=400, detail=f"use_case must be one of {ALLOWED_USE_CASES}")
     if expected_volume not in ALLOWED_VOLUMES:
-        raise HTTPException(status_code=400, detail=f"expected_volume must be one of {ALLOWED_VOLUMES}")
+        raise HTTPException(
+            status_code=400, detail=f"expected_volume must be one of {ALLOWED_VOLUMES}"
+        )
     if tier not in ALLOWED_TIERS:
         raise HTTPException(status_code=400, detail=f"tier must be one of {ALLOWED_TIERS}")
     if is_disposable_email(contact_email):
@@ -168,7 +216,7 @@ async def create_application(
         },
     )
     # Replace SERVER_TIMESTAMP sentinels with python datetimes for the response.
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     data["created_at"] = now
     data["updated_at"] = now
     return {"id": ref.id, **data}
@@ -176,12 +224,38 @@ async def create_application(
 
 async def mark_application_approved(application_id: str, partner_id: str) -> None:
     db = _get_db()
-    await db.collection("enterprise_applications").document(application_id).update({
-        "status": "provisioned",
-        "partner_id": partner_id,
-        "approved_at": SERVER_TIMESTAMP,
-        "updated_at": SERVER_TIMESTAMP,
-    })
+    await (
+        db.collection("enterprise_applications")
+        .document(application_id)
+        .update(
+            {
+                "status": "provisioned",
+                "partner_id": partner_id,
+                "approved_at": SERVER_TIMESTAMP,
+                "updated_at": SERVER_TIMESTAMP,
+            }
+        )
+    )
+
+
+async def mark_application_rejected(application_id: str, reason: str = "") -> None:
+    """Reject a pending application. Used by the operator CLI when the
+    review concludes the application isn't a good fit (volume mismatch,
+    abuse risk, off-use-case, etc.). The dashboard's RejectedView renders
+    based on `status=='rejected'` — that's the only user-visible effect."""
+    db = _get_db()
+    await (
+        db.collection("enterprise_applications")
+        .document(application_id)
+        .update(
+            {
+                "status": "rejected",
+                "rejection_reason": reason or None,
+                "rejected_at": SERVER_TIMESTAMP,
+                "updated_at": SERVER_TIMESTAMP,
+            }
+        )
+    )
 
 
 async def get_application(application_id: str) -> dict | None:
@@ -195,9 +269,7 @@ async def get_application(application_id: str) -> dict | None:
 async def list_pending_applications(limit: int = 50) -> list[dict]:
     """Operator helper — list pending sandbox applications awaiting approval."""
     db = _get_db()
-    q = (db.collection("enterprise_applications")
-         .where("status", "==", "pending")
-         .limit(limit))
+    q = db.collection("enterprise_applications").where("status", "==", "pending").limit(limit)
     out = []
     async for snap in q.stream():
         out.append({"id": snap.id, **snap.to_dict()})

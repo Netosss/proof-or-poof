@@ -23,6 +23,7 @@ import tempfile
 import time
 import uuid
 
+import sentry_sdk
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
@@ -290,6 +291,22 @@ async def analyze(request: Request):
     principal = await authenticate(request)
 
     user_id_var.set(f"ent:{principal.partner_id}")
+
+    # Attribute any subsequent Sentry exception to this partner. The
+    # request-id middleware sets sentry_sdk.set_user({id: device_id}) for
+    # consumer requests, but enterprise requests don't carry a device_id —
+    # without this override every enterprise crash hits Sentry as
+    # 'anonymous' and the operator has to grep Axiom for partner_id by
+    # request_id. Setting a richer principal here means partner_id +
+    # credential_id show up in Sentry directly.
+    sentry_sdk.set_user(
+        {
+            "id": f"ent:{principal.partner_id}",
+            "partner_id": principal.partner_id,
+            "credential_id": principal.credential_id,
+        }
+    )
+    sentry_sdk.set_tag("enterprise_partner_id", principal.partner_id)
 
     # --- 2. Rate limit ---
     rate_info = await check_and_track(principal.credential_id)
