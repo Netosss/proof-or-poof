@@ -13,6 +13,7 @@ Responsibilities (only):
 import asyncio
 import logging
 import os
+import re
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -165,14 +166,14 @@ async def custom_http_exception_handler(request: Request, exc: StarletteHTTPExce
 
     headers = getattr(exc, "headers", None) or {}
     if not is_enterprise:
-        # Echo the request Origin if it's in our allowlist; otherwise default
-        # to the production host so prod browsers still see CORS headers on errors.
+        # Echo the request Origin when it matches the static allowlist OR the
+        # Firebase Hosting regex. Default to fauxlens.com so prod browsers
+        # still see CORS headers on errors when the Origin header is missing.
         request_origin = request.headers.get("origin", "")
-        allowed_origin = (
-            request_origin
-            if request_origin in _cors_origins
-            else "https://fauxlens.com"
+        origin_allowed = request_origin in _cors_origins or (
+            bool(request_origin) and bool(re.match(_cors_origin_regex, request_origin))
         )
+        allowed_origin = request_origin if origin_allowed else "https://fauxlens.com"
         headers["Access-Control-Allow-Origin"] = allowed_origin
         headers["Access-Control-Allow-Credentials"] = "true"
         headers["Access-Control-Allow-Methods"] = "*"
@@ -242,9 +243,24 @@ if _allow_local:
         "http://127.0.0.1:5173",
     ])
 
+# Firebase Hosting canonical + preview channel URLs.
+#
+# Pattern is locked to the `proof-or-poof` project namespace, so no external
+# .web.app or .firebaseapp.com domain (which third parties cannot register
+# inside our Firebase project) can match. Matches:
+#   https://proof-or-poof.web.app                                   (canonical)
+#   https://proof-or-poof.firebaseapp.com                           (legacy)
+#   https://www.fauxlens.com                                        (with-www)
+#   https://proof-or-poof--<channel>.web.app                        (any preview)
+_cors_origin_regex = (
+    r"^https://(www\.fauxlens\.com"
+    r"|proof-or-poof(--[a-zA-Z0-9_-]+)?\.(web\.app|firebaseapp\.com))$"
+)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
+    allow_origin_regex=_cors_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
