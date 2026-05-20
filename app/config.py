@@ -151,7 +151,36 @@ class Settings(BaseSettings):
         description="Test LS variant ID (str) → enterprise credits (int). Used when app_env=dev.",
     )
 
-    @field_validator("enterprise_ls_variants", "enterprise_ls_test_variants", mode="before")
+    # Variant ID → per-credential rate limit (req/min) for the tier that
+    # variant represents. The LS webhook reads this on order_paid and raises
+    # partner.rate_limit_per_min so the published Pricing-page numbers
+    # (60 / 120 / 300 req/min) take effect without manual intervention.
+    # Partners are only ever RAISED — buying a smaller top-up never lowers
+    # a higher-tier customer's ceiling.
+    enterprise_variant_rate_limits: dict = Field(
+        default_factory=dict,
+        description=(
+            "Live LS variant ID (str) → rate limit per minute (int). "
+            "Auto-applied to partner.rate_limit_per_min on purchase. "
+            "Used when app_env=prod."
+        ),
+    )
+    enterprise_variant_test_rate_limits: dict = Field(
+        default_factory=dict,
+        description=(
+            "Test LS variant ID (str) → rate limit per minute (int). "
+            "Auto-applied to partner.rate_limit_per_min on purchase. "
+            "Used when app_env=dev."
+        ),
+    )
+
+    @field_validator(
+        "enterprise_ls_variants",
+        "enterprise_ls_test_variants",
+        "enterprise_variant_rate_limits",
+        "enterprise_variant_test_rate_limits",
+        mode="before",
+    )
     @classmethod
     def parse_enterprise_variants(cls, v):
         """Same parsing logic as consumer variants — handles dict / JSON / quoted-JSON."""
@@ -171,6 +200,15 @@ class Settings(BaseSettings):
     def active_enterprise_ls_variants(self) -> dict:
         """Returns the correct enterprise variant map for the current environment."""
         return self.enterprise_ls_test_variants if self.is_dev else self.enterprise_ls_variants
+
+    @property
+    def active_enterprise_variant_rate_limits(self) -> dict:
+        """Returns the variant→rate-limit map for the current environment."""
+        return (
+            self.enterprise_variant_test_rate_limits
+            if self.is_dev
+            else self.enterprise_variant_rate_limits
+        )
 
     # ------------------------------------------------------------------ #
     # Pricing (USD per unit)                                              #

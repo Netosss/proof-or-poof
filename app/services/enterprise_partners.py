@@ -80,12 +80,87 @@ async def get_partner(partner_id: str) -> dict | None:
     return {"id": partner_id, **snap.to_dict()}
 
 
+async def maybe_raise_rate_limit(partner_id: str, new_limit: int) -> int | None:
+    """Raise a partner's per-minute rate limit if `new_limit` exceeds the
+    current ceiling. Returns the limit after the operation (None if the
+    partner doesn't exist).
+
+    Semantics:
+      - `partner.rate_limit_per_min == None` is treated as the system default
+        (`settings.enterprise_default_rate_limit_per_min`). A Starter customer
+        with no override still gets bumped to Pro's 120 when they upgrade.
+      - We never LOWER the limit. A Scale customer who buys a small Starter
+        top-up keeps Scale's 300 — the field is a ceiling, not the tier.
+      - Idempotent: a webhook retry that sees the same or lower `new_limit`
+        is a no-op.
+
+    Returns the effective `rate_limit_per_min` after the write (or after the
+    no-op if no write was needed).
+    """
+    from app.config import settings  # local import to avoid circular config wiring
+
+    if new_limit <= 0:
+        return None
+
+    db = _get_db()
+    ref = db.collection("enterprise_partners").document(partner_id)
+    snap = await ref.get()
+    if not snap.exists:
+        logger.warning(
+            "enterprise_rate_limit_partner_not_found",
+            extra={
+                "action": "enterprise_rate_limit_partner_not_found",
+                "partner_id": partner_id,
+                "new_limit": new_limit,
+            },
+        )
+        return None
+
+    partner = snap.to_dict() or {}
+    current = partner.get("rate_limit_per_min")
+    effective_current = (
+        int(current) if isinstance(current, int) else settings.enterprise_default_rate_limit_per_min
+    )
+
+    if new_limit <= effective_current:
+        logger.info(
+            "enterprise_rate_limit_unchanged",
+            extra={
+                "action": "enterprise_rate_limit_unchanged",
+                "partner_id": partner_id,
+                "current": effective_current,
+                "proposed": new_limit,
+                "reason": "proposed_not_higher",
+            },
+        )
+        return effective_current
+
+    await ref.update(
+        {
+            "rate_limit_per_min": int(new_limit),
+            "updated_at": SERVER_TIMESTAMP,
+        }
+    )
+    logger.info(
+        "enterprise_rate_limit_raised",
+        extra={
+            "action": "enterprise_rate_limit_raised",
+            "partner_id": partner_id,
+            "from": effective_current,
+            "to": int(new_limit),
+        },
+    )
+    return int(new_limit)
+
+
 async def set_partner_status(partner_id: str, status: str) -> None:
     if status not in ALLOWED_STATUSES:
         raise ValueError(f"Invalid status {status!r}; expected one of {ALLOWED_STATUSES}")
     db = _get_db()
-    await db.collection("enterprise_partners").document(partner_id).update(
-        {"status": status, "updated_at": SERVER_TIMESTAMP}
+    await (
+        db.collection("enterprise_partners")
+        .document(partner_id)
+        .update({"status": status, "updated_at": SERVER_TIMESTAMP})
     )
     logger.info(
         "enterprise_partner_status_changed",
@@ -108,9 +183,7 @@ async def list_partners(limit: int = 100) -> list[dict]:
 async def find_partner_for_uid(firebase_uid: str) -> dict | None:
     """Look up the partner record linked to a signed-in Firebase user."""
     db = _get_db()
-    q = (db.collection("enterprise_partners")
-         .where("firebase_uid", "==", firebase_uid)
-         .limit(1))
+    q = db.collection("enterprise_partners").where("firebase_uid", "==", firebase_uid).limit(1)
     async for snap in q.stream():
         return {"id": snap.id, **snap.to_dict()}
     return None
@@ -120,8 +193,9 @@ async def list_partner_credentials(partner_id: str) -> list[dict]:
     """List active + revoked credentials for a partner (no secrets returned)."""
     db = _get_db()
     out = []
-    creds_ref = (db.collection("enterprise_partners").document(partner_id)
-                 .collection("api_credentials"))
+    creds_ref = (
+        db.collection("enterprise_partners").document(partner_id).collection("api_credentials")
+    )
     async for snap in creds_ref.stream():
         d = snap.to_dict() or {}
         # Strip the raw secret — never return it after creation.
@@ -141,8 +215,9 @@ async def list_partner_ledger(partner_id: str, limit: int = 50) -> list[dict]:
     from google.cloud.firestore_v1 import Query
 
     db = _get_db()
-    ledger_ref = (db.collection("enterprise_partners").document(partner_id)
-                  .collection("credit_ledger"))
+    ledger_ref = (
+        db.collection("enterprise_partners").document(partner_id).collection("credit_ledger")
+    )
 
     out: list[dict] = []
     try:

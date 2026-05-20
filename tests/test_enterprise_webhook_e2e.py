@@ -24,7 +24,8 @@ def _signed(payload: dict) -> tuple[bytes, str]:
 
 def _seed_partner(mock_firebase, partner_id="p-existing", firebase_uid="fb-existing"):
     mock_firebase.seed(
-        "enterprise_partners", partner_id,
+        "enterprise_partners",
+        partner_id,
         {
             "company_name": "Existing Co",
             "contact_email": "ex@co.com",
@@ -40,6 +41,7 @@ def _set_variant_map(monkeypatch, variant_id="vt-1", credits=10000):
     """Force the active variant map to contain our test variant so the webhook
     finds it on lookup."""
     from app.config import settings
+
     monkeypatch.setattr(settings, "lemon_squeezy_variants", {variant_id: credits})
     monkeypatch.setattr(settings, "enterprise_ls_variants", {variant_id: credits})
     # APP_ENV is "prod" by default in tests — the env_gate accepts non-test_mode payloads.
@@ -55,10 +57,19 @@ def _post_webhook(client, payload):
         )
 
 
-def _ls_payload(*, order_id, variant_id="vt-1", account_type="enterprise",
-                custom_data=None, status="paid", event="order_paid",
-                user_name="Acme Buyer", user_email="buyer@acme.com",
-                total=34999, test_mode=False):
+def _ls_payload(
+    *,
+    order_id,
+    variant_id="vt-1",
+    account_type="enterprise",
+    custom_data=None,
+    status="paid",
+    event="order_paid",
+    user_name="Acme Buyer",
+    user_email="buyer@acme.com",
+    total=34999,
+    test_mode=False,
+):
     cd = {"account_type": account_type, "env": "prod"}
     if custom_data:
         cd.update(custom_data)
@@ -119,6 +130,64 @@ def test_enterprise_order_paid_auto_provisions_from_ls_payload(client, mock_fire
     assert created[0]["credit_balance"] == 10000
 
 
+def test_enterprise_order_paid_applies_tier_rate_limit(client, mock_firebase, monkeypatch):
+    """Buying a tier should raise partner.rate_limit_per_min to that tier's
+    published ceiling via active_enterprise_variant_rate_limits."""
+    from app.config import settings
+
+    _set_variant_map(monkeypatch, variant_id="vt-pro", credits=10000)
+    # Both prod and dev paths in case the test env_gate disagrees.
+    monkeypatch.setattr(settings, "enterprise_variant_rate_limits", {"vt-pro": 120})
+    monkeypatch.setattr(settings, "enterprise_variant_test_rate_limits", {"vt-pro": 120})
+
+    _seed_partner(mock_firebase, partner_id="p-tier", firebase_uid="fb-tier")
+    payload = _ls_payload(
+        order_id="ord-tier-1",
+        variant_id="vt-pro",
+        custom_data={"partner_id": "p-tier", "firebase_uid": "fb-tier"},
+    )
+    r = _post_webhook(client, payload)
+
+    assert r.status_code == 200, r.text
+    doc = mock_firebase.collection("enterprise_partners")._docs["p-tier"]
+    assert doc["rate_limit_per_min"] == 120
+    assert doc["credit_balance"] == 10000
+
+
+def test_enterprise_order_paid_does_not_lower_rate_limit(client, mock_firebase, monkeypatch):
+    """Scale customer buying a small Starter top-up keeps the Scale ceiling."""
+    from app.config import settings
+
+    _set_variant_map(monkeypatch, variant_id="vt-starter", credits=2000)
+    monkeypatch.setattr(settings, "enterprise_variant_rate_limits", {"vt-starter": 60})
+    monkeypatch.setattr(settings, "enterprise_variant_test_rate_limits", {"vt-starter": 60})
+
+    mock_firebase.seed(
+        "enterprise_partners",
+        "p-scale",
+        {
+            "company_name": "Scale Co",
+            "contact_email": "ops@scale.co",
+            "credit_balance": 25000,
+            "status": "active",
+            "credits_version": 1,
+            "rate_limit_per_min": 300,
+            "firebase_uid": "fb-scale",
+        },
+    )
+    payload = _ls_payload(
+        order_id="ord-topup-1",
+        variant_id="vt-starter",
+        custom_data={"partner_id": "p-scale", "firebase_uid": "fb-scale"},
+    )
+    r = _post_webhook(client, payload)
+
+    assert r.status_code == 200, r.text
+    doc = mock_firebase.collection("enterprise_partners")._docs["p-scale"]
+    assert doc["rate_limit_per_min"] == 300  # unchanged
+    assert doc["credit_balance"] == 27000  # 25k + 2k top-up
+
+
 def test_enterprise_order_paid_duplicate_is_idempotent(client, mock_firebase, monkeypatch):
     """Same order_id posted twice → second is skipped, balance unchanged."""
     _set_variant_map(monkeypatch)
@@ -152,7 +221,9 @@ def test_enterprise_order_refunded(client, mock_firebase, monkeypatch):
     )
     r1 = _post_webhook(client, pay_payload)
     assert r1.status_code == 200
-    balance_after_pay = mock_firebase.collection("enterprise_partners")._docs["p-refund"]["credit_balance"]
+    balance_after_pay = mock_firebase.collection("enterprise_partners")._docs["p-refund"][
+        "credit_balance"
+    ]
     assert balance_after_pay == 10000
 
     # Step 2: refund
@@ -163,7 +234,9 @@ def test_enterprise_order_refunded(client, mock_firebase, monkeypatch):
     )
     r2 = _post_webhook(client, refund_payload)
     assert r2.status_code == 200, r2.text
-    balance_after_refund = mock_firebase.collection("enterprise_partners")._docs["p-refund"]["credit_balance"]
+    balance_after_refund = mock_firebase.collection("enterprise_partners")._docs["p-refund"][
+        "credit_balance"
+    ]
     # Refund clawbacks the 10000 credits.
     assert balance_after_refund == 0
 

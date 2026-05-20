@@ -23,7 +23,11 @@ from app.services.enterprise_applications import (
 )
 from app.services.enterprise_credit_engine import grant_credit as ent_grant_credit
 from app.services.enterprise_credit_engine import refund_credit as ent_refund_credit
-from app.services.enterprise_partners import create_partner, find_partner_for_uid
+from app.services.enterprise_partners import (
+    create_partner,
+    find_partner_for_uid,
+    maybe_raise_rate_limit,
+)
 from app.services.finance_service import log_transaction
 
 logger = logging.getLogger(__name__)
@@ -95,11 +99,7 @@ async def handle_order_paid(meta, attributes, order_id: str, custom_data: dict):
                 company_name = application["company_name"]
                 contact_email = application["contact_email"]
             else:
-                contact_email = (
-                    attributes.get("user_email")
-                    or custom_data.get("buyer_email")
-                    or ""
-                )
+                contact_email = attributes.get("user_email") or custom_data.get("buyer_email") or ""
                 company_name = (
                     attributes.get("user_name")
                     or custom_data.get("buyer_name")
@@ -154,16 +154,18 @@ async def handle_order_paid(meta, attributes, order_id: str, custom_data: dict):
     total_usd = attributes.get("total", 0) / 100.0
 
     try:
-        await purchase_ref.create({
-            "lemon_order_id": order_id,
-            "lemon_variant_id": variant_id,
-            "partner_id": partner_id,
-            "account_type": "enterprise",
-            "credits_granted": credits,
-            "status": "pending",
-            "test_mode": is_test_payload,
-            "created_at": SERVER_TIMESTAMP,
-        })
+        await purchase_ref.create(
+            {
+                "lemon_order_id": order_id,
+                "lemon_variant_id": variant_id,
+                "partner_id": partner_id,
+                "account_type": "enterprise",
+                "credits_granted": credits,
+                "status": "pending",
+                "test_mode": is_test_payload,
+                "created_at": SERVER_TIMESTAMP,
+            }
+        )
     except Exception as e:
         if "AlreadyExists" in type(e).__name__ or "ALREADY_EXISTS" in str(e).upper():
             existing = await purchase_ref.get()
@@ -192,7 +194,10 @@ async def handle_order_paid(meta, attributes, order_id: str, custom_data: dict):
 
     try:
         new_balance = await ent_grant_credit(
-            partner_id, amount=credits, reason="purchase", reference_id=order_id,
+            partner_id,
+            amount=credits,
+            reason="purchase",
+            reference_id=order_id,
         )
     except Exception as e:
         await purchase_ref.update({"status": "grant_failed"})
@@ -210,6 +215,27 @@ async def handle_order_paid(meta, attributes, order_id: str, custom_data: dict):
         raise HTTPException(status_code=500, detail="Credit grant failed — will retry")
 
     await purchase_ref.update({"status": "paid"})
+
+    # Raise the per-credential rate limit if this variant unlocks a higher
+    # tier. Lookups missing from the map (legacy variants, custom one-offs)
+    # silently leave the limit alone — the founder can bump it manually.
+    # Failures here MUST NOT roll back the credit grant: the partner already
+    # has the credits they paid for; rate limit is operational sugar.
+    new_tier_limit = settings.active_enterprise_variant_rate_limits.get(variant_id)
+    if new_tier_limit:
+        try:
+            await maybe_raise_rate_limit(partner_id, int(new_tier_limit))
+        except Exception as e:
+            logger.warning(
+                "enterprise_rate_limit_raise_failed",
+                extra={
+                    "action": "enterprise_rate_limit_raise_failed",
+                    "partner_id": partner_id,
+                    "variant_id": variant_id,
+                    "proposed_limit": int(new_tier_limit),
+                    "error": str(e),
+                },
+            )
 
     log_transaction(
         "LEMONSQUEEZY_ENTERPRISE",
@@ -276,7 +302,10 @@ async def handle_order_refunded(order_id: str):
     # negative amount to the additive ledger writer.
     try:
         new_balance = await ent_refund_credit(
-            partner_id, amount=-credits_granted, reason="refund", reference_id=order_id,
+            partner_id,
+            amount=-credits_granted,
+            reason="refund",
+            reference_id=order_id,
         )
         logger.info(
             "lemonsqueezy_enterprise_order_refunded",
