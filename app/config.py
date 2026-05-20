@@ -121,6 +121,58 @@ class Settings(BaseSettings):
         return self.lemon_squeezy_test_variants if self.is_dev else self.lemon_squeezy_variants
 
     # ------------------------------------------------------------------ #
+    # Enterprise API (S2S) — separate credit ledger from consumer users  #
+    # ------------------------------------------------------------------ #
+    enterprise_credit_cost: int = Field(
+        1, description="Enterprise credits charged per /v1/analyze call (1:1 by default)"
+    )
+    enterprise_default_rate_limit_per_min: int = Field(
+        60, description="Per-credential rate limit ceiling (req/min); overridable per partner"
+    )
+    enterprise_timestamp_drift_sec: int = Field(
+        300, description="Max allowed clock drift on X-FauxLens-Timestamp (seconds)"
+    )
+    enterprise_replay_window_sec: int = Field(
+        300, description="Redis nonce TTL for signature replay protection (seconds)"
+    )
+    enterprise_idempotency_ttl_sec: int = Field(
+        86_400, description="24 h — Idempotency-Key cached-response TTL"
+    )
+    enterprise_max_request_bytes: int = Field(
+        209_715_200,
+        description="200 MB — hard ceiling for enterprise multipart bodies; mirrors video upload cap",
+    )
+    enterprise_ls_variants: dict = Field(
+        default_factory=dict,
+        description="Live LS variant ID (str) → enterprise credits (int). Used when app_env=prod.",
+    )
+    enterprise_ls_test_variants: dict = Field(
+        default_factory=dict,
+        description="Test LS variant ID (str) → enterprise credits (int). Used when app_env=dev.",
+    )
+
+    @field_validator("enterprise_ls_variants", "enterprise_ls_test_variants", mode="before")
+    @classmethod
+    def parse_enterprise_variants(cls, v):
+        """Same parsing logic as consumer variants — handles dict / JSON / quoted-JSON."""
+        if not v:
+            return {}
+        if isinstance(v, dict):
+            return v
+        if isinstance(v, str):
+            s = v.strip()
+            if s.startswith('"') and s.endswith('"'):
+                s = s[1:-1]
+            s = s.replace('\\"', '"')
+            return json.loads(s)
+        return v
+
+    @property
+    def active_enterprise_ls_variants(self) -> dict:
+        """Returns the correct enterprise variant map for the current environment."""
+        return self.enterprise_ls_test_variants if self.is_dev else self.enterprise_ls_variants
+
+    # ------------------------------------------------------------------ #
     # Pricing (USD per unit)                                              #
     # ------------------------------------------------------------------ #
     gpu_rate_per_sec: float = Field(0.0019, description="RunPod A5000/L4 rate for detection")

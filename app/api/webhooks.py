@@ -12,6 +12,12 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from google.cloud.firestore_v1 import SERVER_TIMESTAMP
 from google.cloud.firestore_v1.async_transaction import async_transactional
 
+from app.api.enterprise.webhooks_enterprise import (
+    handle_order_paid as _handle_enterprise_order_paid,
+)
+from app.api.enterprise.webhooks_enterprise import (
+    handle_order_refunded as _handle_enterprise_order_refunded,
+)
 from app.config import settings
 from app.integrations import firebase as firebase_module
 from app.integrations import redis_client as redis_module
@@ -22,8 +28,17 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Webhooks"])
 
-RUNPOD_WEBHOOK_SECRET = os.getenv("RUNPOD_WEBHOOK_SECRET", "")
-LEMONSQUEEZY_WEBHOOK_SECRET = os.getenv("LEMONSQUEEZY_WEBHOOK_SECRET")
+
+# Webhook secrets are resolved at REQUEST time, not module-import time, so a
+# rotated secret in the env takes effect on next request instead of next deploy.
+# In production this matters very little (Railway redeploys on env change), but
+# it keeps the LS-related env reads consistent and removes a class of bug.
+def _runpod_webhook_secret() -> str:
+    return os.getenv("RUNPOD_WEBHOOK_SECRET", "")
+
+
+def _lemonsqueezy_webhook_secret() -> str:
+    return os.getenv("LEMONSQUEEZY_WEBHOOK_SECRET", "")
 
 
 @router.post("/webhook/runpod")
@@ -40,9 +55,10 @@ async def runpod_webhook(request: Request):
     coroutine in runpod.py (_run_with_webhook) is woken immediately via Pub/Sub.
     """
     try:
-        if RUNPOD_WEBHOOK_SECRET:
+        runpod_secret = _runpod_webhook_secret()
+        if runpod_secret:
             secret = request.query_params.get("secret", "")
-            if not secret or not hmac.compare_digest(secret, RUNPOD_WEBHOOK_SECRET):
+            if not secret or not hmac.compare_digest(secret, runpod_secret):
                 logger.warning(
                     "webhook_runpod_secret_mismatch",
                     extra={
@@ -151,14 +167,19 @@ async def runpod_webhook(request: Request):
     except HTTPException:
         raise
     except Exception as e:
+        # Raise 500 so RunPod's delivery layer retries this webhook. Returning
+        # 200 with an error body looks like success and prevents the retry,
+        # leaving the waiting scan coroutine stuck until its poll timeout.
         logger.error(
             "webhook_runpod_callback_error",
             extra={
                 "action": "webhook_runpod_callback_error",
                 "error": str(e),
+                "error_type": type(e).__name__,
             },
+            exc_info=True,
         )
-        return {"status": "error", "message": str(e)}
+        raise HTTPException(status_code=500, detail="webhook_processing_error")
 
 
 @router.post("/webhooks/lemonsqueezy")
@@ -176,7 +197,8 @@ async def lemonsqueezy_webhook(
         },
     )
 
-    if not LEMONSQUEEZY_WEBHOOK_SECRET:
+    ls_webhook_secret = _lemonsqueezy_webhook_secret()
+    if not ls_webhook_secret:
         logger.critical(
             "lemonsqueezy_config_critical",
             extra={
@@ -189,7 +211,7 @@ async def lemonsqueezy_webhook(
     payload_bytes = await request.body()
 
     expected_signature = hmac.new(
-        LEMONSQUEEZY_WEBHOOK_SECRET.encode(), payload_bytes, hashlib.sha256
+        ls_webhook_secret.encode(), payload_bytes, hashlib.sha256
     ).hexdigest()
 
     if not x_signature or not hmac.compare_digest(x_signature, expected_signature):
@@ -223,6 +245,8 @@ async def lemonsqueezy_webhook(
         },
     )
 
+    account_type = (custom_data.get("account_type") or "consumer").lower()
+
     if event_name == "order_created":
         order_status = attributes.get("status", "")
         if order_status != "paid":
@@ -235,12 +259,18 @@ async def lemonsqueezy_webhook(
                 },
             )
             return {"status": "ok", "skipped": f"status={order_status}"}
+        if account_type == "enterprise":
+            return await _handle_enterprise_order_paid(meta, attributes, order_id, custom_data)
         return await _handle_order_paid(payload, meta, data, attributes, order_id, custom_data)
 
     if event_name == "order_paid":
+        if account_type == "enterprise":
+            return await _handle_enterprise_order_paid(meta, attributes, order_id, custom_data)
         return await _handle_order_paid(payload, meta, data, attributes, order_id, custom_data)
 
     if event_name == "order_refunded":
+        if account_type == "enterprise":
+            return await _handle_enterprise_order_refunded(order_id)
         return await _handle_order_refunded(order_id)
 
     logger.info(
