@@ -688,6 +688,22 @@ APP_ENV=dev
 
 ---
 
+## Enterprise admin tasks (founder / operator playbook)
+
+For sandbox approval, rejection, comp credits, key revocation, suspending
+a partner, and Axiom audit queries — see the dedicated runbook:
+
+**[`docs/ENTERPRISE_OPERATOR_RUNBOOK.md`](../docs/ENTERPRISE_OPERATOR_RUNBOOK.md)**
+
+The runbook covers every CLI command in `scripts/enterprise_admin.py`,
+what the partner sees at each application state, troubleshooting common
+issues, and the pre-prod env-var checklist.
+
+Partner-facing API docs (what you'd send to a customer) are in
+`docs/ENTERPRISE_API.md`.
+
+---
+
 ## Agent Routing (from root CLAUDE.md)
 
 | Task | Agent |
