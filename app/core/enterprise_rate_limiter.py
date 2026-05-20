@@ -1,9 +1,9 @@
 """
 Per-credential rate limiting for the enterprise API.
 
-Sliding-window-counter approach:
-    INCR rate:ent:{credential_id}
-    EXPIRE 60s
+Fixed-window counter approach:
+    INCR rate:ent:{credential_id}            (atomic with EXPIRE-on-create)
+    EXPIRE 60s only when count == 1          (set via Lua so the pair is atomic)
 
 Returns a header bundle that the route includes on EVERY response (200, 4xx,
 5xx). On 429 we additionally surface Retry-After so partner SDKs can back off
@@ -12,6 +12,12 @@ doesn't reset budget for a partner under attack.
 
 Falls back to per-process in-memory state if Redis is unavailable. The
 in-memory limiter is shared with no other code so it's safe to keep simple.
+
+Atomicity note: A naive `pipeline.incr + pipeline.expire` is NOT atomic across
+Redis crashes — if the server dies between INCR and EXPIRE the key persists
+with no TTL and rate limiting is permanently disabled for that credential.
+We run both commands inside a Lua script via EVAL so the pair is one
+all-or-nothing operation as seen by Redis's command log.
 """
 
 import logging
@@ -38,6 +44,18 @@ class RateLimitInfo:
 # --- In-memory fallback state -------------------------------------------------
 _WINDOW_SEC = 60
 _memory_buckets: dict[str, deque] = defaultdict(deque)
+
+# Atomically INCR + (EXPIRE only on first hit). Returns the new counter.
+# Running this as one Lua script is the only way to guarantee the EXPIRE
+# happens even if the Redis server is killed between commands — a plain
+# pipeline can leak a TTL-less key permanently.
+_INCR_WITH_TTL_LUA = """
+local v = redis.call('INCR', KEYS[1])
+if v == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return v
+"""
 
 
 def _to_headers(info: RateLimitInfo) -> dict[str, str]:
@@ -66,11 +84,7 @@ async def check_and_track(credential_id: str, limit_per_min: int | None = None) 
 async def _check_redis(rc, credential_id: str, limit: int) -> RateLimitInfo:
     key = f"rate:ent:{credential_id}"
     try:
-        pipe = rc.pipeline()
-        pipe.incr(key)
-        pipe.expire(key, _WINDOW_SEC)
-        results = await pipe.execute()
-        count = int(results[0])
+        count = int(await rc.eval(_INCR_WITH_TTL_LUA, 1, key, _WINDOW_SEC))
     except Exception as e:
         logger.warning(
             "enterprise_rate_limit_redis_error",
@@ -90,8 +104,11 @@ async def _check_redis(rc, credential_id: str, limit: int) -> RateLimitInfo:
         info = RateLimitInfo(limit=limit, remaining=0, reset_seconds=ttl, retry_after=ttl)
         raise HTTPException(
             status_code=429,
-            detail={"type": "rate_limit_error", "code": "rate_limited",
-                    "message": "Per-minute request budget exhausted."},
+            detail={
+                "type": "rate_limit_error",
+                "code": "rate_limited",
+                "message": "Per-minute request budget exhausted.",
+            },
             headers=_to_headers(info),
         )
     return RateLimitInfo(limit=limit, remaining=remaining, reset_seconds=ttl)
@@ -108,8 +125,11 @@ def _check_memory(credential_id: str, limit: int) -> RateLimitInfo:
         info = RateLimitInfo(limit=limit, remaining=0, reset_seconds=ttl, retry_after=ttl)
         raise HTTPException(
             status_code=429,
-            detail={"type": "rate_limit_error", "code": "rate_limited",
-                    "message": "Per-minute request budget exhausted."},
+            detail={
+                "type": "rate_limit_error",
+                "code": "rate_limited",
+                "message": "Per-minute request budget exhausted.",
+            },
             headers=_to_headers(info),
         )
     bucket.append(now)

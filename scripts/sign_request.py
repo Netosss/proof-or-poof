@@ -25,7 +25,14 @@ import uuid
 from pathlib import Path
 
 
-BOUNDARY = "----FauxLensSmokeTest"
+def _new_boundary() -> str:
+    """
+    Generate a random multipart boundary. A fixed boundary string (the prior
+    `----FauxLensSmokeTest`) silently corrupts files whose content happens to
+    contain that exact byte sequence — the server parser sees a premature
+    terminator and the body hash mismatches with no obvious root cause.
+    """
+    return f"----FauxLens{uuid.uuid4().hex[:24]}"
 
 
 def build_multipart_body(file_path: Path, field_name: str = "file") -> tuple[bytes, str]:
@@ -34,32 +41,50 @@ def build_multipart_body(file_path: Path, field_name: str = "file") -> tuple[byt
     # Guess MIME from extension — same allowlist as file_validator.
     ext = file_path.suffix.lower()
     mime = {
-        ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-        ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif",
-        ".heic": "image/heic", ".heif": "image/heif",
-        ".avif": "image/avif", ".bmp": "image/bmp", ".tiff": "image/tiff",
-        ".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+        ".heic": "image/heic",
+        ".heif": "image/heif",
+        ".avif": "image/avif",
+        ".bmp": "image/bmp",
+        ".tiff": "image/tiff",
+        ".mp4": "video/mp4",
+        ".mov": "video/quicktime",
+        ".webm": "video/webm",
     }.get(ext, "application/octet-stream")
 
+    boundary = _new_boundary()
     parts = []
-    parts.append(f"--{BOUNDARY}\r\n".encode())
+    parts.append(f"--{boundary}\r\n".encode())
     parts.append(
         f'Content-Disposition: form-data; name="{field_name}"; '
         f'filename="{file_path.name}"\r\n'.encode()
     )
     parts.append(f"Content-Type: {mime}\r\n\r\n".encode())
     parts.append(file_bytes)
-    parts.append(f"\r\n--{BOUNDARY}--\r\n".encode())
+    parts.append(f"\r\n--{boundary}--\r\n".encode())
     body = b"".join(parts)
-    return body, f"multipart/form-data; boundary={BOUNDARY}"
+    return body, f"multipart/form-data; boundary={boundary}"
 
 
-def sign(api_key: str, secret: str, method: str, path: str,
-         body: bytes) -> dict[str, str]:
-    """Compute all four FauxLens auth headers."""
+def sign(
+    api_key: str, secret: str, method: str, path_with_query: str, body: bytes
+) -> dict[str, str]:
+    """
+    Compute all four FauxLens auth headers.
+
+    `path_with_query` MUST be the URL path AND query string the server will
+    see — e.g. `/v1/analyze` for a plain POST, `/v1/analyze?mode=fast` if the
+    request carries a query string. Omitting the query string here while
+    sending it on the wire causes `invalid_signature` because the server
+    recomputes the canonical payload from `request.url.path + "?" + request.url.query`.
+    """
     timestamp = str(int(time.time()))
     content_sha = hashlib.sha256(body).hexdigest()
-    payload = f"{timestamp}\n{method.upper()}\n{path}\n{content_sha}".encode("utf-8")
+    payload = f"{timestamp}\n{method.upper()}\n{path_with_query}\n{content_sha}".encode()
     signature = hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
     return {
         "X-FauxLens-Key": api_key,
@@ -77,8 +102,9 @@ def main() -> int:
     ap.add_argument("--file", required=True, type=Path)
     ap.add_argument("--host", default="http://localhost:8000")
     ap.add_argument("--path", default="/v1/analyze")
-    ap.add_argument("--dry-run", action="store_true",
-                    help="Print the curl command instead of executing")
+    ap.add_argument(
+        "--dry-run", action="store_true", help="Print the curl command instead of executing"
+    )
     args = ap.parse_args()
 
     if not args.file.exists():
@@ -101,8 +127,10 @@ def main() -> int:
     if args.dry_run:
         print("=== Equivalent curl ===")
         header_args = " \\\n    ".join(f"-H '{k}: {v}'" for k, v in headers.items())
-        print(f"curl -X POST '{args.host}{args.path}' \\\n    {header_args} \\\n    "
-              f"--data-binary @{args.file}")
+        print(
+            f"curl -X POST '{args.host}{args.path}' \\\n    {header_args} \\\n    "
+            f"--data-binary @{args.file}"
+        )
         return 0
 
     import httpx

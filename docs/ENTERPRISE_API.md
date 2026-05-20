@@ -22,13 +22,19 @@ Every request must include four headers:
 ### 1.1 Canonical signing payload
 
 ```
-{timestamp}\n{method}\n{path}\n{content_sha256}
+{timestamp}\n{method}\n{path_with_query}\n{content_sha256}
 ```
 
 - `\n` is the literal LF character (0x0A).
 - `method` is uppercase (e.g. `POST`).
-- `path` is the URL path component only, no query string (e.g. `/v1/analyze`).
-- `content_sha256` is lowercase hex.
+- `path_with_query` is the URL path AND the query string when present —
+  e.g. `/v1/analyze` for a plain POST, `/v1/analyze?mode=fast` when a query
+  string is sent. **The query string MUST be included in the signed payload
+  whenever it appears on the request.** Omitting it causes `invalid_signature`.
+  The leading `?` is part of the signed string; do not URL-encode the
+  separator.
+- `content_sha256` is the lowercase hex SHA-256 of the raw request body
+  (the exact bytes sent on the wire, including multipart framing).
 
 ### 1.2 Signature algorithm
 
@@ -56,10 +62,11 @@ with open("photo.jpg", "rb") as fp:
 
 content_sha256 = hashlib.sha256(body).hexdigest()
 timestamp = str(int(time.time()))
-path = "/v1/analyze"
+# Include the query string when present, e.g. "/v1/analyze?mode=fast".
+path_with_query = "/v1/analyze"
 method = "POST"
 
-payload = f"{timestamp}\n{method}\n{path}\n{content_sha256}".encode("utf-8")
+payload = f"{timestamp}\n{method}\n{path_with_query}\n{content_sha256}".encode("utf-8")
 signature = hmac.new(SECRET_KEY.encode(), payload, hashlib.sha256).hexdigest()
 
 resp = requests.post(
@@ -91,7 +98,9 @@ const URL        = "https://web-production-6a994.up.railway.app/v1/analyze";
 const body = fs.readFileSync("photo.jpg");
 const contentSha = crypto.createHash("sha256").update(body).digest("hex");
 const ts = Math.floor(Date.now() / 1000).toString();
-const payload = `${ts}\nPOST\n/v1/analyze\n${contentSha}`;
+// Include the query string when present, e.g. "/v1/analyze?mode=fast".
+const pathWithQuery = "/v1/analyze";
+const payload = `${ts}\nPOST\n${pathWithQuery}\n${contentSha}`;
 const signature = crypto.createHmac("sha256", SECRET_KEY).update(payload).digest("hex");
 
 const form = new FormData();
@@ -114,14 +123,23 @@ console.log(res.status, await res.json());
 ### 1.5 Replay protection
 
 - Requests with a timestamp drift greater than **300 seconds** are rejected
-  with `401 timestamp_expired`. Synchronize your servers via NTP.
+  with `401 timestamp_expired`. The error message includes the server's
+  current UNIX time so you can self-diagnose clock skew without operator
+  support. Synchronize your hosts via NTP.
 - Each signature is single-use within the timestamp window. Re-sending the
-  exact same request yields `401 replay_detected`.
+  exact same request yields `401 replay_detected`. The nonce is scoped to
+  your credential — a leaked signature cannot be used by another principal
+  to pre-claim the nonce slot and deny service to you.
 
 ### 1.6 IP allowlist (optional)
 
 When provisioning a credential the operator may attach a list of CIDRs. Any
 request whose source IP falls outside the list returns `403 ip_not_allowed`.
+
+The server resolves the partner IP from the rightmost entry of the
+`X-Forwarded-For` header (set by the FauxLens edge proxy). If you call from
+behind your own corporate proxy or NAT, allowlist the egress IP of that
+proxy, not your internal hosts.
 
 ---
 

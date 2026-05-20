@@ -20,8 +20,9 @@ import pytest
 _BOUNDARY = "----V1AnalyzeTest"
 
 
-def _build_multipart(file_bytes: bytes, filename: str = "t.jpg",
-                     content_type: str = "image/jpeg") -> bytes:
+def _build_multipart(
+    file_bytes: bytes, filename: str = "t.jpg", content_type: str = "image/jpeg"
+) -> bytes:
     parts = [
         f"--{_BOUNDARY}\r\n".encode(),
         f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'.encode(),
@@ -46,12 +47,18 @@ _FAKE_CRED = {
 }
 
 
+# Must satisfy production-side `_API_KEY_RE = ^fxl_(live|test)_[A-Za-z0-9_-]{20,64}$`
+# so the format guard in authenticate() doesn't fast-reject before the test
+# reaches the path under verification.
+_FAKE_API_KEY = "fxl_test_" + "A" * 32
+
+
 def _make_headers(body: bytes, idem_key: str = "idem-e2e-1") -> dict[str, str]:
     ts = str(int(time.time()))
     content_sha = hashlib.sha256(body).hexdigest()
     sig = _sign(_FAKE_CRED["secret_key"], ts, "POST", "/v1/analyze", content_sha)
     return {
-        "X-FauxLens-Key": "fxl_test_aaa",
+        "X-FauxLens-Key": _FAKE_API_KEY,
         "X-FauxLens-Timestamp": ts,
         "X-FauxLens-Content-SHA256": content_sha,
         "X-FauxLens-Signature": sig,
@@ -62,10 +69,16 @@ def _make_headers(body: bytes, idem_key: str = "idem-e2e-1") -> dict[str, str]:
 
 def _seed_partner(mock_firebase, balance: int = 100):
     mock_firebase.seed(
-        "enterprise_partners", _FAKE_CRED["partner_id"],
-        {"company_name": "Acme", "contact_email": "ops@acme.com",
-         "credit_balance": balance, "status": "active", "credits_version": 1,
-         "firebase_uid": "fb-1"},
+        "enterprise_partners",
+        _FAKE_CRED["partner_id"],
+        {
+            "company_name": "Acme",
+            "contact_email": "ops@acme.com",
+            "credit_balance": balance,
+            "status": "active",
+            "credits_version": 1,
+            "firebase_uid": "fb-1",
+        },
     )
 
 
@@ -78,15 +91,18 @@ def _patch_auth_and_pipeline(detect_return=None, detect_raise: Exception | None 
     if detect_raise is not None:
         detect_mock = AsyncMock(side_effect=detect_raise)
     else:
-        detect_mock = AsyncMock(return_value=detect_return or {
-            "summary": "Likely Authentic",
-            "confidence_score": 0.95,
-            "is_short_circuited": False,
-            "evidence_chain": [],
-            "is_gemini_used": False,
-            "is_cached": False,
-            "gpu_time_ms": 0,
-        })
+        detect_mock = AsyncMock(
+            return_value=detect_return
+            or {
+                "summary": "Likely Authentic",
+                "confidence_score": 0.95,
+                "is_short_circuited": False,
+                "evidence_chain": [],
+                "is_gemini_used": False,
+                "is_cached": False,
+                "gpu_time_ms": 0,
+            }
+        )
 
     with (
         patch.object(ea, "resolve_credential", new=AsyncMock(return_value=_FAKE_CRED)),
@@ -98,6 +114,7 @@ def _patch_auth_and_pipeline(detect_return=None, detect_raise: Exception | None 
 
 
 # ─── Tests ──────────────────────────────────────────────────────────────────
+
 
 def test_v1_analyze_happy_path(client, mock_firebase, mock_redis, tiny_jpg):
     _seed_partner(mock_firebase, balance=100)
@@ -124,8 +141,11 @@ def test_v1_analyze_body_hash_mismatch(client, mock_firebase, mock_redis, tiny_j
     forged_sha = "f" * 64
     headers["X-FauxLens-Content-SHA256"] = forged_sha
     headers["X-FauxLens-Signature"] = _sign(
-        _FAKE_CRED["secret_key"], headers["X-FauxLens-Timestamp"],
-        "POST", "/v1/analyze", forged_sha,
+        _FAKE_CRED["secret_key"],
+        headers["X-FauxLens-Timestamp"],
+        "POST",
+        "/v1/analyze",
+        forged_sha,
     )
 
     with _patch_auth_and_pipeline():
@@ -145,8 +165,10 @@ def test_v1_analyze_refunds_on_pipeline_crash(client, mock_firebase, mock_redis,
 
     from app.api.enterprise import analyze as analyze_mod
 
-    with _patch_auth_and_pipeline(detect_raise=RuntimeError("simulated_crash")), \
-         patch.object(analyze_mod, "refund_credit", new=AsyncMock(return_value=100)) as ref_mock:
+    with (
+        _patch_auth_and_pipeline(detect_raise=RuntimeError("simulated_crash")),
+        patch.object(analyze_mod, "refund_credit", new=AsyncMock(return_value=100)) as ref_mock,
+    ):
         r = client.post("/v1/analyze", content=body, headers=headers)
 
     assert r.status_code == 500
@@ -170,8 +192,10 @@ def test_v1_analyze_refunds_on_analysis_failed_verdict(client, mock_firebase, mo
     }
     from app.api.enterprise import analyze as analyze_mod
 
-    with _patch_auth_and_pipeline(detect_return=failed_result), \
-         patch.object(analyze_mod, "refund_credit", new=AsyncMock(return_value=100)) as ref_mock:
+    with (
+        _patch_auth_and_pipeline(detect_return=failed_result),
+        patch.object(analyze_mod, "refund_credit", new=AsyncMock(return_value=100)) as ref_mock,
+    ):
         r = client.post("/v1/analyze", content=body, headers=headers)
 
     assert r.status_code == 422
