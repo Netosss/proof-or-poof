@@ -152,16 +152,30 @@ async def detect_ai_media_image_logic(
     if tiered_signals:
         ai_signals.extend(tiered_signals)
 
+    # Sensor-physics signals — must be present to early-exit as "human".
+    # A device manufacturer tag alone (Apple/Samsung/etc) plus a vendor OS string
+    # (iOS/Android) sums to 0.60, which previously tripped the Verified Human exit
+    # for any SCREENSHOT taken on a phone — even a screenshot of an AI image.
+    # Real cameras always record at least one of exposure / ISO / aperture as a hard
+    # numeric value from the sensor. Screenshots never do. Date strings are excluded
+    # because they're trivial to spoof — only true sensor-physics fields count.
+    SENSOR_PHYSICS_SIGNALS = ("ExposureTime", "ISOSpeedRatings", "FNumber")
+    has_physical_signals = any(tag in exif for tag in SENSOR_PHYSICS_SIGNALS)
+
     logger.info("metadata_scoring", extra={
         "action": "metadata_scoring",
         "human_score": round(human_score, 2),
         "ai_score": round(ai_score, 2),
+        "has_physical_signals": has_physical_signals,
         "human_signals": human_signals or [],
         "ai_signals": ai_signals or [],
     })
 
     # 1. VERIFIED HUMAN (Early Exit)
-    if human_score >= 0.60:
+    # Requires both a high human score AND at least one physical camera signal —
+    # device manufacturer + OS strings alone are not enough; a phone SCREENSHOT
+    # of an AI image carries Make/Software but no ExposureTime/ISO/FNumber.
+    if human_score >= 0.60 and has_physical_signals:
         logger.info("detection_early_exit_human", extra={
             "action": "detection_early_exit_human",
             "human_score": round(human_score, 2),
@@ -183,7 +197,9 @@ async def detect_ai_media_image_logic(
         }
 
     # 2. LIKELY HUMAN (Weaker signals but still skip GPU)
-    if human_score >= 0.40 and ai_score < 0.15:
+    # Same physical-camera-signal guard as #1 — block phone screenshots from
+    # short-circuiting just because they carry device/OS metadata.
+    if human_score >= 0.40 and ai_score < 0.15 and has_physical_signals:
         logger.info("detection_early_exit_human", extra={
             "action": "detection_early_exit_human",
             "human_score": round(human_score, 2),
