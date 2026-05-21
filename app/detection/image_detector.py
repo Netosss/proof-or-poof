@@ -10,7 +10,6 @@ from cache-hit paths within this module, avoiding a circular import.
 
 import os
 import json
-import random
 import asyncio
 import logging
 from typing import Optional
@@ -36,6 +35,20 @@ HARDWARE_TAGS = {
     "Make", "Model", "ExposureTime", "ISOSpeedRatings",
     "FNumber", "BodySerialNumber", "LensModel", "GPSLatitude"
 }
+
+# Sensor-physics signals — fields a real camera writes directly from sensor / lens
+# hardware. None of these are present on phone screenshots, web re-downloads, or
+# stripped-EXIF AI images. Required (any one) before the human early-exit paths
+# in detect_ai_media_image_logic short-circuit a verdict.
+#
+# DateTime fields are intentionally excluded — they're string-typed and trivially
+# spoofable. Optical-physics fields (FocalLength, FocalPlaneXResolution) are
+# included alongside the core triad because they're equally hard to forge by
+# screenshot but present on more real-world processed photos.
+SENSOR_PHYSICS_SIGNALS = frozenset({
+    "ExposureTime", "ISOSpeedRatings", "FNumber",
+    "FocalLength", "FocalPlaneXResolution",
+})
 
 def _label_for(signal_category: str) -> str:
     """Convert a snake_case signal_category key to a human-readable label."""
@@ -102,7 +115,18 @@ async def detect_ai_media_image_logic(
                 ]
             }
 
+    # Compute sensor-physics signal BEFORE merging trusted metadata. The mobile
+    # sidecar deliberately does NOT carry ExposureTime/ISO/FNumber (those would
+    # be a client-spoofable forgery surface), but real EXIF on disk does. The
+    # early-exit human paths below need to read this from the on-disk EXIF only.
+    has_physical_signals = any(tag in exif for tag in SENSOR_PHYSICS_SIGNALS)
+
     # --- Merge Trusted Metadata (Sidecar) ---
+    # SECURITY BOUNDARY: this allow-list intentionally excludes ExposureTime,
+    # ISOSpeedRatings, FNumber, FocalLength, FocalPlaneXResolution. These are
+    # the sensor-physics anchors used by `has_physical_signals` above and must
+    # ONLY originate from real on-disk EXIF — never from the mobile sidecar —
+    # so a malicious client cannot fake "real camera" provenance on an AI image.
     if trusted_metadata:
         logger.info("metadata_sidecar_used", extra={"action": "metadata_sidecar_used"})
         for key in ["Make", "Model", "Software", "DateTime", "LensModel"]:
@@ -156,12 +180,16 @@ async def detect_ai_media_image_logic(
         "action": "metadata_scoring",
         "human_score": round(human_score, 2),
         "ai_score": round(ai_score, 2),
+        "has_physical_signals": has_physical_signals,
         "human_signals": human_signals or [],
         "ai_signals": ai_signals or [],
     })
 
     # 1. VERIFIED HUMAN (Early Exit)
-    if human_score >= 0.60:
+    # Requires both a high human score AND at least one physical camera signal —
+    # device manufacturer + OS strings alone are not enough; a phone SCREENSHOT
+    # of an AI image carries Make/Software but no ExposureTime/ISO/FNumber.
+    if human_score >= 0.60 and has_physical_signals:
         logger.info("detection_early_exit_human", extra={
             "action": "detection_early_exit_human",
             "human_score": round(human_score, 2),
@@ -183,7 +211,9 @@ async def detect_ai_media_image_logic(
         }
 
     # 2. LIKELY HUMAN (Weaker signals but still skip GPU)
-    if human_score >= 0.40 and ai_score < 0.15:
+    # Same physical-camera-signal guard as #1 — block phone screenshots from
+    # short-circuiting just because they carry device/OS metadata.
+    if human_score >= 0.40 and ai_score < 0.15 and has_physical_signals:
         logger.info("detection_early_exit_human", extra={
             "action": "detection_early_exit_human",
             "human_score": round(human_score, 2),
@@ -235,7 +265,15 @@ async def detect_ai_media_image_logic(
             "human_score": round(human_score, 2),
             "reason": "ai_indicators_no_human_metadata",
         })
-        suspicious_confidence = round(random.uniform(0.80, 0.90), 2)
+        # Deterministic confidence derived from the underlying ai_score so the
+        # same image always produces the same verdict (was previously
+        # random.uniform(0.80, 0.90) which made the system non-reproducible and
+        # broke any downstream consumer relying on confidence stability).
+        # Map the [0.38, 0.55) ai_score range linearly into [0.80, 0.90].
+        suspicious_confidence = round(
+            0.80 + min(1.0, max(0.0, (ai_score - 0.38) / 0.17)) * 0.10,
+            2,
+        )
         return {
             "summary": "AI-Generated",
             "confidence_score": suspicious_confidence,

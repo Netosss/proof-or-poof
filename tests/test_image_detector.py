@@ -26,6 +26,15 @@ RICH_EXIF = {
 
 AI_EXIF = {"Software": "Stable Diffusion"}
 
+# Phone screenshot of an AI image — carries Make+Software but NO sensor-physics
+# fields. The metadata scorer assigns human_score=0.60 (Apple/Samsung make + iOS/OneUI
+# software), which historically tripped the "Verified Human" early-exit and routed
+# obvious AI images to "Likely Authentic 99%" without ever calling Gemini.
+# These fixtures lock the regression: any screenshot-shaped EXIF must fall through
+# to Gemini so the visual model gets to decide.
+IPHONE_SCREENSHOT_EXIF = {"Make": "Apple", "Model": "iPhone 15", "Software": "iOS 18.0"}
+SAMSUNG_SCREENSHOT_EXIF = {"Make": "samsung", "Software": "One UI 6.1"}
+
 _GEMINI_AI_RESP = {"confidence": 0.92, "explanation": "Synthetic details.", "quality_context": "high"}
 _GEMINI_HUMAN_RESP = {"confidence": 0.05, "explanation": "Natural noise.", "quality_context": "high"}
 _GEMINI_ERROR = {"confidence": -1.0, "explanation": "Error"}
@@ -67,6 +76,36 @@ async def test_high_human_score_early_exit_no_gemini(tmp_path):
     assert result["summary"] == "Likely Authentic"
     assert result["is_short_circuited"] is True
     mock_gemini.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Regression — phone screenshots of AI images must NOT short-circuit (the
+# original bug: Make=Apple + Software=iOS summed to human_score=0.60 and
+# tripped Verified Human even though no sensor-physics fields were present).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "label,exif",
+    [
+        ("iphone_screenshot", IPHONE_SCREENSHOT_EXIF),
+        ("samsung_screenshot", SAMSUNG_SCREENSHOT_EXIF),
+    ],
+)
+async def test_phone_screenshot_falls_through_to_gemini(label, exif, tmp_path):
+    p = tmp_path / f"{label}.jpg"
+    p.write_bytes(make_tiny_jpeg())
+
+    from app.detection.image_detector import detect_ai_media_image_logic
+
+    with ExitStack() as stack:
+        mock_gemini = _apply_base_patches(stack, exif=exif, gemini_resp=_GEMINI_AI_RESP)
+        result = await detect_ai_media_image_logic(str(p), {})
+
+    # Must reach Gemini and reflect its verdict, not short-circuit as Authentic.
+    mock_gemini.assert_called_once()
+    assert result["is_short_circuited"] is False
+    assert "AI" in result["summary"]
 
 
 # ---------------------------------------------------------------------------

@@ -294,13 +294,37 @@ class Settings(BaseSettings):
     # AI Decision Threshold                                               #
     # ------------------------------------------------------------------ #
     ai_confidence_threshold: float = Field(
-        0.5, description="Score above this → classified as AI-generated"
+        0.55,
+        description=(
+            "Score above this → classified as AI-generated. "
+            "Aligned with the prompt-side dead zone [0.40, 0.70) — anything ≥ 0.55 "
+            "must come from the suspicion band (0.70+) under normal operation."
+        ),
     )
 
     # ------------------------------------------------------------------ #
     # Gemini Client                                                       #
     # ------------------------------------------------------------------ #
-    gemini_http_timeout_ms: int = Field(15_000, description="HTTP client total timeout (ms)")
+    gemini_model: str = Field(
+        "gemini-3-flash-preview",
+        description=(
+            "Gemini model ID for forensic inference. EMPIRICAL: 3-flash-preview "
+            "outperforms gemini-3.5-flash by ~20 points on our forensic gold set — "
+            "3.5-flash systematically misses polished AI portraits (Flux/Midjourney "
+            "studio-style) regardless of prompt. Do NOT 'upgrade' to 3.5 without "
+            "re-running the gold set to confirm the regression is gone."
+        ),
+    )
+    gemini_thinking_level: str = Field(
+        "LOW",
+        description=(
+            "Reasoning budget for the forensic inference call. With the lean prompt, "
+            "LOW + temp=0.0 produces deterministic verdicts and lets the model trust "
+            "its first-pass perception instead of rationalising AI signals away via "
+            "extended reasoning."
+        ),
+    )
+    gemini_http_timeout_ms: int = Field(20_000, description="HTTP client total timeout (ms)")
     gemini_max_retries: int = Field(2, description="Max retry attempts on transient errors")
     gemini_retry_initial_delay: float = Field(1.0, description="First retry delay (seconds)")
     gemini_retry_max_delay: float = Field(5.0, description="Max retry back-off delay (seconds)")
@@ -310,11 +334,20 @@ class Settings(BaseSettings):
         95, description="JPEG quality for single-image forensic upload"
     )
     gemini_batch_jpeg_quality: int = Field(
-        85, description="JPEG quality for batch / video-frame upload"
+        95,
+        description=(
+            "JPEG quality for batch / video-frame upload. Bumped from 85 → 95 "
+            "so we don't introduce fresh compression artifacts the prompt then "
+            "mistakes for AI smoothness."
+        ),
     )
     gemini_temperature: float = Field(1.0, description="Sampling temperature for Gemini model")
     gemini_ai_vote_threshold: float = Field(
-        0.5, description="Per-frame confidence threshold for an AI vote"
+        0.55,
+        description=(
+            "Per-frame confidence threshold for an AI vote. Aligned with "
+            "ai_confidence_threshold and the prompt-side dead zone."
+        ),
     )
 
     # ------------------------------------------------------------------ #

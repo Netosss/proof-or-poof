@@ -14,7 +14,7 @@ import logging
 from PIL import Image, ImageFilter, ImageStat, ImageMath
 from google import genai
 from google.genai import types
-from typing import Union
+from typing import Optional, Union
 
 from app.config import settings
 from app.schemas.detection import DetectionResult
@@ -86,6 +86,11 @@ def _resize_if_needed(img: Image.Image) -> Image.Image:
     """
     Resizes image if it exceeds 4MP (~2048x2048) to limit token usage and avoid payload errors.
     Keeps aspect ratio.
+
+    Resampler note: BICUBIC instead of LANCZOS. Lanczos aggressively smooths high-frequency
+    pixel noise and micro-textures — the exact mathematical anomalies the vision model uses
+    to spot diffusion/GAN signatures. Bicubic preserves a cleaner representation of those
+    structural artifacts while still producing acceptable visual quality.
     """
     w, h = img.size
     pixels = w * h
@@ -94,15 +99,16 @@ def _resize_if_needed(img: Image.Image) -> Image.Image:
         scale = (settings.gemini_max_pixels / pixels) ** 0.5
         new_w = int(w * scale)
         new_h = int(h * scale)
-        return img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        return img.resize((new_w, new_h), Image.Resampling.BICUBIC)
 
     return img
 
 
-def analyze_image_pro_turbo(image_source: Union[str, Image.Image], pre_calculated_quality_context: str = None) -> dict:
-    """
-    GEMINI 3.0 FLASH - OPTIMIZED FOR FORENSIC DETECTION
-    """
+def analyze_image_pro_turbo(
+    image_source: Union[str, Image.Image],
+    pre_calculated_quality_context: Optional[str] = None,
+) -> dict:
+    """Single-image forensic inference via the configured Gemini model."""
     img_to_close = []
 
     try:
@@ -163,7 +169,7 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image], pre_calculate
         config = types.GenerateContentConfig(
             system_instruction=get_system_instruction(quality_context),
             media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
-            thinking_config=types.ThinkingConfig(thinking_level="LOW"),
+            thinking_config=types.ThinkingConfig(thinking_level=settings.gemini_thinking_level),
             temperature=settings.gemini_temperature,
             response_mime_type="application/json",
             response_schema=DetectionResult,
@@ -174,12 +180,17 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image], pre_calculate
             f"strictly following the system instructions.{noise_hint}"
         )
 
+        # NOTE: tested prompt-repetition trick (query duplicated) at LOW + temp=0.0.
+        # Empirically regressed gold-set accuracy 84% → 76%, even though it shifted which
+        # specific FP occurred. The published research ("Prompt Repetition Improves
+        # Non-Reasoning LLMs", Dec 2025) reports gains only for fully non-reasoning models;
+        # LOW thinking on Gemini 3.5 still does enough internal reasoning that duplication
+        # destabilises rather than reinforces. Send the query exactly once.
         t0 = time.perf_counter()
         response = client.models.generate_content(
-            model="gemini-3-flash-preview",
+            model=settings.gemini_model,
             contents=[
                 types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
-                execution_query,
                 execution_query,
             ],
             config=config
@@ -187,6 +198,9 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image], pre_calculate
         duration_ms = round((time.perf_counter() - t0) * 1000, 1)
 
         parsed_result = response.parsed
+        if parsed_result is None:
+            # Schema mismatch or safety block — log as a parse failure, not a network failure.
+            raise ValueError("Gemini returned no parsed DetectionResult (schema mismatch or safety block)")
 
         result = {
             "visual_scan": parsed_result.visual_scan,
@@ -205,7 +219,7 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image], pre_calculate
             }
             logger.info("gemini_call_completed", extra={
                 "action": "gemini_call_completed",
-                "model": "gemini-3-flash-preview",
+                "model": settings.gemini_model,
                 "call_type": "single_image",
                 "duration_ms": duration_ms,
                 "input_tokens": input_tokens,
@@ -215,7 +229,7 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image], pre_calculate
         else:
             logger.info("gemini_call_completed", extra={
                 "action": "gemini_call_completed",
-                "model": "gemini-3-flash-preview",
+                "model": settings.gemini_model,
                 "call_type": "single_image",
                 "duration_ms": duration_ms,
                 "cost_usd": settings.gemini_fixed_cost,
@@ -238,41 +252,45 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image], pre_calculate
 
 def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image, bytes]]) -> dict:
     """
-    Analyzes a batch of images for synthetic generation artifacts using Gemini 3.0 Flash.
-    Returns a single aggregated result based on the median decision.
+    Analyzes a batch of images for synthetic generation artifacts using the configured Gemini model.
+    Returns a single aggregated result based on a per-frame vote.
+
+    Per-frame quality context: each image's quality is analyzed independently and tagged
+    inline in the execution query (e.g. "[FRAME 1 QUALITY: ...]"). The system prompt is built
+    once with a neutral global context. This prevents the quality of one frame from
+    contaminating the analysis of others in a heterogeneous batch.
     """
     try:
-        image_parts = []
-        quality_context = None
+        image_parts: list[types.Part] = []
+        per_frame_quality: list[str] = []
 
-        idx_to_scan = 1 if len(image_sources) > 1 else 0
+        for src in image_sources:
+            # --- Per-frame quality probe ---
+            try:
+                frame_qc, _ = get_quality_context(src)
+            except Exception as e:
+                logger.error("gemini_quality_context_error", extra={
+                    "action": "gemini_quality_context_error",
+                    "error": str(e),
+                })
+                frame_qc = "**CONTEXT: QUALITY UNKNOWN.**"
+            per_frame_quality.append(frame_qc)
 
-        for i, src in enumerate(image_sources):
-            if i == idx_to_scan:
-                try:
-                    quality_context, _ = get_quality_context(src)
-                except Exception as e:
-                    logger.error("gemini_quality_context_error", extra={
-                        "action": "gemini_quality_context_error",
-                        "error": str(e),
-                    })
-
+            # --- Bytes path: no re-encoding, ship as-is ---
             if isinstance(src, bytes):
                 image_parts.append(
                     types.Part.from_bytes(data=src, mime_type="image/jpeg")
                 )
                 continue
 
-            img_to_close = []
+            # --- PIL / path path ---
+            img_to_close: list[Image.Image] = []
 
             if isinstance(src, str):
                 img_original = Image.open(src)
                 img_to_close.append(img_original)
             else:
                 img_original = src
-
-            if i == idx_to_scan and not quality_context:
-                quality_context, _ = get_quality_context(img_original)
 
             img_working = _resize_if_needed(img_original)
             if img_working is not img_original:
@@ -293,24 +311,37 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image, b
             for img_obj in img_to_close:
                 img_obj.close()
 
-        if not quality_context:
-            quality_context = "**CONTEXT: QUALITY UNKNOWN.**"
+        # Neutral global context — the per-frame tags below carry the real quality signal.
+        global_quality_context = (
+            "**CONTEXT: PER-FRAME QUALITY VARIES.** Each frame in this batch carries its "
+            "own quality tag in the execution query — apply the matching tag's guidance to "
+            "the correspondingly indexed image."
+        )
 
         config = types.GenerateContentConfig(
-            system_instruction=get_system_instruction(quality_context),
+            system_instruction=get_system_instruction(global_quality_context),
             media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
-            thinking_config=types.ThinkingConfig(thinking_level="LOW"),
+            thinking_config=types.ThinkingConfig(thinking_level=settings.gemini_thinking_level),
             temperature=settings.gemini_temperature,
             response_mime_type="application/json",
             response_schema=list[DetectionResult],
         )
 
-        execution_query = "Analyze EACH of the attached images for SYNTHETIC GENERATION ARTIFACTS, strictly following the system instructions."
+        quality_block = "\n".join(
+            f"[FRAME {i + 1} QUALITY] {qc}" for i, qc in enumerate(per_frame_quality)
+        )
+        execution_query = (
+            "Analyze EACH of the attached images for SYNTHETIC GENERATION ARTIFACTS, "
+            "strictly following the system instructions. Apply the matching quality tag "
+            "below to each correspondingly indexed image (image 1 → FRAME 1, etc.). "
+            "Return one DetectionResult per image in the same order.\n\n"
+            f"{quality_block}"
+        )
         request_contents = image_parts + [execution_query]
 
         t0 = time.perf_counter()
         response = client.models.generate_content(
-            model="gemini-3-flash-preview",
+            model=settings.gemini_model,
             contents=request_contents,
             config=config
         )
@@ -323,7 +354,7 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image, b
             output_tokens = response.usage_metadata.candidates_token_count
             logger.info("gemini_call_completed", extra={
                 "action": "gemini_call_completed",
-                "model": "gemini-3-flash-preview",
+                "model": settings.gemini_model,
                 "call_type": "batch_images",
                 "frame_count": len(image_sources),
                 "duration_ms": duration_ms,
@@ -334,20 +365,36 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image, b
         else:
             logger.info("gemini_call_completed", extra={
                 "action": "gemini_call_completed",
-                "model": "gemini-3-flash-preview",
+                "model": settings.gemini_model,
                 "call_type": "batch_images",
                 "frame_count": len(image_sources),
                 "duration_ms": duration_ms,
                 "cost_usd": settings.gemini_fixed_cost,
             })
 
+        # Representative quality context for downstream display/cache. For homogeneous
+        # video frames these are effectively identical; for heterogeneous batches we
+        # surface the first frame's tag — the model already saw all of them inline.
+        representative_quality_context = per_frame_quality[0] if per_frame_quality else "**CONTEXT: QUALITY UNKNOWN.**"
+
         if not raw_results:
-            return {"confidence": 0.5, "signal_category": "multiple_subtle_ai_artifacts_present"}
+            # Gemini returned an empty/unparseable result (schema mismatch, safety
+            # block, or empty candidates). Surface as a hard failure (-1.0) — the
+            # caller must NOT cache this as a confident "clean" verdict.
+            logger.error("gemini_batch_empty_parsed", extra={
+                "action": "gemini_batch_empty_parsed",
+                "frame_count": len(image_sources),
+            })
+            return {
+                "confidence": -1.0,
+                "signal_category": "multiple_subtle_ai_artifacts_present",
+                "quality_context": representative_quality_context,
+            }
 
         ai_votes = [r for r in raw_results if r.confidence > settings.gemini_ai_vote_threshold]
         not_ai_votes = [r for r in raw_results if r.confidence <= settings.gemini_ai_vote_threshold]
 
-        final_result = {}
+        final_result: dict = {}
 
         if len(ai_votes) > len(not_ai_votes):
             avg_conf = sum(r.confidence for r in ai_votes) / len(ai_votes)
@@ -355,7 +402,7 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image, b
             final_result = {
                 "confidence": round(avg_conf, 2),
                 "signal_category": best.signal_category,
-                "quality_context": quality_context
+                "quality_context": representative_quality_context,
             }
         else:
             if not_ai_votes:
@@ -369,7 +416,7 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image, b
             final_result = {
                 "confidence": round(avg_conf, 2),
                 "signal_category": signal,
-                "quality_context": quality_context
+                "quality_context": representative_quality_context,
             }
 
         if hasattr(response, "usage_metadata"):

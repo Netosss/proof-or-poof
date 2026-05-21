@@ -5,6 +5,11 @@ The Redis client is accessed at call-time via the integration module so that
 it picks up the instance initialized during the FastAPI lifespan.
 
 All Redis operations are async — no thread pool needed.
+
+Cache key version: the prefix is bumped whenever the prompt, model, or scoring
+scale changes in a way that invalidates prior verdicts. Old-prefix keys
+self-expire on the existing 24h TTL; see scripts/redis_clear_forensic_cache.py
+for an opt-in immediate cleanup.
 """
 
 import json
@@ -18,6 +23,11 @@ from app.integrations import redis_client as redis_module
 
 logger = logging.getLogger(__name__)
 
+# Bumped from "forensic:" → "forensic_v2:" alongside the Gemini 3.5 Flash upgrade,
+# dead-zone scoring scale, and softened quality context. Old "forensic:*" keys
+# remain valid TTL-wise but will never be read; they self-expire within 24h.
+CACHE_PREFIX = "forensic_v2:"
+
 local_cache: OrderedDict = OrderedDict()
 
 
@@ -26,7 +36,7 @@ async def get_cached_result(key: str) -> Optional[dict]:
     rc = redis_module.client
     if rc:
         try:
-            data = await rc.get(f"forensic:{key}")
+            data = await rc.get(f"{CACHE_PREFIX}{key}")
             if data:
                 logger.debug("cache_redis_hit", extra={"action": "cache_redis_hit"})
                 return json.loads(data)
@@ -58,7 +68,7 @@ async def set_cached_result(key: str, value: dict) -> None:
     rc = redis_module.client
     if rc:
         try:
-            await rc.set(f"forensic:{key}", json.dumps(value), ex=settings.deepfake_cache_ttl_sec)
+            await rc.set(f"{CACHE_PREFIX}{key}", json.dumps(value), ex=settings.deepfake_cache_ttl_sec)
         except Exception as e:
             logger.warning("cache_redis_set_error", extra={"action": "cache_redis_set_error", "error": str(e)})
     else:
