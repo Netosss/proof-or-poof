@@ -240,7 +240,7 @@ def get_forensic_metadata_score(exif: dict) -> tuple:
         score += 0.10
         signals.append("Color Filter Array (CFA) pattern fingerprint")
 
-    return round(score, 2), signals
+    return round(min(score, 1.0), 2), signals
 
 
 def get_ai_suspicion_score(exif: dict, width: int = 0, height: int = 0, file_size: int = 0) -> tuple:

@@ -66,11 +66,7 @@ class DetectionResult(BaseModel):
         description="Crucial visual anomaly observed, or single authenticity marker if clean. Max 25 words."
     )
     confidence: float = Field(
-        description=(
-            "Probability the image is AI-generated. Scale: 0.00-0.40 (clean / mostly clean), "
-            "0.70-1.00 (suspicious / clear AI). Do NOT output values between 0.40 and 0.70 — "
-            "that band is reserved as a dead zone to force a directional verdict."
-        )
+        description="Probability the image is AI-generated, 0.0 (clearly real) to 1.0 (clearly AI)."
     )
     signal_category: SIGNAL_CATEGORIES = Field(
         description="Single primary forensic signal. Must be an exact enum key from the system instructions."

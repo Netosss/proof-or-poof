@@ -10,7 +10,6 @@ from cache-hit paths within this module, avoiding a circular import.
 
 import os
 import json
-import random
 import asyncio
 import logging
 from typing import Optional
@@ -36,6 +35,20 @@ HARDWARE_TAGS = {
     "Make", "Model", "ExposureTime", "ISOSpeedRatings",
     "FNumber", "BodySerialNumber", "LensModel", "GPSLatitude"
 }
+
+# Sensor-physics signals — fields a real camera writes directly from sensor / lens
+# hardware. None of these are present on phone screenshots, web re-downloads, or
+# stripped-EXIF AI images. Required (any one) before the human early-exit paths
+# in detect_ai_media_image_logic short-circuit a verdict.
+#
+# DateTime fields are intentionally excluded — they're string-typed and trivially
+# spoofable. Optical-physics fields (FocalLength, FocalPlaneXResolution) are
+# included alongside the core triad because they're equally hard to forge by
+# screenshot but present on more real-world processed photos.
+SENSOR_PHYSICS_SIGNALS = frozenset({
+    "ExposureTime", "ISOSpeedRatings", "FNumber",
+    "FocalLength", "FocalPlaneXResolution",
+})
 
 def _label_for(signal_category: str) -> str:
     """Convert a snake_case signal_category key to a human-readable label."""
@@ -102,7 +115,18 @@ async def detect_ai_media_image_logic(
                 ]
             }
 
+    # Compute sensor-physics signal BEFORE merging trusted metadata. The mobile
+    # sidecar deliberately does NOT carry ExposureTime/ISO/FNumber (those would
+    # be a client-spoofable forgery surface), but real EXIF on disk does. The
+    # early-exit human paths below need to read this from the on-disk EXIF only.
+    has_physical_signals = any(tag in exif for tag in SENSOR_PHYSICS_SIGNALS)
+
     # --- Merge Trusted Metadata (Sidecar) ---
+    # SECURITY BOUNDARY: this allow-list intentionally excludes ExposureTime,
+    # ISOSpeedRatings, FNumber, FocalLength, FocalPlaneXResolution. These are
+    # the sensor-physics anchors used by `has_physical_signals` above and must
+    # ONLY originate from real on-disk EXIF — never from the mobile sidecar —
+    # so a malicious client cannot fake "real camera" provenance on an AI image.
     if trusted_metadata:
         logger.info("metadata_sidecar_used", extra={"action": "metadata_sidecar_used"})
         for key in ["Make", "Model", "Software", "DateTime", "LensModel"]:
@@ -151,16 +175,6 @@ async def detect_ai_media_image_logic(
     ai_score = min(0.99, base_ai_score + tiered_score)
     if tiered_signals:
         ai_signals.extend(tiered_signals)
-
-    # Sensor-physics signals — must be present to early-exit as "human".
-    # A device manufacturer tag alone (Apple/Samsung/etc) plus a vendor OS string
-    # (iOS/Android) sums to 0.60, which previously tripped the Verified Human exit
-    # for any SCREENSHOT taken on a phone — even a screenshot of an AI image.
-    # Real cameras always record at least one of exposure / ISO / aperture as a hard
-    # numeric value from the sensor. Screenshots never do. Date strings are excluded
-    # because they're trivial to spoof — only true sensor-physics fields count.
-    SENSOR_PHYSICS_SIGNALS = ("ExposureTime", "ISOSpeedRatings", "FNumber")
-    has_physical_signals = any(tag in exif for tag in SENSOR_PHYSICS_SIGNALS)
 
     logger.info("metadata_scoring", extra={
         "action": "metadata_scoring",
@@ -251,7 +265,15 @@ async def detect_ai_media_image_logic(
             "human_score": round(human_score, 2),
             "reason": "ai_indicators_no_human_metadata",
         })
-        suspicious_confidence = round(random.uniform(0.80, 0.90), 2)
+        # Deterministic confidence derived from the underlying ai_score so the
+        # same image always produces the same verdict (was previously
+        # random.uniform(0.80, 0.90) which made the system non-reproducible and
+        # broke any downstream consumer relying on confidence stability).
+        # Map the [0.38, 0.55) ai_score range linearly into [0.80, 0.90].
+        suspicious_confidence = round(
+            0.80 + min(1.0, max(0.0, (ai_score - 0.38) / 0.17)) * 0.10,
+            2,
+        )
         return {
             "summary": "AI-Generated",
             "confidence_score": suspicious_confidence,

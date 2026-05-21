@@ -14,7 +14,7 @@ import logging
 from PIL import Image, ImageFilter, ImageStat, ImageMath
 from google import genai
 from google.genai import types
-from typing import Union
+from typing import Optional, Union
 
 from app.config import settings
 from app.schemas.detection import DetectionResult
@@ -104,10 +104,11 @@ def _resize_if_needed(img: Image.Image) -> Image.Image:
     return img
 
 
-def analyze_image_pro_turbo(image_source: Union[str, Image.Image], pre_calculated_quality_context: str = None) -> dict:
-    """
-    GEMINI 3.0 FLASH - OPTIMIZED FOR FORENSIC DETECTION
-    """
+def analyze_image_pro_turbo(
+    image_source: Union[str, Image.Image],
+    pre_calculated_quality_context: Optional[str] = None,
+) -> dict:
+    """Single-image forensic inference via the configured Gemini model."""
     img_to_close = []
 
     try:
@@ -197,6 +198,9 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image], pre_calculate
         duration_ms = round((time.perf_counter() - t0) * 1000, 1)
 
         parsed_result = response.parsed
+        if parsed_result is None:
+            # Schema mismatch or safety block — log as a parse failure, not a network failure.
+            raise ValueError("Gemini returned no parsed DetectionResult (schema mismatch or safety block)")
 
         result = {
             "visual_scan": parsed_result.visual_scan,
@@ -374,10 +378,16 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image, b
         representative_quality_context = per_frame_quality[0] if per_frame_quality else "**CONTEXT: QUALITY UNKNOWN.**"
 
         if not raw_results:
-            # Fallback must sit outside the [0.40, 0.70) dead zone — pick 0.0 (neutral-clean).
+            # Gemini returned an empty/unparseable result (schema mismatch, safety
+            # block, or empty candidates). Surface as a hard failure (-1.0) — the
+            # caller must NOT cache this as a confident "clean" verdict.
+            logger.error("gemini_batch_empty_parsed", extra={
+                "action": "gemini_batch_empty_parsed",
+                "frame_count": len(image_sources),
+            })
             return {
-                "confidence": 0.0,
-                "signal_category": "no_visual_anomalies_detected",
+                "confidence": -1.0,
+                "signal_category": "multiple_subtle_ai_artifacts_present",
                 "quality_context": representative_quality_context,
             }
 
