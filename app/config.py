@@ -294,13 +294,33 @@ class Settings(BaseSettings):
     # AI Decision Threshold                                               #
     # ------------------------------------------------------------------ #
     ai_confidence_threshold: float = Field(
-        0.5, description="Score above this → classified as AI-generated"
+        0.55,
+        description=(
+            "Score above this → classified as AI-generated. "
+            "Aligned with the prompt-side dead zone [0.40, 0.70) — anything ≥ 0.55 "
+            "must come from the suspicion band (0.70+) under normal operation."
+        ),
     )
 
     # ------------------------------------------------------------------ #
     # Gemini Client                                                       #
     # ------------------------------------------------------------------ #
-    gemini_http_timeout_ms: int = Field(15_000, description="HTTP client total timeout (ms)")
+    gemini_model: str = Field(
+        "gemini-3.5-flash",
+        description=(
+            "Gemini model ID for all forensic inference. GA as of I/O 2026. "
+            "Override via env var if rolling forward to a newer flash release."
+        ),
+    )
+    gemini_thinking_level: str = Field(
+        "MEDIUM",
+        description=(
+            "Reasoning budget for the forensic inference call. MEDIUM is the "
+            "3.5 Flash default — small latency hit, meaningful accuracy gain on "
+            "subtle spatial/lighting reasoning."
+        ),
+    )
+    gemini_http_timeout_ms: int = Field(20_000, description="HTTP client total timeout (ms)")
     gemini_max_retries: int = Field(2, description="Max retry attempts on transient errors")
     gemini_retry_initial_delay: float = Field(1.0, description="First retry delay (seconds)")
     gemini_retry_max_delay: float = Field(5.0, description="Max retry back-off delay (seconds)")
@@ -310,11 +330,20 @@ class Settings(BaseSettings):
         95, description="JPEG quality for single-image forensic upload"
     )
     gemini_batch_jpeg_quality: int = Field(
-        85, description="JPEG quality for batch / video-frame upload"
+        95,
+        description=(
+            "JPEG quality for batch / video-frame upload. Bumped from 85 → 95 "
+            "so we don't introduce fresh compression artifacts the prompt then "
+            "mistakes for AI smoothness."
+        ),
     )
     gemini_temperature: float = Field(1.0, description="Sampling temperature for Gemini model")
     gemini_ai_vote_threshold: float = Field(
-        0.5, description="Per-frame confidence threshold for an AI vote"
+        0.55,
+        description=(
+            "Per-frame confidence threshold for an AI vote. Aligned with "
+            "ai_confidence_threshold and the prompt-side dead zone."
+        ),
     )
 
     # ------------------------------------------------------------------ #

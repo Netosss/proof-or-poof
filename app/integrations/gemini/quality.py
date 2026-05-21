@@ -111,21 +111,23 @@ def get_quality_context(image_source: Union[str, Image.Image, bytes]) -> tuple[s
 
         if score < settings.quality_low_threshold:
             return (
-                f"**CRITICAL CONTEXT: LOW QUALITY IMAGE ({', '.join(issues)}).** "
-                f"INSTRUCTION: This image is heavily compressed/low-res. "
-                f"Warning: This quality naturally causes **WAXY SKIN**, **SMOOTH TEXTURES**, distorted faces, and blur. "
-                f"**IGNORE** any 'waxy' or 'smooth' appearance—it is due to low quality, not AI. "
-                f"Only flag **STRUCTURAL IMPOSSIBILITIES** that compression CANNOT explain "
-                f"(e.g., gibberish text, extra limbs). If unsure, assume it is compression.",
+                f"**CONTEXT: LOW QUALITY IMAGE ({', '.join(issues)}).** "
+                f"Compression and low resolution CAN produce waxy skin, smooth textures, "
+                f"and soft edges — but so can modern AI generation. "
+                f"WEIGH smooth/waxy textures alongside other evidence rather than dismissing "
+                f"them outright. Reserve a confident NOT-AI verdict for images that ALSO show "
+                f"authentic-signal markers (visible grain, chromatic aberration, occlusion "
+                f"shadows, lens vignetting). Structural impossibilities (gibberish text, extra "
+                f"limbs, impossible physics) remain hard AI signals at any quality.",
                 score
             )
         elif score < settings.quality_medium_threshold:
             return (
                 f"**CONTEXT: MEDIUM QUALITY ({', '.join(issues)}).** "
-                f"INSTRUCTION: Image has reduced quality. DO NOT flag soft edges or indistinct textures as AI. "
-                f"However, compression does NOT explain structural impossibilities "
-                f"(like extra fingers, gibberish text, or impossible physics). "
-                f"If you see these CLEAR logic errors, FLAG THEM.",
+                f"Slightly raised cost of false positives on soft edges and indistinct micro-textures. "
+                f"Still flag waxy / plastic skin, structural impossibilities, lighting violations, "
+                f"and object-merging when the evidence is clear — compression does NOT explain those. "
+                f"Use the per-rule QUALITY GUARDs to decide which checks remain valid at this tier.",
                 score
             )
 

@@ -63,16 +63,15 @@ class DetectionResponse(BaseModel):
 class DetectionResult(BaseModel):
     """Gemini structured output schema — one result per image frame."""
     visual_scan: str = Field(
+        description="Crucial visual anomaly observed, or single authenticity marker if clean. Max 25 words."
+    )
+    confidence: float = Field(
         description=(
-            "Brief 2-3 sentence forensic scan describing the most notable "
-            "observations — any anomalies found, or which authenticity markers "
-            "are present if the image appears genuine. Write BEFORE scoring."
+            "Probability the image is AI-generated. Scale: 0.00-0.40 (clean / mostly clean), "
+            "0.70-1.00 (suspicious / clear AI). Do NOT output values between 0.40 and 0.70 — "
+            "that band is reserved as a dead zone to force a directional verdict."
         )
     )
-    confidence: float = Field(description="Confidence score between 0.0 and 1.0")
     signal_category: SIGNAL_CATEGORIES = Field(
-        description=(
-            "The single primary forensic signal that determined the verdict. "
-            "Must be one of the exact enum keys listed in the system instructions."
-        )
+        description="Single primary forensic signal. Must be an exact enum key from the system instructions."
     )
