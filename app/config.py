@@ -306,18 +306,22 @@ class Settings(BaseSettings):
     # Gemini Client                                                       #
     # ------------------------------------------------------------------ #
     gemini_model: str = Field(
-        "gemini-3.5-flash",
+        "gemini-3-flash-preview",
         description=(
-            "Gemini model ID for all forensic inference. GA as of I/O 2026. "
-            "Override via env var if rolling forward to a newer flash release."
+            "Gemini model ID for forensic inference. EMPIRICAL: 3-flash-preview "
+            "outperforms gemini-3.5-flash by ~20 points on our forensic gold set — "
+            "3.5-flash systematically misses polished AI portraits (Flux/Midjourney "
+            "studio-style) regardless of prompt. Do NOT 'upgrade' to 3.5 without "
+            "re-running the gold set to confirm the regression is gone."
         ),
     )
     gemini_thinking_level: str = Field(
-        "MEDIUM",
+        "LOW",
         description=(
-            "Reasoning budget for the forensic inference call. MEDIUM is the "
-            "3.5 Flash default — small latency hit, meaningful accuracy gain on "
-            "subtle spatial/lighting reasoning."
+            "Reasoning budget for the forensic inference call. With the lean prompt, "
+            "LOW + temp=0.0 produces deterministic verdicts and lets the model trust "
+            "its first-pass perception instead of rationalising AI signals away via "
+            "extended reasoning."
         ),
     )
     gemini_http_timeout_ms: int = Field(20_000, description="HTTP client total timeout (ms)")

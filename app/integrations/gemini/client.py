@@ -179,11 +179,12 @@ def analyze_image_pro_turbo(image_source: Union[str, Image.Image], pre_calculate
             f"strictly following the system instructions.{noise_hint}"
         )
 
-        # NOTE: a previous revision shipped `execution_query` twice (a "prompt repetition"
-        # trick that helps non-reasoning models because tokens at the start can't attend to
-        # later tokens). With thinking_level=MEDIUM the model already re-reads the prompt
-        # during its internal CoT pass, so duplication is wasted input tokens with no
-        # accuracy lift. Send the query exactly once.
+        # NOTE: tested prompt-repetition trick (query duplicated) at LOW + temp=0.0.
+        # Empirically regressed gold-set accuracy 84% → 76%, even though it shifted which
+        # specific FP occurred. The published research ("Prompt Repetition Improves
+        # Non-Reasoning LLMs", Dec 2025) reports gains only for fully non-reasoning models;
+        # LOW thinking on Gemini 3.5 still does enough internal reasoning that duplication
+        # destabilises rather than reinforces. Send the query exactly once.
         t0 = time.perf_counter()
         response = client.models.generate_content(
             model=settings.gemini_model,
