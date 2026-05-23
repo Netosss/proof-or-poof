@@ -12,9 +12,15 @@ RequestContextFilter — no manual threading through function signatures needed.
 
 Axiom setup
 -----------
-Set two environment variables in Railway:
-  AXIOM_TOKEN   — your Axiom API token  (xaat-xxxx…)
-  AXIOM_DATASET — dataset name (defaults to "backend-logs" if not set)
+Set these environment variables in Railway:
+  AXIOM_TOKEN              — your Axiom API token  (xaat-xxxx…)
+  AXIOM_DATASET            — default dataset (defaults to "backend-logs")
+  AXIOM_DATASET_ENTERPRISE — optional separate dataset for /v1/* + enterprise_*
+                             events. When set, those records ship there INSTEAD
+                             of the default dataset. Lets enterprise audit logs
+                             live in a clean schema separate from the bloated
+                             consumer dataset (Axiom free tier has a 257-column
+                             ceiling per dataset).
 
 If AXIOM_TOKEN is absent, only stdout logging is active.
 If Axiom initialisation fails for any reason, a WARNING is written to stdout
@@ -66,17 +72,55 @@ class RequestContextFilter(logging.Filter):
         return True
 
 
+class _EnterpriseRouterFilter(logging.Filter):
+    """
+    Routes log records between the default and enterprise Axiom datasets.
+
+    A record is "enterprise" when EITHER:
+      - its `action` starts with `enterprise_` / `lemonsqueezy_enterprise_`, or
+      - its `path` starts with `/v1/` (covers `request_completed` and
+        `http_exception_response` on enterprise routes — those don't carry an
+        `enterprise_*` action but still belong with the enterprise schema).
+
+    Instantiate twice:
+      _EnterpriseRouterFilter(target="enterprise") → attach to enterprise handler
+      _EnterpriseRouterFilter(target="default")    → attach to default handler
+
+    Without this split, enterprise events would duplicate into both datasets
+    (double cost) and the consumer dataset's 257-column ceiling would keep
+    blocking new enterprise fields from landing in Axiom.
+    """
+
+    def __init__(self, target: str) -> None:
+        super().__init__()
+        if target not in ("enterprise", "default"):
+            raise ValueError(f"target must be 'enterprise' or 'default', got {target!r}")
+        self.target = target
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        action = getattr(record, "action", "") or ""
+        if action.startswith("enterprise_") or action.startswith("lemonsqueezy_enterprise_"):
+            is_enterprise = True
+        else:
+            path = getattr(record, "path", "") or ""
+            is_enterprise = isinstance(path, str) and path.startswith("/v1/")
+        return is_enterprise if self.target == "enterprise" else not is_enterprise
+
+
 class _SafeAxiomHandler(logging.Handler):
     """
     Thin wrapper around AxiomHandler that:
-      - Catches and logs exceptions from flush() so they never die silently
+      - Catches and logs exceptions from emit/flush so they never die silently
         inside a threading.Timer callback (Python swallows those errors).
+      - Surfaces WHICH action failed when Axiom drops a batch — without this,
+        column-limit / serialization errors are invisible.
       - Marks the internal timer as a daemon so it never blocks process exit.
     """
 
-    def __init__(self, axiom_handler):
+    def __init__(self, axiom_handler, dataset_label: str = "default"):
         super().__init__()
         self._inner = axiom_handler
+        self._dataset_label = dataset_label  # surfaced in error logs for debugging
         # Make the repeating timer a daemon so Railway can terminate cleanly.
         self._inner.timer.daemon = True
 
@@ -85,13 +129,27 @@ class _SafeAxiomHandler(logging.Handler):
             self._inner.emit(record)
         except Exception as exc:
             # Write directly to stderr — can't use the logger (infinite loop).
-            sys.stderr.write(f'{{"level":"ERROR","message":"axiom_emit_error","error":"{exc}"}}\n')
+            # Include the failing action + dataset so column-limit / serialization
+            # errors point straight at the offending log call.
+            action = getattr(record, "action", "") or record.getMessage()[:80]
+            sys.stderr.write(
+                f'{{"level":"ERROR","message":"axiom_emit_error",'
+                f'"dataset":"{self._dataset_label}",'
+                f'"failed_action":"{action}",'
+                f'"error_type":"{type(exc).__name__}",'
+                f'"error":"{str(exc)[:300]}"}}\n'
+            )
 
     def flush(self) -> None:
         try:
             self._inner.flush()
         except Exception as exc:
-            sys.stderr.write(f'{{"level":"ERROR","message":"axiom_flush_error","error":"{exc}"}}\n')
+            sys.stderr.write(
+                f'{{"level":"ERROR","message":"axiom_flush_error",'
+                f'"dataset":"{self._dataset_label}",'
+                f'"error_type":"{type(exc).__name__}",'
+                f'"error":"{str(exc)[:300]}"}}\n'
+            )
 
 
 def configure_json_logging() -> None:
@@ -121,9 +179,14 @@ def configure_json_logging() -> None:
     stream_handler.addFilter(ctx_filter)
     handlers: list[logging.Handler] = [stream_handler]
 
-    # --- 2. Axiom handler (only when AXIOM_TOKEN is configured) ---
+    # --- 2. Axiom handlers (only when AXIOM_TOKEN is configured) ---
+    # Two handlers when AXIOM_DATASET_ENTERPRISE is set: enterprise records go
+    # to the dedicated dataset, everything else stays on the default. Without
+    # the enterprise env var, the default handler receives ALL records
+    # (backward-compatible with the single-dataset setup).
     axiom_token = os.getenv("AXIOM_TOKEN")
-    axiom_dataset = os.getenv("AXIOM_DATASET", "backend-logs")
+    axiom_dataset_default = os.getenv("AXIOM_DATASET", "backend-logs")
+    axiom_dataset_enterprise = os.getenv("AXIOM_DATASET_ENTERPRISE", "").strip() or None
 
     if axiom_token:
         try:
@@ -131,18 +194,32 @@ def configure_json_logging() -> None:
             from axiom_py.logging import AxiomHandler
 
             axiom_client = Client(token=axiom_token)
-            raw_handler = AxiomHandler(axiom_client, axiom_dataset)
 
-            # Wrap in a safe handler that surfaces flush errors to stderr
-            # and marks the internal timer as daemon.
-            safe_handler = _SafeAxiomHandler(raw_handler)
-            safe_handler.addFilter(ctx_filter)
-            handlers.append(safe_handler)
+            # Default dataset handler — receives non-enterprise records (or all
+            # records when no enterprise dataset is configured).
+            default_axiom = AxiomHandler(axiom_client, axiom_dataset_default)
+            default_safe = _SafeAxiomHandler(default_axiom, dataset_label=axiom_dataset_default)
+            default_safe.addFilter(ctx_filter)
+            if axiom_dataset_enterprise:
+                default_safe.addFilter(_EnterpriseRouterFilter(target="default"))
+            handlers.append(default_safe)
+
+            # Enterprise dataset handler (optional) — receives /v1/* +
+            # enterprise_* records only.
+            if axiom_dataset_enterprise:
+                ent_axiom = AxiomHandler(axiom_client, axiom_dataset_enterprise)
+                ent_safe = _SafeAxiomHandler(ent_axiom, dataset_label=axiom_dataset_enterprise)
+                ent_safe.addFilter(ctx_filter)
+                ent_safe.addFilter(_EnterpriseRouterFilter(target="enterprise"))
+                handlers.append(ent_safe)
 
             # Confirm Axiom is wired up — visible in Railway and in Axiom.
+            datasets_str = axiom_dataset_default + (
+                f" + {axiom_dataset_enterprise}" if axiom_dataset_enterprise else ""
+            )
             stream_handler.stream.write(
                 f'{{"level":"INFO","severity":"info","message":"axiom_handler_configured",'
-                f'"dataset":"{axiom_dataset}"}}\n'
+                f'"datasets":"{datasets_str}"}}\n'
             )
         except Exception as exc:
             stream_handler.stream.write(
