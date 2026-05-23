@@ -123,6 +123,32 @@ class _SafeAxiomHandler(logging.Handler):
         self._dataset_label = dataset_label  # surfaced in error logs for debugging
         # Make the repeating timer a daemon so Railway can terminate cleanly.
         self._inner.timer.daemon = True
+        # axiom_py.AxiomHandler runs a `threading.Timer` that calls
+        # `self.flush()` on ITSELF, bypassing this wrapper's `flush()`. When
+        # that periodic flush hits an HTTP error (e.g. 400 from a bloated
+        # dataset hitting the 257-column ceiling), the exception bubbles up
+        # through the Timer thread and Sentry's threading integration prints
+        # the full Python stack trace to stderr. Patch the inner method so
+        # those periodic failures degrade to a single-line stderr message
+        # instead of multi-line tracebacks that drown legitimate signal.
+        self._patch_inner_flush()
+
+    def _patch_inner_flush(self) -> None:
+        original_flush = self._inner.flush
+        label = self._dataset_label
+
+        def safe_inner_flush() -> None:
+            try:
+                original_flush()
+            except Exception as exc:
+                sys.stderr.write(
+                    f'{{"level":"ERROR","message":"axiom_periodic_flush_error",'
+                    f'"dataset":"{label}",'
+                    f'"error_type":"{type(exc).__name__}",'
+                    f'"error":"{str(exc)[:300]}"}}\n'
+                )
+
+        self._inner.flush = safe_inner_flush  # type: ignore[method-assign]
 
     def emit(self, record: logging.LogRecord) -> None:
         try:

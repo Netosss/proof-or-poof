@@ -137,6 +137,13 @@ class _RequestLoggingMiddleware:
         await self.app(scope, receive, send_wrapper)
         duration_ms = round((time.perf_counter() - t0) * 1000, 1)
 
+        # Enterprise auth sets user_id to "ent:{partner_id}". Promote the
+        # partner UUID to its own field so per-partner SLA dashboards in
+        # the enterprise Axiom dataset can `where partner_id == "..."`
+        # without parsing a prefix off `user_id`.
+        user_id_value = user_id_var.get("")
+        partner_id_value = user_id_value[4:] if user_id_value.startswith("ent:") else ""
+
         logger.info(
             "request_completed",
             extra={
@@ -147,7 +154,8 @@ class _RequestLoggingMiddleware:
                 "duration_ms": duration_ms,
                 "ip": request.client.host if request.client else "",
                 "user_agent": request.headers.get("user-agent", ""),
-                "user_id": user_id_var.get(""),
+                "user_id": user_id_value,
+                "partner_id": partner_id_value,
             },
         )
 
@@ -200,6 +208,11 @@ async def custom_http_exception_handler(request: Request, exc: StarletteHTTPExce
         response_data = build_envelope(exc.status_code, exc.detail)
     else:
         response_data = {"detail": exc.detail}
+    # Promote enterprise partner UUID from `ent:{partner_id}` user_id to its
+    # own field — same rationale as in _RequestLoggingMiddleware above.
+    user_id_value = user_id_var.get("")
+    partner_id_value = user_id_value[4:] if user_id_value.startswith("ent:") else ""
+
     log_level = logger.warning if exc.status_code < 500 else logger.error
     log_level(
         "http_exception_response",
@@ -210,6 +223,8 @@ async def custom_http_exception_handler(request: Request, exc: StarletteHTTPExce
             "path": request.url.path,
             "method": request.method,
             "user_agent": request.headers.get("user-agent", "")[:200],
+            "user_id": user_id_value,
+            "partner_id": partner_id_value,
         },
     )
 
@@ -232,16 +247,17 @@ async def custom_http_exception_handler(request: Request, exc: StarletteHTTPExce
 # Firebase without breaking CORS — useful for end-to-end checkout tests
 # before deploying. Real production (Railway) never sets this.
 _cors_origins = ["https://fauxlens.com"]
-_allow_local = (
-    os.getenv("APP_ENV", "prod") == "dev"
-    or os.getenv("ALLOW_LOCAL_DEV_ORIGIN", "").lower() in ("1", "true", "yes")
-)
+_allow_local = os.getenv("APP_ENV", "prod") == "dev" or os.getenv(
+    "ALLOW_LOCAL_DEV_ORIGIN", ""
+).lower() in ("1", "true", "yes")
 if _allow_local:
-    _cors_origins.extend([
-        "http://localhost:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:5173",
-    ])
+    _cors_origins.extend(
+        [
+            "http://localhost:5173",
+            "http://localhost:3000",
+            "http://127.0.0.1:5173",
+        ]
+    )
 
 # Firebase Hosting canonical + preview channel URLs.
 #
