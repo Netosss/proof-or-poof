@@ -53,11 +53,16 @@ def _build_v2_config(quality_context: str) -> types.GenerateContentConfig:
     config_kwargs: dict = dict(
         system_instruction=get_system_instruction_v2(quality_context),
         media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
-        thinking_config=types.ThinkingConfig(thinking_level=settings.gemini_thinking_level),
         temperature=settings.gemini_temperature,
         response_mime_type="application/json",
         response_schema=DetectionResultV2,
     )
+    # thinking_config is only supported on gemini-3-* models. Older 2.x flash
+    # families reject the field with INVALID_ARGUMENT.
+    if "gemini-3" in settings.gemini_model:
+        config_kwargs["thinking_config"] = types.ThinkingConfig(
+            thinking_level=settings.gemini_thinking_level
+        )
     # Only forward top_k/top_p when explicitly set — keeps v1 behavior unchanged
     # for any caller that pins gemini_temperature without flipping the v2 flag.
     if settings.gemini_top_k > 0:
