@@ -14,7 +14,6 @@ also reuse the v2 conventions.
 
 from __future__ import annotations
 
-import io
 import logging
 import time
 from typing import Optional, Union
@@ -26,7 +25,8 @@ from app.config import settings
 from app.schemas.detection import EnsembleSubResult
 from app.integrations.gemini.client import (
     client,
-    _resize_if_needed,
+    _prepare_pil_for_gemini,
+    _encode_pil_as_jpeg,
 )
 from app.integrations.gemini.quality import get_quality_context
 
@@ -54,29 +54,12 @@ def _build_ensemble_config(system_prompt: str) -> types.GenerateContentConfig:
 
 
 def _encode_image_for_gemini(image_source: Union[str, Image.Image, bytes]) -> bytes:
-    """Resize-if-needed + JPEG encode. Mirrors the v2 client's image prep."""
-    img_to_close: list[Image.Image] = []
+    """Resize-if-needed + JPEG encode. Delegates to the shared client helpers."""
+    if isinstance(image_source, bytes):
+        return image_source
+    img_working, img_to_close = _prepare_pil_for_gemini(image_source)
     try:
-        if isinstance(image_source, bytes):
-            return image_source
-        if isinstance(image_source, str):
-            img_original = Image.open(image_source)
-            img_to_close.append(img_original)
-        else:
-            img_original = image_source
-
-        img_working = _resize_if_needed(img_original)
-        if img_working is not img_original:
-            img_to_close.append(img_working)
-
-        if img_working.mode != "RGB":
-            img_rgb = img_working.convert("RGB")
-            img_to_close.append(img_rgb)
-            img_working = img_rgb
-
-        buf = io.BytesIO()
-        img_working.save(buf, format="JPEG", quality=settings.gemini_jpeg_quality)
-        return buf.getvalue()
+        return _encode_pil_as_jpeg(img_working, settings.gemini_jpeg_quality)
     finally:
         for img_obj in img_to_close:
             try:
@@ -162,8 +145,18 @@ def analyze_with_prompt(
             "ok": True,
         }
     except Exception as exc:
-        logger.warning("ensemble_subcall_failed", extra={
-            "action": "ensemble_subcall_failed",
+        # Distinguish transient API failures (genuine reason to abstain) from
+        # programming errors (schema/import/code bugs that should be loud).
+        # Both still return an `ok=False` sentinel so a single broken voter
+        # cannot crash the whole ensemble, but programming errors log at
+        # ERROR-level so they actually surface in alerting.
+        from google.genai import errors as _genai_errors
+
+        is_api_error = isinstance(exc, _genai_errors.APIError)
+        log_event = "ensemble_subcall_api_error" if is_api_error else "ensemble_subcall_code_error"
+        log_method = logger.warning if is_api_error else logger.error
+        log_method(log_event, extra={
+            "action": log_event,
             "label": label,
             "error": str(exc),
             "error_type": type(exc).__name__,

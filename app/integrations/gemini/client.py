@@ -82,6 +82,44 @@ def _compute_noise_cv(img: Image.Image) -> float:
     return std_var / (mean_var + 1e-6)
 
 
+def _prepare_pil_for_gemini(
+    image_source: Union[str, Image.Image],
+) -> tuple[Image.Image, list[Image.Image]]:
+    """
+    Shared image-prep used by every Gemini analyzer (v1, v2, ensemble).
+
+    Opens the image if given a path, resizes to gemini_max_pixels, ensures
+    RGB mode. Returns the WORKING PIL image (callers can compute noise_cv,
+    encode JPEG, etc.) plus a list of intermediate PIL handles the caller
+    must close after they're done — done this way so the same prep can be
+    reused without forcing every caller into a context manager pattern.
+    """
+    img_to_close: list[Image.Image] = []
+    if isinstance(image_source, str):
+        img_original = Image.open(image_source)
+        img_to_close.append(img_original)
+    else:
+        img_original = image_source
+
+    img_working = _resize_if_needed(img_original)
+    if img_working is not img_original:
+        img_to_close.append(img_working)
+
+    if img_working.mode != "RGB":
+        img_rgb = img_working.convert("RGB")
+        img_to_close.append(img_rgb)
+        img_working = img_rgb
+
+    return img_working, img_to_close
+
+
+def _encode_pil_as_jpeg(img: Image.Image, quality: int) -> bytes:
+    """Encode a PIL image as JPEG bytes at the given quality."""
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=quality)
+    return buf.getvalue()
+
+
 def _resize_if_needed(img: Image.Image) -> Image.Image:
     """
     Resizes image if it exceeds 4MP (~2048x2048) to limit token usage and avoid payload errors.

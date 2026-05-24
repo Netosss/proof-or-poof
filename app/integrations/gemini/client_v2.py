@@ -13,7 +13,6 @@ so we don't duplicate image-preprocessing logic. Differs from v1 in three ways:
    stays identical to v1.
 """
 
-import io
 import time
 import logging
 
@@ -22,30 +21,18 @@ from google.genai import types
 from typing import Optional, Union
 
 from app.config import settings
-from app.schemas.detection import DetectionResultV2
+from app.schemas.detection import DetectionResultV2, V2_TO_LEGACY_CATEGORY  # noqa: F401  — re-exported for backward compat
 from app.integrations.gemini.client import (
     client,
     _compute_noise_cv,
-    _resize_if_needed,
+    _prepare_pil_for_gemini,
+    _encode_pil_as_jpeg,
 )
 from app.integrations.gemini.quality import get_quality_context
 from app.integrations.gemini.prompts_v2 import get_system_instruction_v2
 
 
 logger = logging.getLogger(__name__)
-
-
-# V2 macro buckets → legacy SIGNAL_CATEGORIES so the downstream response shape
-# and `_label_for` (image_detector.py) stay backward-compatible without forcing
-# the frontend to ship a new taxonomy at the same time.
-V2_TO_LEGACY_CATEGORY: dict[str, str] = {
-    "peripheral_or_background_structural_collapse": "facial_detail_inconsistency_detected",
-    "objects_merge_or_dissolve_at_boundaries": "objects_merge_or_dissolve_at_boundaries",
-    "geometry_or_perspective_is_physically_impossible": "geometry_or_perspective_is_physically_impossible",
-    "in_scene_text_is_melted_or_gibberish": "text_or_signage_contains_gibberish_characters",
-    "multiple_subtle_ai_artifacts_present": "multiple_subtle_ai_artifacts_present",
-    "no_visual_anomalies_detected": "no_visual_anomalies_detected",
-}
 
 
 def _build_v2_config(quality_context: str) -> types.GenerateContentConfig:
@@ -77,29 +64,22 @@ def analyze_image_pro_turbo_v2(
     pre_calculated_quality_context: Optional[str] = None,
 ) -> dict:
     """Single-image v2 forensic inference. Returns the same dict shape as v1."""
-    img_to_close: list[Image.Image] = []
-
     try:
+        # Quality context wants the ORIGINAL (unsized) image because it
+        # samples EXIF/format/dimension data. Capture it here before we
+        # hand off to the shared resize-and-convert pipeline.
         if isinstance(image_source, str):
-            img_original = Image.open(image_source)
-            img_to_close.append(img_original)
+            _quality_source = image_source
         else:
-            img_original = image_source
+            _quality_source = image_source
 
         quality_score = 0
         if pre_calculated_quality_context:
             quality_context = pre_calculated_quality_context
         else:
-            quality_context, quality_score = get_quality_context(img_original)
+            quality_context, quality_score = get_quality_context(_quality_source)
 
-        img_working = _resize_if_needed(img_original)
-        if img_working is not img_original:
-            img_to_close.append(img_working)
-
-        if img_working.mode != "RGB":
-            img_rgb = img_working.convert("RGB")
-            img_to_close.append(img_rgb)
-            img_working = img_rgb
+        img_working, img_to_close = _prepare_pil_for_gemini(image_source)
 
         noise_hint = ""
         try:
@@ -120,9 +100,7 @@ def analyze_image_pro_turbo_v2(
                 "error": str(noise_err),
             })
 
-        img_byte_arr = io.BytesIO()
-        img_working.save(img_byte_arr, format="JPEG", quality=settings.gemini_jpeg_quality)
-        image_bytes = img_byte_arr.getvalue()
+        image_bytes = _encode_pil_as_jpeg(img_working, settings.gemini_jpeg_quality)
 
         for img_obj in img_to_close:
             img_obj.close()

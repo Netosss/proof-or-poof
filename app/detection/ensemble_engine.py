@@ -21,7 +21,6 @@ import asyncio
 import logging
 import time
 from statistics import mean
-from typing import Union
 
 from PIL import Image
 
@@ -32,7 +31,7 @@ from app.integrations.gemini.prompts_ensemble import (
     get_physics_prompt,
     get_composition_prompt,
 )
-from app.integrations.gemini.client_v2 import V2_TO_LEGACY_CATEGORY
+from app.schemas.detection import V2_TO_LEGACY_CATEGORY
 from app.integrations.gemini.quality import get_quality_context
 
 logger = logging.getLogger(__name__)
@@ -45,12 +44,18 @@ def _label_for_findings(findings: str) -> str:
 
 
 async def _run_gemini_subcall(
-    image_source: Union[str, Image.Image],
+    image_source: str | Image.Image,
     system_prompt: str,
     label: str,
     quality_context: str,
 ) -> dict:
-    """Wraps the sync Gemini sub-call in to_thread so it can join the gather()."""
+    """
+    Wraps the sync Gemini sub-call in to_thread so it can join the gather().
+    The returned voter dict carries the RAW v2-macro signal_category from the
+    model. Downstream consumers (the eval harness, debug logs) can read
+    voter["signal_category"] without needing to know about the legacy mapping,
+    which is only applied to the final aggregated verdict in _asymmetric_vote.
+    """
     return await asyncio.to_thread(
         analyze_with_prompt,
         image_source, system_prompt, label, quality_context,
@@ -92,23 +97,29 @@ def _asymmetric_vote(voters: list[dict]) -> dict:
             "voters": voters,
         }
 
-    # No AI vote crosses threshold — return REAL with mean confidence and the
-    # findings of the most-suspicious-but-still-clean voter.
+    # No AI vote crosses threshold — return REAL with the mean confidence.
+    # Preserve the most-suspicious voter's signal_category and findings so the
+    # diagnostic trail (and any downstream threshold-tuning) keeps the strongest
+    # sub-threshold signal instead of silently hard-coding "clean". The verdict
+    # is still REAL (caller compares confidence to the AI threshold) — only the
+    # accompanying signal_category and visual_scan carry the diagnostic detail.
     avg = mean(v["confidence"] for v in valid)
     least_clean = max(valid, key=lambda v: v["confidence"])
     return {
         "confidence": round(avg, 2),
-        "signal_category": "no_visual_anomalies_detected",
+        "signal_category": least_clean["signal_category"],
         "visual_scan": (
-            f"[ensemble REAL] {_label_for_findings(least_clean['findings'])}"
+            f"[ensemble REAL via {least_clean['label']}] "
+            f"{_label_for_findings(least_clean['findings'])}"
         ),
         "voters": voters,
     }
 
 
 async def analyze_image_ensemble_async(
-    image_source: Union[str, Image.Image],
+    image_source: str | Image.Image,
     pre_calculated_quality_context: str | None = None,
+    pre_calculated_quality_score: int | None = None,
 ) -> dict:
     """
     Run all ensemble voters in parallel with RACE-TO-AI early-exit.
@@ -122,7 +133,7 @@ async def analyze_image_ensemble_async(
     (where a second voter might have pushed the score higher) for a large
     latency win on the AI cases that matter most.
     """
-    quality_score = 0
+    quality_score = pre_calculated_quality_score or 0
     if pre_calculated_quality_context:
         quality_context = pre_calculated_quality_context
     else:
@@ -155,7 +166,7 @@ async def analyze_image_ensemble_async(
     # parallel raises the effective catch rate to ~70%. Race-to-AI still
     # applies — the first to cross threshold cancels the rest.
     anatomy_n = max(1, settings.ensemble_anatomy_parallel_calls)
-    voter_tasks: list = []
+    voter_tasks: list[asyncio.Task[dict]] = []
     for i in range(anatomy_n):
         label = f"anatomy_{i + 1}" if anatomy_n > 1 else "anatomy"
         voter_tasks.append(asyncio.create_task(_bounded(
@@ -255,44 +266,63 @@ async def analyze_image_ensemble_async(
 
 
 def analyze_image_ensemble(
-    image_source: Union[str, Image.Image],
+    image_source: str | Image.Image,
     pre_calculated_quality_context: str | None = None,
+    pre_calculated_quality_score: int | None = None,
 ) -> dict:
     """
-    Sync wrapper for eval scripts / CLI use. The FastAPI path bypasses this
-    and awaits `analyze_image_ensemble_async` directly so cancellations
-    propagate without waiting for in-flight Gemini threads.
+    Sync wrapper for eval scripts / CLI use.
 
-    Critical: when an outer event loop is running (we're on a worker thread
-    spawned by asyncio.to_thread from a request handler), we create a fresh
-    loop, run the ensemble, and then SHUTDOWN THE DEFAULT EXECUTOR WITH
-    timeout=0 before closing. Without timeout=0, loop.close() blocks until
-    every Gemini HTTP call in the new loop's thread pool returns — which
-    defeats the entire race-to-AI early exit (those abandoned calls can take
-    10+ seconds each).
+    The FastAPI path bypasses this entirely and awaits
+    `analyze_image_ensemble_async` directly so cancellations can propagate
+    without waiting for in-flight Gemini threads. This wrapper exists for
+    scripts/eval_v2_rolling.py and ad-hoc CLI use.
+
+    Detection logic:
+      - If there is NO running event loop in the current thread, fall through
+        to `asyncio.run(...)` — the normal sync-CLI case.
+      - If there IS a running loop (we were invoked from a worker thread that
+        an outer `asyncio.to_thread(...)` spawned), create a fresh inner loop,
+        run the ensemble, and SHUTDOWN ITS DEFAULT EXECUTOR with timeout=0
+        before closing. Without timeout=0, `loop.close()` blocks until every
+        Gemini HTTP call in that inner pool returns — defeating the entire
+        race-to-AI early exit (abandoned calls can take 10+ seconds).
+
+    Uses `asyncio.get_running_loop()` rather than the deprecated
+    `asyncio.get_event_loop()` so this is correct on Python 3.12+.
     """
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            new_loop = asyncio.new_event_loop()
-            try:
-                return new_loop.run_until_complete(
-                    analyze_image_ensemble_async(
-                        image_source, pre_calculated_quality_context
-                    )
-                )
-            finally:
-                try:
-                    # Don't block on abandoned Gemini threads from cancelled voters.
-                    new_loop.run_until_complete(
-                        new_loop.shutdown_default_executor(timeout=0.0)
-                    )
-                except Exception:
-                    pass
-                new_loop.close()
+        asyncio.get_running_loop()
     except RuntimeError:
-        pass
+        # No running loop — safe to use asyncio.run() directly.
+        return asyncio.run(
+            analyze_image_ensemble_async(
+                image_source,
+                pre_calculated_quality_context,
+                pre_calculated_quality_score,
+            )
+        )
 
-    return asyncio.run(
-        analyze_image_ensemble_async(image_source, pre_calculated_quality_context)
-    )
+    # Running loop found — we're on an inner thread spawned by asyncio.to_thread.
+    # Build a fresh inner loop for the parallel ensemble.
+    new_loop = asyncio.new_event_loop()
+    try:
+        return new_loop.run_until_complete(
+            analyze_image_ensemble_async(
+                image_source,
+                pre_calculated_quality_context,
+                pre_calculated_quality_score,
+            )
+        )
+    finally:
+        try:
+            new_loop.run_until_complete(
+                new_loop.shutdown_default_executor(timeout=0.0)
+            )
+        except Exception as exc:
+            logger.warning("ensemble_executor_shutdown_failed", extra={
+                "action": "ensemble_executor_shutdown_failed",
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            })
+        new_loop.close()

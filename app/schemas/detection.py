@@ -87,6 +87,20 @@ SIGNAL_CATEGORIES_V2 = Literal[
 ]
 
 
+# Mapping from v2/ensemble macro buckets → legacy 19-category strings used by
+# image_detector._label_for and the downstream API response shape. Lives here
+# (alongside SIGNAL_CATEGORIES_V2) so both client_v2.py and ensemble_engine.py
+# can import without crossing client-to-client module boundaries.
+V2_TO_LEGACY_CATEGORY: dict[str, str] = {
+    "peripheral_or_background_structural_collapse": "facial_detail_inconsistency_detected",
+    "objects_merge_or_dissolve_at_boundaries": "objects_merge_or_dissolve_at_boundaries",
+    "geometry_or_perspective_is_physically_impossible": "geometry_or_perspective_is_physically_impossible",
+    "in_scene_text_is_melted_or_gibberish": "text_or_signage_contains_gibberish_characters",
+    "multiple_subtle_ai_artifacts_present": "multiple_subtle_ai_artifacts_present",
+    "no_visual_anomalies_detected": "no_visual_anomalies_detected",
+}
+
+
 class EnsembleSubResult(BaseModel):
     """Per-prompt forensic verdict produced by one of the ensemble's sub-calls."""
     findings: str = Field(

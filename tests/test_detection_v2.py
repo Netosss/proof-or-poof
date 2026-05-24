@@ -193,3 +193,125 @@ class TestEngineDispatch:
 
         monkeypatch.setattr(image_detector.settings, "detection_engine", "v2")
         assert image_detector._select_analyzer() is client_v2.analyze_image_pro_turbo_v2
+
+    def test_ensemble_engine_rejects_select_analyzer_path(self, monkeypatch):
+        """Ensemble must be awaited as native-async — _select_analyzer is a programming error."""
+        from app.detection import image_detector
+
+        monkeypatch.setattr(image_detector.settings, "detection_engine", "ensemble")
+        with pytest.raises(AssertionError, match="ensemble must be awaited directly"):
+            image_detector._select_analyzer()
+
+
+class TestAsymmetricVote:
+    """The pure aggregation function in app/detection/ensemble_engine.py.
+
+    Lives on the AI-verdict hot path — exercises every branch with synthetic
+    voter dicts so we never ship a regression to the asymmetric-vote rule.
+    """
+
+    def _voter(self, label: str, conf: float, signal: str = "no_visual_anomalies_detected",
+               findings: str = "", ok: bool = True) -> dict:
+        return {
+            "label": label, "confidence": conf, "signal_category": signal,
+            "findings": findings, "duration_ms": 1000, "ok": ok,
+        }
+
+    def test_all_voters_failed_returns_sentinel(self, monkeypatch):
+        from app.detection.ensemble_engine import _asymmetric_vote
+        verdict = _asymmetric_vote([
+            self._voter("a", -1.0, ok=False),
+            self._voter("b", -1.0, ok=False),
+            self._voter("c", -1.0, ok=False),
+        ])
+        assert verdict["confidence"] == -1.0
+        assert "all voters failed" in verdict["visual_scan"]
+
+    def test_single_voter_over_threshold_wins(self, monkeypatch):
+        from app.detection.ensemble_engine import _asymmetric_vote
+        import app.config as cfg
+
+        monkeypatch.setattr(cfg.settings, "ensemble_ai_threshold", 0.7)
+        verdict = _asymmetric_vote([
+            self._voter("anatomy", 0.92, signal="peripheral_or_background_structural_collapse",
+                       findings="hand is a blob"),
+            self._voter("physics", 0.05),
+            self._voter("composition", 0.10),
+        ])
+        assert verdict["confidence"] == 0.92
+        assert verdict["signal_category"] == "peripheral_or_background_structural_collapse"
+        assert "[anatomy]" in verdict["visual_scan"]
+        assert "hand is a blob" in verdict["visual_scan"]
+
+    def test_most_confident_ai_voter_wins(self, monkeypatch):
+        from app.detection.ensemble_engine import _asymmetric_vote
+        import app.config as cfg
+
+        monkeypatch.setattr(cfg.settings, "ensemble_ai_threshold", 0.7)
+        verdict = _asymmetric_vote([
+            self._voter("anatomy", 0.75, signal="peripheral_or_background_structural_collapse",
+                       findings="anatomy concern"),
+            self._voter("physics", 0.92, signal="geometry_or_perspective_is_physically_impossible",
+                        findings="physics concern"),
+            self._voter("composition", 0.05),
+        ])
+        assert verdict["confidence"] == 0.92
+        assert verdict["signal_category"] == "geometry_or_perspective_is_physically_impossible"
+        assert "[physics]" in verdict["visual_scan"]
+
+    def test_no_voter_over_threshold_returns_real_with_mean(self, monkeypatch):
+        from app.detection.ensemble_engine import _asymmetric_vote
+        import app.config as cfg
+
+        monkeypatch.setattr(cfg.settings, "ensemble_ai_threshold", 0.7)
+        verdict = _asymmetric_vote([
+            self._voter("anatomy", 0.10),
+            self._voter("physics", 0.20),
+            self._voter("composition", 0.30),
+        ])
+        # mean of 0.10/0.20/0.30 = 0.20
+        assert verdict["confidence"] == 0.20
+
+    def test_real_fallback_preserves_least_clean_signal_category(self, monkeypatch):
+        """Regression test for the fix: REAL path must NOT hardcode 'no_visual_anomalies_detected'."""
+        from app.detection.ensemble_engine import _asymmetric_vote
+        import app.config as cfg
+
+        monkeypatch.setattr(cfg.settings, "ensemble_ai_threshold", 0.7)
+        verdict = _asymmetric_vote([
+            self._voter("anatomy", 0.10, signal="no_visual_anomalies_detected", findings="clean anatomy"),
+            self._voter("physics", 0.65, signal="geometry_or_perspective_is_physically_impossible",
+                        findings="conflicting shadows"),
+            self._voter("composition", 0.05, signal="no_visual_anomalies_detected", findings="clean"),
+        ])
+        # No voter crosses 0.7, so it's REAL — but the physics voter at 0.65
+        # had a real signal that must NOT be silently erased.
+        assert verdict["signal_category"] == "geometry_or_perspective_is_physically_impossible"
+        assert "physics" in verdict["visual_scan"]
+        assert "conflicting shadows" in verdict["visual_scan"]
+
+    def test_failed_voters_excluded_from_vote_and_mean(self, monkeypatch):
+        from app.detection.ensemble_engine import _asymmetric_vote
+        import app.config as cfg
+
+        monkeypatch.setattr(cfg.settings, "ensemble_ai_threshold", 0.7)
+        verdict = _asymmetric_vote([
+            self._voter("anatomy", 0.10),
+            self._voter("physics", 0.30),
+            self._voter("composition", -1.0, ok=False),  # excluded
+        ])
+        # Mean of valid voters only: (0.10 + 0.30) / 2 = 0.20
+        assert verdict["confidence"] == 0.20
+
+
+class TestV2LegacyMappingLocation:
+    """V2_TO_LEGACY_CATEGORY belongs in schemas, not in the v2 client (cross-module coupling)."""
+
+    def test_map_importable_from_schemas(self):
+        from app.schemas.detection import V2_TO_LEGACY_CATEGORY
+        assert "no_visual_anomalies_detected" in V2_TO_LEGACY_CATEGORY
+
+    def test_client_v2_re_exports_for_backward_compat(self):
+        from app.integrations.gemini.client_v2 import V2_TO_LEGACY_CATEGORY as via_client
+        from app.schemas.detection import V2_TO_LEGACY_CATEGORY as via_schemas
+        assert via_client is via_schemas

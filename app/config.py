@@ -426,10 +426,6 @@ class Settings(BaseSettings):
             "only paid when no voter early-exits."
         ),
     )
-    detection_v2_timeout_s: float = Field(
-        8.0,
-        description="Hard timeout for the v2 Gemini call. 5s target + 3s network jitter cushion.",
-    )
     gemini_ai_vote_threshold: float = Field(
         0.55,
         description=(

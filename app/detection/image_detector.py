@@ -32,9 +32,20 @@ from app.integrations.gemini.quality import get_quality_context
 
 
 def _select_analyzer():
-    """Dispatch to v1, v2, or ensemble engine based on settings.detection_engine."""
-    if settings.detection_engine == "ensemble":
-        return analyze_image_ensemble
+    """
+    Dispatch to v1 or v2 Gemini sync analyzer based on settings.detection_engine.
+
+    DOES NOT handle the ensemble engine. The ensemble path is async-native and
+    is awaited directly by detect_ai_media_image_logic — calling _select_analyzer
+    while detection_engine='ensemble' is a programming error (a future refactor
+    would wrap the sync wrapper in asyncio.to_thread, creating the nested
+    event loop the ensemble docstring explicitly warns against). The assert
+    keeps that invariant honest.
+    """
+    assert settings.detection_engine != "ensemble", (
+        "ensemble must be awaited directly via analyze_image_ensemble_async, "
+        "not routed through _select_analyzer"
+    )
     if settings.detection_engine == "v2":
         return analyze_image_pro_turbo_v2
     return analyze_image_pro_turbo
@@ -452,17 +463,17 @@ async def detect_ai_media_image_logic(
     })
 
     pre_calc_context = None
+    pre_calc_quality_score: Optional[int] = None
     source_for_gemini = frame or file_path
 
     try:
-        def _get_context_safe():
+        def _get_context_safe() -> tuple[str, int]:
             if frame:
-                return get_quality_context(frame)[0]
-            else:
-                with Image.open(file_path) as img:
-                    return get_quality_context(img)[0]
+                return get_quality_context(frame)
+            with Image.open(file_path) as img:
+                return get_quality_context(img)
 
-        pre_calc_context = await asyncio.to_thread(_get_context_safe)
+        pre_calc_context, pre_calc_quality_score = await asyncio.to_thread(_get_context_safe)
     except Exception as e:
         logger.warning("gemini_precalc_failed", extra={
             "action": "gemini_precalc_failed",
@@ -480,6 +491,7 @@ async def detect_ai_media_image_logic(
         gemini_res = await analyze_image_ensemble_async(
             source_for_gemini,
             pre_calculated_quality_context=pre_calc_context,
+            pre_calculated_quality_score=pre_calc_quality_score,
         )
     else:
         analyzer = _select_analyzer()
