@@ -378,9 +378,23 @@ class Settings(BaseSettings):
         description=(
             "Forensic detection engine version. 'v1' = current production prompt "
             "(rules 1–13, 19 signal categories). 'v2' = XML-tagged forensic prompt "
-            "with forced edge→physics CoT, 5 macro signal buckets, deterministic "
-            "decoding (temp=0, top_k=1, top_p=0.1). Default 'v1' until v2 passes "
-            "the rolling gold-set eval."
+            "with forced edge→physics CoT, 5 macro signal buckets. 'ensemble' = "
+            "3 specialised Gemini prompts (anatomy / physics / composition) plus "
+            "a CNN classifier (Organika/sdxl-detector) running in parallel with "
+            "asymmetric voting. Each tier costs roughly: v1 ≈ 1×, v2 ≈ 1×, "
+            "ensemble ≈ 3× (4 voters concurrent so wall-clock stays close to a "
+            "single call). Default 'v1' until ensemble passes its eval gate."
+        ),
+    )
+    ensemble_ai_threshold: float = Field(
+        0.7,
+        description=(
+            "Confidence threshold above which a single ensemble voter (Gemini "
+            "sub-call OR CNN classifier) flips the verdict to AI. The MAX "
+            "confidence across AI voters becomes the final score. 0.7 matches "
+            "the architect's recommendation — high enough that one noisy false "
+            "alarm cannot poison the verdict, low enough that any genuinely "
+            "confident accuser wins."
         ),
     )
     detection_v2_timeout_s: float = Field(

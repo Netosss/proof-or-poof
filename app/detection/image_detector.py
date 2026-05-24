@@ -27,11 +27,14 @@ from app.detection.metadata_scorer import (
 )
 from app.integrations.gemini.client import analyze_image_pro_turbo
 from app.integrations.gemini.client_v2 import analyze_image_pro_turbo_v2
+from app.detection.ensemble_engine import analyze_image_ensemble
 from app.integrations.gemini.quality import get_quality_context
 
 
 def _select_analyzer():
-    """Dispatch to v1 or v2 Gemini analyzer based on settings.detection_engine."""
+    """Dispatch to v1, v2, or ensemble engine based on settings.detection_engine."""
+    if settings.detection_engine == "ensemble":
+        return analyze_image_ensemble
     if settings.detection_engine == "v2":
         return analyze_image_pro_turbo_v2
     return analyze_image_pro_turbo

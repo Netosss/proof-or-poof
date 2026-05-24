@@ -87,6 +87,19 @@ SIGNAL_CATEGORIES_V2 = Literal[
 ]
 
 
+class EnsembleSubResult(BaseModel):
+    """Per-prompt forensic verdict produced by one of the ensemble's sub-calls."""
+    findings: str = Field(
+        description="Brief description of findings within the assigned focus area. Max 40 words."
+    )
+    confidence: float = Field(
+        description="0.0 (clearly real) to 1.0 (clearly AI), based on the assigned focus area alone."
+    )
+    signal_category: SIGNAL_CATEGORIES_V2 = Field(
+        description="Exactly one macro forensic bucket from the closed list."
+    )
+
+
 class DetectionResultV2(BaseModel):
     """V2 forensic schema: weaponised attention via targeted interrogation keys."""
     scan_hands_and_boundaries: str = Field(
