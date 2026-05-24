@@ -341,19 +341,30 @@ class Settings(BaseSettings):
             "mistakes for AI smoothness."
         ),
     )
-    gemini_temperature: float = Field(1.0, description="Sampling temperature for Gemini model")
+    gemini_temperature: float = Field(
+        1.0,
+        description=(
+            "Sampling temperature for Gemini model. V1 default = 1.0. V2 empirical "
+            "sweet spot = 0.5 — temp=0.0 + top_k=1 locked the model into the most-"
+            "probable token path which systematically defaulted to 'authentic' on "
+            "polished AI portraits. temp=1.0 was 88% accurate at +1s latency vs "
+            "temp=0.5 (also 88%); higher temps just shuffle which cases fail. "
+            "Operators flipping to v2 should set GEMINI_TEMPERATURE=0.5."
+        ),
+    )
     gemini_top_k: int = Field(
         0,
         description=(
-            "Top-K sampling cap. 0 = SDK default (no override). V2 sets this to 1 "
-            "via the v2 client to lock deterministic forensic decoding."
+            "Top-K sampling cap. 0 = SDK default (no override). V2 keeps this at 0 "
+            "(free sampling) — the original deterministic plan (top_k=1) was the "
+            "actual bottleneck for the polished-AI-portrait case class."
         ),
     )
     gemini_top_p: float = Field(
         0.0,
         description=(
-            "Top-P nucleus sampling. 0.0 = SDK default (no override). V2 sets this "
-            "to 0.1 for tight sampling alongside temperature=0.0 and top_k=1."
+            "Top-P nucleus sampling. 0.0 = SDK default (no override). V2 keeps this "
+            "at 0 (free sampling) — see top_k commentary."
         ),
     )
 
