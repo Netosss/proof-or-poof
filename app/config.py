@@ -342,14 +342,16 @@ class Settings(BaseSettings):
         ),
     )
     gemini_temperature: float = Field(
-        1.0,
+        0.5,
         description=(
-            "Sampling temperature for Gemini model. V1 default = 1.0. V2 empirical "
-            "sweet spot = 0.5 — temp=0.0 + top_k=1 locked the model into the most-"
-            "probable token path which systematically defaulted to 'authentic' on "
-            "polished AI portraits. temp=1.0 was 88% accurate at +1s latency vs "
-            "temp=0.5 (also 88%); higher temps just shuffle which cases fail. "
-            "Operators flipping to v2 should set GEMINI_TEMPERATURE=0.5."
+            "Sampling temperature for Gemini model. V2 empirical sweet spot = 0.5. "
+            "Default is now hardcoded (was 1.0) so a missing/broken .env in any "
+            "environment cannot silently regress accuracy. temp=0.0 + top_k=1 "
+            "locked the model into the most-probable token path which "
+            "systematically defaulted to 'authentic' on polished AI portraits. "
+            "Higher temps (≥0.7) just shuffle which cases fail without raising "
+            "the ceiling. Override via GEMINI_TEMPERATURE env var only when "
+            "deliberately experimenting."
         ),
     )
     gemini_top_k: int = Field(

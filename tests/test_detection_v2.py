@@ -51,7 +51,7 @@ class TestV2PromptStructure:
             "4. IN-SCENE TEXT",
             "5. BACKGROUND CLUTTER",
             "6. DIFFUSION FINGERPRINTS",
-            "7. SELF-VERIFICATION",
+            "7. STRICT LIABILITY",
         ):
             assert marker in prompt, f"missing rule marker: {marker}"
 
@@ -75,8 +75,8 @@ class TestV2PromptStructure:
 class TestDetectionResultV2:
     def _valid_payload(self) -> dict:
         return {
-            "step_1_edge_and_background_scan": "Hands fully articulated; distant background subjects coherent.",
-            "step_2_physics_and_boundary_scan": "Single overhead light source; consistent shadows; no boundary fusion.",
+            "scan_hands_and_boundaries": "Hands fully articulated with clear knuckles; no fusion with objects.",
+            "scan_background_and_physics": "Single overhead light source; consistent shadows; no boundary fusion.",
             "visual_scan": "Clean photograph with consistent lighting and articulated extremities.",
             "confidence": 0.1,
             "signal_category": "no_visual_anomalies_detected",
@@ -95,7 +95,7 @@ class TestDetectionResultV2:
 
     def test_missing_cot_step_rejected(self):
         payload = self._valid_payload()
-        del payload["step_1_edge_and_background_scan"]
+        del payload["scan_hands_and_boundaries"]
         with pytest.raises(ValidationError):
             DetectionResultV2(**payload)
 

@@ -162,8 +162,8 @@ def analyze_image_pro_turbo_v2(
             "quality_context": quality_context,
             # V2-only diagnostic fields (do NOT remove — used by eval harness)
             "v2_signal_category": parsed.signal_category,
-            "v2_step_1": parsed.step_1_edge_and_background_scan,
-            "v2_step_2": parsed.step_2_physics_and_boundary_scan,
+            "v2_step_1": parsed.scan_hands_and_boundaries,
+            "v2_step_2": parsed.scan_background_and_physics,
         }
 
         if hasattr(response, "usage_metadata"):

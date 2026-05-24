@@ -88,12 +88,12 @@ SIGNAL_CATEGORIES_V2 = Literal[
 
 
 class DetectionResultV2(BaseModel):
-    """V2 forensic schema: forced edge→physics CoT, single confidence, 5 macro buckets."""
-    step_1_edge_and_background_scan: str = Field(
-        description="Structural integrity of hands, distant faces, extremities, background objects ONLY. Max 30 words."
+    """V2 forensic schema: weaponised attention via targeted interrogation keys."""
+    scan_hands_and_boundaries: str = Field(
+        description="Answer: do fingers lack knuckles, melt into objects/clothing, or is there flat skin webbing at armpits/lats/shoulder muscle insertions? Max 40 words."
     )
-    step_2_physics_and_boundary_scan: str = Field(
-        description="Object intersections, in-scene text shapes, light/shadow logic ONLY. Max 30 words."
+    scan_background_and_physics: str = Field(
+        description="Answer: are background faces shapeless/demonic? Do objects intersect impossibly? In candid group photos, is lighting suspiciously uniform across every face? Max 40 words."
     )
     visual_scan: str = Field(
         description="One-line summary of the strongest signal (anomaly or authenticity marker). Max 25 words."
