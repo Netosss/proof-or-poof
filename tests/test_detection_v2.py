@@ -129,6 +129,56 @@ class TestV2LegacyMapping:
 # Dispatch wiring
 # ---------------------------------------------------------------------------
 
+class TestBoostScoreCap:
+    def test_ai_boost_capped_at_099(self):
+        from app.detection.image_detector import boost_score
+        assert boost_score(0.99, is_ai_likely=True) <= 0.99
+        assert boost_score(1.0, is_ai_likely=True) == 0.99
+
+    def test_authentic_path_also_capped(self):
+        from app.detection.image_detector import boost_score
+        assert boost_score(1.0, is_ai_likely=False) == 0.99
+
+    def test_low_ai_score_boosted_but_under_cap(self):
+        from app.detection.image_detector import boost_score
+        out = boost_score(0.55, is_ai_likely=True)
+        assert 0.55 < out < 0.99
+
+
+class TestGeminiResponseBuilder:
+    def test_emits_two_row_evidence_chain(self):
+        from app.detection.image_detector import _build_gemini_evidence_response
+        resp = _build_gemini_evidence_response(
+            summary="Likely AI-Generated", confidence=0.83,
+            is_ai_likely=True, visual_detail="merged earring",
+            context_quality="HIGH", is_gemini_used=True, is_cached=False,
+        )
+        assert resp["summary"] == "Likely AI-Generated"
+        assert resp["confidence_score"] == 0.83
+        assert resp["is_cached"] is False
+        assert len(resp["evidence_chain"]) == 2
+        assert resp["evidence_chain"][1]["status"] == "flagged"
+        assert resp["evidence_chain"][1]["context_quality"] == "HIGH"
+
+    def test_authentic_path_emits_passed_status(self):
+        from app.detection.image_detector import _build_gemini_evidence_response
+        resp = _build_gemini_evidence_response(
+            summary="Likely Authentic", confidence=0.92,
+            is_ai_likely=False, visual_detail="clean scan",
+            context_quality="MEDIUM", is_gemini_used=True, is_cached=True,
+        )
+        assert resp["evidence_chain"][1]["status"] == "passed"
+
+
+class TestCacheKeyNamespacedByEngine:
+    def test_prefix_includes_engine(self, monkeypatch):
+        from app.detection import cache as cache_module
+        monkeypatch.setattr(cache_module.settings, "detection_engine", "v1")
+        assert cache_module._cache_prefix() == "forensic_v2:v1:"
+        monkeypatch.setattr(cache_module.settings, "detection_engine", "v2")
+        assert cache_module._cache_prefix() == "forensic_v2:v2:"
+
+
 class TestEngineDispatch:
     def test_v1_default_selects_v1_analyzer(self, monkeypatch):
         from app.detection import image_detector

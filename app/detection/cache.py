@@ -23,10 +23,13 @@ from app.integrations import redis_client as redis_module
 
 logger = logging.getLogger(__name__)
 
-# Bumped from "forensic:" → "forensic_v2:" alongside the Gemini 3.5 Flash upgrade,
-# dead-zone scoring scale, and softened quality context. Old "forensic:*" keys
-# remain valid TTL-wise but will never be read; they self-expire within 24h.
-CACHE_PREFIX = "forensic_v2:"
+# Cache key is namespaced by the active detection engine so v1 and v2 verdicts
+# never collide. Flipping settings.detection_engine routes reads/writes to a
+# fresh keyspace, making rollout/rollback safe with no Redis flush. The legacy
+# "forensic_v2:" prefix is preserved for the v1 engine to avoid invalidating
+# the existing production cache on this commit.
+def _cache_prefix() -> str:
+    return f"forensic_v2:{settings.detection_engine}:"
 
 local_cache: OrderedDict = OrderedDict()
 
@@ -36,7 +39,7 @@ async def get_cached_result(key: str) -> Optional[dict]:
     rc = redis_module.client
     if rc:
         try:
-            data = await rc.get(f"{CACHE_PREFIX}{key}")
+            data = await rc.get(f"{_cache_prefix()}{key}")
             if data:
                 logger.debug("cache_redis_hit", extra={"action": "cache_redis_hit"})
                 return json.loads(data)
@@ -68,7 +71,7 @@ async def set_cached_result(key: str, value: dict) -> None:
     rc = redis_module.client
     if rc:
         try:
-            await rc.set(f"{CACHE_PREFIX}{key}", json.dumps(value), ex=settings.deepfake_cache_ttl_sec)
+            await rc.set(f"{_cache_prefix()}{key}", json.dumps(value), ex=settings.deepfake_cache_ttl_sec)
         except Exception as e:
             logger.warning("cache_redis_set_error", extra={"action": "cache_redis_set_error", "error": str(e)})
     else:

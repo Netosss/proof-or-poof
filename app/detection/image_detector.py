@@ -65,15 +65,61 @@ def _label_for(signal_category: str) -> str:
 
 def boost_score(score: float, is_ai_likely: bool = True) -> float:
     """
-    Soft proportional boost for AI-likely results only.
+    Soft proportional boost for AI-likely results, capped at 0.99.
 
     Nudges uncertain AI scores (e.g. 0.55 → 0.66) without hard-flooring every
-    result at 0.85, which inflated false positives. Strong signals (e.g. 0.90)
-    are boosted only slightly (→ 0.925). Human results are never boosted.
+    result at 0.85. Strong signals (e.g. 0.90) are boosted only slightly
+    (→ 0.925). Human results are passed through unmodified. The 0.99 cap
+    lives here so callers cannot accidentally emit absolute-certainty (1.0)
+    verdicts — UX policy never shows 100% certainty either way.
     """
     if is_ai_likely:
-        return score + (1.0 - score) * 0.25
-    return score
+        boosted = score + (1.0 - score) * 0.25
+        return min(0.99, boosted)
+    return min(0.99, score)
+
+
+def _build_gemini_evidence_response(
+    *,
+    summary: str,
+    confidence: float,
+    is_ai_likely: bool,
+    visual_detail: str,
+    context_quality: str,
+    is_gemini_used: bool,
+    is_cached: bool,
+) -> dict:
+    """
+    Build the Gemini-path response envelope.
+
+    Single source of truth for the 3 sites that emit a Gemini-derived verdict
+    (cache hit with prior Gemini result, fresh Gemini success, and cached GPU
+    forensic result). Schema drift bugs from copy-paste evidence_chain edits
+    are mechanically prevented.
+    """
+    return {
+        "summary": summary,
+        "confidence_score": round(confidence, 2),
+        "is_gemini_used": is_gemini_used,
+        "is_cached": is_cached,
+        "gpu_time_ms": 0,
+        "is_short_circuited": False,
+        "evidence_chain": [
+            {
+                "layer": "Metadata Check",
+                "status": "warning",
+                "label": "Origin Check",
+                "detail": "No camera fingerprint found.",
+            },
+            {
+                "layer": "Visual Context",
+                "status": "flagged" if is_ai_likely else "passed",
+                "label": "Visual Inspection",
+                "detail": visual_detail,
+                "context_quality": context_quality,
+            },
+        ],
+    }
 
 
 async def detect_ai_media_image_logic(
@@ -160,8 +206,14 @@ async def detect_ai_media_image_logic(
         "file_size_bytes": file_size,
     })
 
-    # Stringify values to handle non-JSON-serializable types (IFDRational, bytes, etc.)
-    clean_metadata = f" {json.dumps({k: str(v) for k, v in exif.items()})} "
+    # Stringify keys (PIL returns int EXIF tag IDs / bytes for IFD sub-blocks)
+    # AND fall back default=str for values (IFDRational, bytes, nested tuples).
+    # Belt-and-suspenders — without both, json.dumps raises TypeError on
+    # certain images with unusual EXIF structures.
+    try:
+        clean_metadata = f" {json.dumps({str(k): v for k, v in exif.items()}, default=str)} "
+    except (TypeError, ValueError):
+        clean_metadata = " {} "
     full_dump = clean_metadata
 
     if not frame and file_path and os.path.exists(file_path):
@@ -334,46 +386,30 @@ async def detect_ai_media_image_logic(
         if is_gemini_used:
             is_ai_likely = forensic_probability > settings.ai_confidence_threshold
             raw_conf = forensic_probability if is_ai_likely else (1.0 - forensic_probability)
-            final_conf = min(0.99, boost_score(raw_conf, is_ai_likely=is_ai_likely))
+            final_conf = boost_score(raw_conf, is_ai_likely=is_ai_likely)
 
             cached_signal = cached_result.get("signal_category", "multiple_subtle_ai_artifacts_present")
             cached_explanation = _label_for(cached_signal)
             cached_quality_context = cached_result.get("quality_context", "Unknown")
 
-            return {
-                "summary": "Likely AI-Generated" if is_ai_likely else "Likely Authentic",
-                "confidence_score": round(final_conf, 2),
-                "is_gemini_used": True,
-                "is_cached": True,
-                "gpu_time_ms": 0,
-                "is_short_circuited": False,
-                "evidence_chain": [
-                    {
-                        "layer": "Metadata Check",
-                        "status": "warning",
-                        "label": "Origin Check",
-                        "detail": "No camera fingerprint found."
-                    },
-                    {
-                        "layer": "Visual Context",
-                        "status": "flagged" if is_ai_likely else "passed",
-                        "label": "Visual Inspection",
-                        "detail": cached_explanation,
-                        "context_quality": cached_quality_context
-                    }
-                ]
-            }
+            return _build_gemini_evidence_response(
+                summary="Likely AI-Generated" if is_ai_likely else "Likely Authentic",
+                confidence=final_conf,
+                is_ai_likely=is_ai_likely,
+                visual_detail=cached_explanation,
+                context_quality=cached_quality_context,
+                is_gemini_used=True,
+                is_cached=True,
+            )
         else:
             logger.info("cache_hit_image", extra={"action": "cache_hit_image", "ai_score": round(forensic_probability, 4)})
             is_ai_likely = forensic_probability > settings.ai_confidence_threshold
             raw_conf = forensic_probability if is_ai_likely else (1.0 - forensic_probability)
             final_conf = boost_score(raw_conf, is_ai_likely=is_ai_likely)
 
-            if final_conf > 0.99:
-                final_conf = 0.99
-
             summary = "AI-Generated" if forensic_probability > settings.ai_confidence_threshold else "No AI Detected"
-
+            # Deep Forensics path uses a different second-row label/detail; emit
+            # it inline rather than overloading the Gemini helper with a flag.
             return {
                 "summary": summary,
                 "confidence_score": round(final_conf, 2),
@@ -385,15 +421,19 @@ async def detect_ai_media_image_logic(
                         "layer": "Metadata Check",
                         "status": "warning",
                         "label": "Origin Check",
-                        "detail": "No camera fingerprint found."
+                        "detail": "No camera fingerprint found.",
                     },
                     {
                         "layer": "Deep Forensics",
                         "status": "flagged" if is_ai_likely else "passed",
                         "label": "Structural Analysis",
-                        "detail": "Noise patterns consistent with generative AI." if is_ai_likely else "Sensor noise patterns consistent with optical lenses."
-                    }
-                ]
+                        "detail": (
+                            "Noise patterns consistent with generative AI."
+                            if is_ai_likely
+                            else "Sensor noise patterns consistent with optical lenses."
+                        ),
+                    },
+                ],
             }
 
     # --- GEMINI ---
@@ -454,30 +494,17 @@ async def detect_ai_media_image_logic(
 
         is_ai_likely = gemini_score > settings.ai_confidence_threshold
         raw_conf = gemini_score if is_ai_likely else (1.0 - gemini_score)
-        final_conf = min(0.99, boost_score(raw_conf, is_ai_likely=is_ai_likely))
+        final_conf = boost_score(raw_conf, is_ai_likely=is_ai_likely)
 
-        return {
-            "summary": "Likely AI-Generated" if is_ai_likely else "Likely Authentic",
-            "confidence_score": round(final_conf, 2),
-            "is_gemini_used": True,
-            "gpu_time_ms": 0,
-            "is_short_circuited": False,
-            "evidence_chain": [
-                {
-                    "layer": "Metadata Check",
-                    "status": "warning",
-                    "label": "Origin Check",
-                    "detail": "No camera fingerprint found."
-                },
-                {
-                    "layer": "Visual Context",
-                    "status": "flagged" if is_ai_likely else "passed",
-                    "label": "Visual Inspection",
-                    "detail": gemini_explanation,
-                    "context_quality": quality_context
-                }
-            ]
-        }
+        return _build_gemini_evidence_response(
+            summary="Likely AI-Generated" if is_ai_likely else "Likely Authentic",
+            confidence=final_conf,
+            is_ai_likely=is_ai_likely,
+            visual_detail=gemini_explanation,
+            context_quality=quality_context,
+            is_gemini_used=True,
+            is_cached=False,
+        )
 
     return {
         "summary": "Analysis Failed",
