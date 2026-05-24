@@ -71,3 +71,36 @@ class DetectionResult(BaseModel):
     signal_category: SIGNAL_CATEGORIES = Field(
         description="Single primary forensic signal. Must be an exact enum key from the system instructions."
     )
+
+
+# ---------------------------------------------------------------------------
+# V2 schema — 5 macro buckets, forced 2-step CoT (edges→physics) + visual_scan.
+# Mapped back to legacy SIGNAL_CATEGORIES by image_detector for response shape.
+# ---------------------------------------------------------------------------
+SIGNAL_CATEGORIES_V2 = Literal[
+    "peripheral_or_background_structural_collapse",
+    "objects_merge_or_dissolve_at_boundaries",
+    "geometry_or_perspective_is_physically_impossible",
+    "in_scene_text_is_melted_or_gibberish",
+    "multiple_subtle_ai_artifacts_present",
+    "no_visual_anomalies_detected",
+]
+
+
+class DetectionResultV2(BaseModel):
+    """V2 forensic schema: forced edge→physics CoT, single confidence, 5 macro buckets."""
+    step_1_edge_and_background_scan: str = Field(
+        description="Structural integrity of hands, distant faces, extremities, background objects ONLY. Max 30 words."
+    )
+    step_2_physics_and_boundary_scan: str = Field(
+        description="Object intersections, in-scene text shapes, light/shadow logic ONLY. Max 30 words."
+    )
+    visual_scan: str = Field(
+        description="One-line summary of the strongest signal (anomaly or authenticity marker). Max 25 words."
+    )
+    confidence: float = Field(
+        description="Probability the image is AI-generated, 0.0 (clearly real) to 1.0 (clearly AI)."
+    )
+    signal_category: SIGNAL_CATEGORIES_V2 = Field(
+        description="Exactly one macro forensic bucket from the closed list."
+    )

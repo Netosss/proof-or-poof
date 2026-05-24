@@ -15,6 +15,7 @@ scripts/*
 !scripts/enterprise_admin.py
 !scripts/sign_request.py
 !scripts/redis_clear_forensic_cache.py
+!scripts/eval_v2_rolling.py
 results.jsonl
 dry_run_results.jsonl
 *.log

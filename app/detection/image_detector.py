@@ -26,7 +26,15 @@ from app.detection.metadata_scorer import (
     get_ai_suspicion_score,
 )
 from app.integrations.gemini.client import analyze_image_pro_turbo
+from app.integrations.gemini.client_v2 import analyze_image_pro_turbo_v2
 from app.integrations.gemini.quality import get_quality_context
+
+
+def _select_analyzer():
+    """Dispatch to v1 or v2 Gemini analyzer based on settings.detection_engine."""
+    if settings.detection_engine == "v2":
+        return analyze_image_pro_turbo_v2
+    return analyze_image_pro_turbo
 
 logger = logging.getLogger(__name__)
 
@@ -419,8 +427,9 @@ async def detect_ai_media_image_logic(
             "error_type": type(e).__name__,
         })
 
+    analyzer = _select_analyzer()
     gemini_res = await asyncio.to_thread(
-        analyze_image_pro_turbo, source_for_gemini,
+        analyzer, source_for_gemini,
         pre_calculated_quality_context=pre_calc_context
     )
     logger.info("gemini_response", extra={

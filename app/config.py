@@ -342,6 +342,38 @@ class Settings(BaseSettings):
         ),
     )
     gemini_temperature: float = Field(1.0, description="Sampling temperature for Gemini model")
+    gemini_top_k: int = Field(
+        0,
+        description=(
+            "Top-K sampling cap. 0 = SDK default (no override). V2 sets this to 1 "
+            "via the v2 client to lock deterministic forensic decoding."
+        ),
+    )
+    gemini_top_p: float = Field(
+        0.0,
+        description=(
+            "Top-P nucleus sampling. 0.0 = SDK default (no override). V2 sets this "
+            "to 0.1 for tight sampling alongside temperature=0.0 and top_k=1."
+        ),
+    )
+
+    # ------------------------------------------------------------------ #
+    # Detection engine routing                                            #
+    # ------------------------------------------------------------------ #
+    detection_engine: str = Field(
+        "v1",
+        description=(
+            "Forensic detection engine version. 'v1' = current production prompt "
+            "(rules 1–13, 19 signal categories). 'v2' = XML-tagged forensic prompt "
+            "with forced edge→physics CoT, 5 macro signal buckets, deterministic "
+            "decoding (temp=0, top_k=1, top_p=0.1). Default 'v1' until v2 passes "
+            "the rolling gold-set eval."
+        ),
+    )
+    detection_v2_timeout_s: float = Field(
+        8.0,
+        description="Hard timeout for the v2 Gemini call. 5s target + 3s network jitter cushion.",
+    )
     gemini_ai_vote_threshold: float = Field(
         0.55,
         description=(
