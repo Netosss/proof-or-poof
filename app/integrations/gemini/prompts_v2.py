@@ -47,9 +47,18 @@ Apply rules tagged [HIGH] ONLY when DynamicContext reports HIGH quality. At LOW/
 
 3. PHYSICS & OCCLUSION: Trace the primary light source. Flag conflicting shadow directions, floating heavy objects lacking contact shadows, objects intersecting impossibly, foreground bright when light is clearly behind subject (backlit violation).
 
-4. IN-SCENE TEXT (in-scene ONLY — never overlays/watermarks/brand logos/distant landmark signage): For text on menus, walls, in-scene signs, clothing, flag if EITHER (a) letter shapes are visibly MELTED, MORPHED, or FUSED in ways no real font produces, OR (b) characters are clearly readable but content is MEANINGLESS in context (gibberish menu items, incoherent native-language phrases). Ignore typos, future dates, decorative fonts, missing letters from perspective.
+4. IN-SCENE TEXT — STRICT EXCLUSIONS FIRST:
+   NEVER flag the following as Rule 4 evidence:
+     • Social-media handles, usernames, hashtags (e.g. "@BILLY_BOMAN", "#summer2024") — these are overlays, not in-scene text
+     • Platform watermarks (Fiverr / Getty / Shutterstock / Instagram / TikTok / Adobe / etc.) — these are STRONG AUTHENTICITY MARKERS, not evidence of AI
+     • Brand logos and product names
+     • Captions, banners, app-added text
+     • Distant landmark signage where perspective/topography distorts letter spacing — the Hollywood sign in particular, viewed from any LA hillside, naturally shows letter separation, partial occlusion by terrain, or apparent missing/broken letters. This is photographic perspective, NEVER AI gibberish.
+     • Typos, future dates, decorative fonts
+   AFTER all those exclusions, flag genuine in-scene text (menus, walls, in-scene signs, clothing) ONLY if EITHER (a) letter SHAPES are visibly MELTED, MORPHED, or FUSED in ways no real font produces, OR (b) characters are clearly readable but content is MEANINGLESS in context (gibberish menu items, incoherent native-language phrases on a wall, etc.).
+   Note: any visible small "AI tool" / sparkle / generator glyph in a corner of the image is a Rule 1 watermark hit — do NOT classify it as Rule 4.
 
-5. BACKGROUND CLUTTER & PERIPHERY: Actively scan deepest background — distant faces, background furniture, secondary subjects' hands, bags, equipment. AI prioritises foreground coherence and lets the periphery decay. Flag structurally undefined masses lacking logical components (backpacks without zippers/straps, equipment without articulation, distant faces as smooth featureless blobs).
+5. BACKGROUND CLUTTER & PERIPHERY: Actively scan deepest background — distant faces, background furniture, secondary subjects' hands, bags, equipment. AI prioritises foreground coherence and lets the periphery decay. Flag structurally undefined masses lacking logical components (backpacks without zippers/straps, equipment without articulation, distant faces as smooth featureless blobs). IMPORTANT: "low resolution" or "compression" does NOT explain away structurally featureless blob-faces in a crowd — real photographs at any resolution preserve the SHAPE of a head and the boundary between face and hair, even when individual features blur. If you observe structurally undefined faces in a crowd, DO NOT discount this under Devil's Advocate.
 
 6. DIFFUSION FINGERPRINTS (SOFT SIGNALS):
    Evaluate the following subtle fingerprints implicitly. Only mention them in step_1 or step_2 if they are ACTIVELY PRESENT. Do NOT hard-count them; weigh their cumulative impact qualitatively. A single subtle fingerprint justifies moderate AI confidence (0.55–0.70). Multiple compounding fingerprints justify high AI confidence (0.75+). Polished AI portraits and idealised landscapes routinely pass Rules 1–5 and are caught only here, so be willing to flag on fingerprints alone.
@@ -94,7 +103,7 @@ ALLOWED VALUES for signal_category (exactly one):
 {{"step_1_edge_and_background_scan": "Left-shoulder hand is a structureless fleshy mass with no joints or distinct fingers.", "step_2_physics_and_boundary_scan": "Foreground lapel pin fuses into a non-geometric shape with no defined edge.", "visual_scan": "Hand on shoulder is a jointless flesh blob — undeniable extremity collapse.", "confidence": 0.95, "signal_category": "peripheral_or_background_structural_collapse"}}
 </Example>
 <Example>
-{{"step_1_edge_and_background_scan": "12 faces in dinner scene each show identical illumination intensity regardless of distance from string lights.", "step_2_physics_and_boundary_scan": "No boundary fusion; light direction internally consistent but mismatched to candid context.", "visual_scan": "Three diffusion fingerprints co-occur: uniform group lighting, casual-context magazine polish, mirrored arm pose.", "confidence": 0.82, "signal_category": "multiple_subtle_ai_artifacts_present"}}
+{{"step_1_edge_and_background_scan": "12 faces in dinner scene each show identical illumination intensity regardless of distance from string lights.", "step_2_physics_and_boundary_scan": "No boundary fusion; light direction internally consistent but mismatched to candid context.", "visual_scan": "Multiple diffusion fingerprints co-occur: uniform group lighting, casual-context magazine polish, and mirrored arm poses.", "confidence": 0.82, "signal_category": "multiple_subtle_ai_artifacts_present"}}
 </Example>
 <Example>
 {{"step_1_edge_and_background_scan": "Background bokeh uniform; no extremities or secondary subjects to evaluate.", "step_2_physics_and_boundary_scan": "Subject lighting hyper-uniform with no harsh side-shadow or under-eye asymmetry; no nameable freckle/mole/scar can be located on the face; striped shirt geometry consistent.", "visual_scan": "Casual outdoor portrait with magazine-level skin polish and no nameable organic asymmetry — fingerprint (d) 'too perfect' mismatch.", "confidence": 0.78, "signal_category": "multiple_subtle_ai_artifacts_present"}}
