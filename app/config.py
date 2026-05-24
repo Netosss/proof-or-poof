@@ -394,7 +394,22 @@ class Settings(BaseSettings):
             "confidence across AI voters becomes the final score. 0.7 matches "
             "the architect's recommendation — high enough that one noisy false "
             "alarm cannot poison the verdict, low enough that any genuinely "
-            "confident accuser wins."
+            "confident accuser wins. Also triggers race-to-AI early-exit: the "
+            "FIRST voter whose confidence crosses this threshold returns the "
+            "verdict and cancels the still-pending voters."
+        ),
+    )
+    ensemble_voter_timeout_s: float = Field(
+        7.0,
+        description=(
+            "Per-voter hard timeout for the ensemble engine. 7s is the empirical "
+            "sweet spot — too low (5s) cuts off the anatomy/composition voters "
+            "right when they finally vote AI on harder cases (e.g. the bibi "
+            "portrait where anatomy returns 0.95 at ~4.6s, with some variance "
+            "pushing it past 5s). 7s lets those late-but-correct AI votes land "
+            "while still capping REAL-image wall-clock at 7s. Early-exit on the "
+            "easy cases is unaffected — CNN typically fires in <200ms when it "
+            "fires."
         ),
     )
     detection_v2_timeout_s: float = Field(

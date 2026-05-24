@@ -144,10 +144,17 @@ async def analyze_image_ensemble_async(
     pre_calculated_quality_context: str | None = None,
 ) -> dict:
     """
-    Run all ensemble voters in parallel. Returns the same dict shape used by v1/v2.
+    Run all ensemble voters in parallel with RACE-TO-AI early-exit.
+
+    As soon as any single voter reports confidence > settings.ensemble_ai_threshold,
+    cancel the still-pending voters and return AI immediately. For images where
+    no voter ever crosses the threshold (true REAL images), wait for all voters
+    up to settings.ensemble_voter_timeout_s and combine via asymmetric vote.
+
+    This trades a small amount of accuracy on borderline-suspicious cases
+    (where a second voter might have pushed the score higher) for a large
+    latency win on the AI cases that matter most.
     """
-    # Compute quality_context once (cheap) so all three Gemini sub-calls
-    # share it without duplicating the work.
     quality_score = 0
     if pre_calculated_quality_context:
         quality_context = pre_calculated_quality_context
@@ -162,17 +169,69 @@ async def analyze_image_ensemble_async(
             quality_context = "**CONTEXT: QUALITY UNKNOWN.**"
 
     t0 = time.perf_counter()
+    timeout_s = settings.ensemble_voter_timeout_s
+    threshold = settings.ensemble_ai_threshold
+
+    async def _bounded(coro, label: str) -> dict:
+        try:
+            return await asyncio.wait_for(coro, timeout=timeout_s)
+        except asyncio.TimeoutError:
+            return {
+                "label": label, "confidence": -1.0,
+                "signal_category": "no_visual_anomalies_detected",
+                "findings": f"(timeout after {timeout_s}s)",
+                "duration_ms": int(timeout_s * 1000), "ok": False,
+            }
 
     voter_tasks = [
-        _run_gemini_subcall(image_source, get_anatomy_prompt(quality_context),     "anatomy",     quality_context),
-        _run_gemini_subcall(image_source, get_physics_prompt(quality_context),     "physics",     quality_context),
-        _run_gemini_subcall(image_source, get_composition_prompt(quality_context), "composition", quality_context),
-        _run_cnn(image_source),
+        asyncio.create_task(_bounded(_run_gemini_subcall(image_source, get_anatomy_prompt(quality_context),     "anatomy",     quality_context), "anatomy")),
+        asyncio.create_task(_bounded(_run_gemini_subcall(image_source, get_physics_prompt(quality_context),     "physics",     quality_context), "physics")),
+        asyncio.create_task(_bounded(_run_gemini_subcall(image_source, get_composition_prompt(quality_context), "composition", quality_context), "composition")),
+        asyncio.create_task(_bounded(_run_cnn(image_source), "cnn")),
     ]
-    voters = await asyncio.gather(*voter_tasks, return_exceptions=False)
-    total_ms = round((time.perf_counter() - t0) * 1000)
 
+    completed: list[dict] = []
+    early_exit = False
+    for finished in asyncio.as_completed(voter_tasks):
+        result = await finished
+        completed.append(result)
+        if result.get("ok") and result.get("confidence", -1.0) > threshold:
+            early_exit = True
+            # Cancel the still-pending voters; collect whatever they emit
+            # by the time the cancellation propagates (best-effort, doesn't
+            # block the verdict).
+            for t in voter_tasks:
+                if not t.done():
+                    t.cancel()
+            break
+
+    # Drain any voters that finished between the last as_completed yield and
+    # the cancel — so we have the most complete diagnostic record possible.
+    for t in voter_tasks:
+        if t.done() and not t.cancelled():
+            try:
+                r = t.result()
+                if r not in completed:
+                    completed.append(r)
+            except Exception:
+                pass
+
+    # Fill in placeholders for any voter that never reported (cancelled), so
+    # the diagnostic record always lists all four labels.
+    reported_labels = {v["label"] for v in completed}
+    for label in ("anatomy", "physics", "composition", "cnn"):
+        if label not in reported_labels:
+            completed.append({
+                "label": label, "confidence": -1.0,
+                "signal_category": "no_visual_anomalies_detected",
+                "findings": "(cancelled by race-to-AI early exit)",
+                "duration_ms": 0, "ok": False,
+            })
+
+    voters = completed
+    total_ms = round((time.perf_counter() - t0) * 1000)
     verdict = _asymmetric_vote(voters)
+    verdict["early_exit"] = early_exit
     legacy_category = V2_TO_LEGACY_CATEGORY.get(
         verdict["signal_category"], "multiple_subtle_ai_artifacts_present"
     )
@@ -182,6 +241,7 @@ async def analyze_image_ensemble_async(
         "wall_clock_ms": total_ms,
         "confidence": verdict["confidence"],
         "signal_category": verdict["signal_category"],
+        "early_exit": early_exit,
         "voters": [
             {"label": v["label"], "confidence": v["confidence"],
              "ok": v["ok"], "duration_ms": v["duration_ms"]}
@@ -212,16 +272,21 @@ def analyze_image_ensemble(
     pre_calculated_quality_context: str | None = None,
 ) -> dict:
     """
-    Sync wrapper so the existing image_detector dispatch (which uses
-    asyncio.to_thread on a sync analyzer) keeps working without modification.
-    Internally runs the parallel async ensemble via asyncio.run.
+    Sync wrapper for eval scripts / CLI use. The FastAPI path bypasses this
+    and awaits `analyze_image_ensemble_async` directly so cancellations
+    propagate without waiting for in-flight Gemini threads.
+
+    Critical: when an outer event loop is running (we're on a worker thread
+    spawned by asyncio.to_thread from a request handler), we create a fresh
+    loop, run the ensemble, and then SHUTDOWN THE DEFAULT EXECUTOR WITH
+    timeout=0 before closing. Without timeout=0, loop.close() blocks until
+    every Gemini HTTP call in the new loop's thread pool returns — which
+    defeats the entire race-to-AI early exit (those abandoned calls can take
+    10+ seconds each).
     """
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            # Caller is already in an event loop (FastAPI request handler going
-            # through asyncio.to_thread). We're now on a worker thread — make
-            # a fresh loop to run the gather().
             new_loop = asyncio.new_event_loop()
             try:
                 return new_loop.run_until_complete(
@@ -230,6 +295,13 @@ def analyze_image_ensemble(
                     )
                 )
             finally:
+                try:
+                    # Don't block on abandoned Gemini threads from cancelled voters.
+                    new_loop.run_until_complete(
+                        new_loop.shutdown_default_executor(timeout=0.0)
+                    )
+                except Exception:
+                    pass
                 new_loop.close()
     except RuntimeError:
         pass

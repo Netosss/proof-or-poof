@@ -470,11 +470,23 @@ async def detect_ai_media_image_logic(
             "error_type": type(e).__name__,
         })
 
-    analyzer = _select_analyzer()
-    gemini_res = await asyncio.to_thread(
-        analyzer, source_for_gemini,
-        pre_calculated_quality_context=pre_calc_context
-    )
+    if settings.detection_engine == "ensemble":
+        # Native-async — the ensemble fan-out is asyncio-native (gather + race),
+        # so wrapping it in asyncio.to_thread would create a nested event loop
+        # whose close() blocks waiting for abandoned Gemini threads. Awaiting
+        # directly lets cancellations propagate immediately and respects the
+        # race-to-AI early-exit latency budget.
+        from app.detection.ensemble_engine import analyze_image_ensemble_async
+        gemini_res = await analyze_image_ensemble_async(
+            source_for_gemini,
+            pre_calculated_quality_context=pre_calc_context,
+        )
+    else:
+        analyzer = _select_analyzer()
+        gemini_res = await asyncio.to_thread(
+            analyzer, source_for_gemini,
+            pre_calculated_quality_context=pre_calc_context
+        )
     logger.info("gemini_response", extra={
         "action": "gemini_response",
         "confidence": gemini_res.get("confidence"),
