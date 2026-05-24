@@ -4,16 +4,25 @@ Ensemble Gemini sub-call helper.
 Each sub-call sends the image with a SINGLE specialised system prompt
 (anatomy / physics / composition) and returns an EnsembleSubResult. The
 orchestrator (app/detection/ensemble_engine.py) fans these out in parallel
-alongside the CNN detector and applies asymmetric voting.
+and applies asymmetric voting.
 
-Reuses v1's preprocessing primitives (`_resize_if_needed`, jpeg encode, the
-shared `client`) so we don't duplicate image-handling logic. Deterministic-
-decoding settings (temperature / top_k / top_p / thinking_level / model)
-also reuse the v2 conventions.
+**Native-async path**: this module uses `client.aio.models.generate_content`,
+not the sync `client.models.generate_content` wrapped in `asyncio.to_thread`.
+The reason: race-to-AI cancellation needs to propagate to the underlying
+HTTP socket. With the sync-in-a-thread pattern, `t.cancel()` cancels the
+asyncio Task but the OS thread keeps running until the HTTP round-trip
+completes, leaking thread-pool capacity and burning the 30-slot pool we
+set in main.py lifespan under concurrent load. With `client.aio` the
+cancellation propagates to the aiohttp/httpx socket directly.
+
+Image preprocessing (resize, JPEG encode) still runs synchronously — it's
+CPU-bound and fast (≤30ms) so threading it adds overhead without benefit.
+We do it inline on the event loop.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Optional, Union
@@ -68,14 +77,16 @@ def _encode_image_for_gemini(image_source: Union[str, Image.Image, bytes]) -> by
                 pass
 
 
-def analyze_with_prompt(
+async def analyze_with_prompt(
     image_source: Union[str, Image.Image, bytes],
     system_prompt: str,
     label: str,
     pre_calculated_quality_context: Optional[str] = None,
 ) -> dict:
     """
-    Single Gemini sub-call for the ensemble.
+    Single Gemini sub-call for the ensemble. Async-native — uses `client.aio`
+    so cancellation propagates to the HTTP socket cleanly (race-to-AI
+    cancels reach the wire, not just the asyncio Task).
 
     Returns:
         {
@@ -83,12 +94,17 @@ def analyze_with_prompt(
           "confidence": float | -1.0 on error,
           "signal_category": str,
           "findings": str,
+          "region_anchor": str,
           "duration_ms": int,
           "ok": bool,
         }
 
     Never raises — surface errors via `ok=False` so the ensemble orchestrator
-    can apply asymmetric voting across whatever voters did respond.
+    can apply asymmetric voting across whatever voters did respond. The one
+    exception we DO let propagate is `asyncio.CancelledError`: when
+    race-to-AI cancels this voter, the exception must propagate so the inner
+    `await` unwinds and the underlying HTTP socket actually closes — catching
+    it would leak the in-flight request.
     """
     try:
         if pre_calculated_quality_context is None:
@@ -106,7 +122,12 @@ def analyze_with_prompt(
         config = _build_ensemble_config(system_prompt)
 
         t0 = time.perf_counter()
-        response = client.models.generate_content(
+        # Native-async path — client.aio.models is the Google GenAI SDK's
+        # async client surface. Importantly, awaiting it yields the event loop
+        # back to the orchestrator's race-to-AI loop; a subsequent .cancel()
+        # of this Task closes the underlying HTTP socket, not leaving a
+        # ghost thread.
+        response = await client.aio.models.generate_content(
             model=settings.gemini_model,
             contents=[
                 types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
@@ -170,6 +191,11 @@ def analyze_with_prompt(
             "duration_ms": duration_ms,
             "ok": True,
         }
+    except asyncio.CancelledError:
+        # Race-to-AI cancellation — let it propagate so the inner await unwinds
+        # and the underlying HTTP socket closes. Catching this would leak
+        # in-flight Gemini requests after early-exit fires.
+        raise
     except Exception as exc:
         # Distinguish transient API failures (genuine reason to abstain) from
         # programming errors (schema/import/code bugs that should be loud).

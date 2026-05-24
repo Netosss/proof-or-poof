@@ -50,16 +50,13 @@ async def _run_gemini_subcall(
     quality_context: str,
 ) -> dict:
     """
-    Wraps the sync Gemini sub-call in to_thread so it can join the gather().
-    The returned voter dict carries the RAW v2-macro signal_category from the
-    model. Downstream consumers (the eval harness, debug logs) can read
-    voter["signal_category"] without needing to know about the legacy mapping,
-    which is only applied to the final aggregated verdict in _asymmetric_vote.
+    Awaits the async Gemini sub-call directly (no asyncio.to_thread). Lets
+    race-to-AI cancellation propagate to the HTTP socket — no ghost threads
+    from cancelled voters. The returned voter dict carries the RAW v2-macro
+    signal_category from the model; the legacy mapping is applied only to
+    the final aggregated verdict in _asymmetric_vote.
     """
-    return await asyncio.to_thread(
-        analyze_with_prompt,
-        image_source, system_prompt, label, quality_context,
-    )
+    return await analyze_with_prompt(image_source, system_prompt, label, quality_context)
 
 
 def _asymmetric_vote(voters: list[dict]) -> dict:
@@ -189,6 +186,11 @@ async def analyze_image_ensemble_async(
                 "findings": f"(timeout after {timeout_s}s)",
                 "duration_ms": int(timeout_s * 1000), "ok": False,
             }
+        # NOTE: asyncio.CancelledError is intentionally NOT caught here. When
+        # race-to-AI cancels this voter, the exception must propagate up
+        # through the analyze_with_prompt async stack so the client.aio HTTP
+        # socket closes cleanly. The caller (`as_completed` loop below)
+        # drains the resulting cancelled Tasks via gather(..., return_exceptions=True).
 
     # N-parallel anatomy calls use Gemini's non-determinism constructively:
     # on hard cases where a single call has ~33% catch rate, racing 3 in
@@ -213,18 +215,28 @@ async def analyze_image_ensemble_async(
 
     completed: list[dict] = []
     early_exit = False
+    pending_to_drain: list[asyncio.Task[dict]] = []
     for finished in asyncio.as_completed(voter_tasks):
         result = await finished
         completed.append(result)
         if result.get("ok") and result.get("confidence", -1.0) > threshold:
             early_exit = True
-            # Cancel the still-pending voters; collect whatever they emit
-            # by the time the cancellation propagates (best-effort, doesn't
-            # block the verdict).
+            # Cancel still-pending voters. Track them so we can drain their
+            # CancelledError cleanly below — otherwise Python emits
+            # "Task was destroyed but it is pending!" warnings and the
+            # CancelledError tracebacks pollute logs.
             for t in voter_tasks:
                 if not t.done():
                     t.cancel()
+                    pending_to_drain.append(t)
             break
+
+    # Await the cancelled tasks so each CancelledError is consumed by the
+    # gather instead of being raised as an unhandled coroutine exception.
+    # return_exceptions=True so a CancelledError from one task doesn't
+    # crash the others' awaits.
+    if pending_to_drain:
+        await asyncio.gather(*pending_to_drain, return_exceptions=True)
 
     # Drain any voters that finished between the last as_completed yield and
     # the cancel — so we have the most complete diagnostic record possible.
