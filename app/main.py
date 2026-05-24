@@ -77,24 +77,6 @@ async def lifespan(app: FastAPI):
         )
         raise
 
-    # Warm-load the ensemble CNN classifier so the first user request doesn't
-    # pay the ~7.7s cold-start tax (model weights + processor). Only triggers
-    # if the engine is configured to use the ensemble — otherwise it's wasted
-    # memory. Run in a worker thread so we don't block the event loop. Failure
-    # is non-fatal: the CNN voter will just abstain at request time.
-    if settings.detection_engine == "ensemble":
-        try:
-            from app.detection import cnn_detector as _cnn
-            await asyncio.to_thread(_cnn._load)
-            logger.info("ensemble_cnn_warm_loaded", extra={
-                "action": "ensemble_cnn_warm_loaded",
-            })
-        except Exception as cnn_exc:
-            logger.warning("ensemble_cnn_warmup_failed", extra={
-                "action": "ensemble_cnn_warmup_failed",
-                "error": str(cnn_exc),
-            })
-
     logger.info(
         "startup_complete",
         extra={

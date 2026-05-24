@@ -26,7 +26,6 @@ from typing import Union
 from PIL import Image
 
 from app.config import settings
-from app.detection import cnn_detector
 from app.integrations.gemini.client_ensemble import analyze_with_prompt
 from app.integrations.gemini.prompts_ensemble import (
     get_anatomy_prompt,
@@ -43,38 +42,6 @@ def _label_for_findings(findings: str) -> str:
     """Trim a sub-call findings string into a 1-line label for the verdict scan."""
     txt = findings.strip().replace("\n", " ")
     return (txt[:200] + "…") if len(txt) > 200 else txt
-
-
-async def _run_cnn(image_source: Union[str, Image.Image]) -> dict:
-    """Run the CNN detector in a worker thread. Returns the same shape as a Gemini sub-call."""
-    t0 = time.perf_counter()
-    try:
-        prob = await asyncio.to_thread(cnn_detector.predict_ai_probability, image_source)
-        duration_ms = round((time.perf_counter() - t0) * 1000)
-        if prob is None:
-            return {
-                "label": "cnn", "confidence": -1.0,
-                "signal_category": "no_visual_anomalies_detected",
-                "findings": "(CNN unavailable or inference failed)",
-                "duration_ms": duration_ms, "ok": False,
-            }
-        return {
-            "label": "cnn", "confidence": float(prob),
-            "signal_category": (
-                "multiple_subtle_ai_artifacts_present" if prob > 0.5
-                else "no_visual_anomalies_detected"
-            ),
-            "findings": f"CNN AI-probability {prob:.2f}",
-            "duration_ms": duration_ms, "ok": True,
-        }
-    except Exception as exc:
-        return {
-            "label": "cnn", "confidence": -1.0,
-            "signal_category": "no_visual_anomalies_detected",
-            "findings": f"(error: {type(exc).__name__})",
-            "duration_ms": round((time.perf_counter() - t0) * 1000),
-            "ok": False,
-        }
 
 
 async def _run_gemini_subcall(
@@ -187,7 +154,6 @@ async def analyze_image_ensemble_async(
         asyncio.create_task(_bounded(_run_gemini_subcall(image_source, get_anatomy_prompt(quality_context),     "anatomy",     quality_context), "anatomy")),
         asyncio.create_task(_bounded(_run_gemini_subcall(image_source, get_physics_prompt(quality_context),     "physics",     quality_context), "physics")),
         asyncio.create_task(_bounded(_run_gemini_subcall(image_source, get_composition_prompt(quality_context), "composition", quality_context), "composition")),
-        asyncio.create_task(_bounded(_run_cnn(image_source), "cnn")),
     ]
 
     completed: list[dict] = []
@@ -217,9 +183,9 @@ async def analyze_image_ensemble_async(
                 pass
 
     # Fill in placeholders for any voter that never reported (cancelled), so
-    # the diagnostic record always lists all four labels.
+    # the diagnostic record always lists all three labels.
     reported_labels = {v["label"] for v in completed}
-    for label in ("anatomy", "physics", "composition", "cnn"):
+    for label in ("anatomy", "physics", "composition"):
         if label not in reported_labels:
             completed.append({
                 "label": label, "confidence": -1.0,
