@@ -150,11 +150,26 @@ async def analyze_image_ensemble_async(
                 "duration_ms": int(timeout_s * 1000), "ok": False,
             }
 
-    voter_tasks = [
-        asyncio.create_task(_bounded(_run_gemini_subcall(image_source, get_anatomy_prompt(quality_context),     "anatomy",     quality_context), "anatomy")),
-        asyncio.create_task(_bounded(_run_gemini_subcall(image_source, get_physics_prompt(quality_context),     "physics",     quality_context), "physics")),
-        asyncio.create_task(_bounded(_run_gemini_subcall(image_source, get_composition_prompt(quality_context), "composition", quality_context), "composition")),
-    ]
+    # N-parallel anatomy calls use Gemini's non-determinism constructively:
+    # on hard cases where a single call has ~33% catch rate, racing 3 in
+    # parallel raises the effective catch rate to ~70%. Race-to-AI still
+    # applies — the first to cross threshold cancels the rest.
+    anatomy_n = max(1, settings.ensemble_anatomy_parallel_calls)
+    voter_tasks: list = []
+    for i in range(anatomy_n):
+        label = f"anatomy_{i + 1}" if anatomy_n > 1 else "anatomy"
+        voter_tasks.append(asyncio.create_task(_bounded(
+            _run_gemini_subcall(image_source, get_anatomy_prompt(quality_context), label, quality_context),
+            label,
+        )))
+    voter_tasks.append(asyncio.create_task(_bounded(
+        _run_gemini_subcall(image_source, get_physics_prompt(quality_context), "physics", quality_context),
+        "physics",
+    )))
+    voter_tasks.append(asyncio.create_task(_bounded(
+        _run_gemini_subcall(image_source, get_composition_prompt(quality_context), "composition", quality_context),
+        "composition",
+    )))
 
     completed: list[dict] = []
     early_exit = False
@@ -183,9 +198,15 @@ async def analyze_image_ensemble_async(
                 pass
 
     # Fill in placeholders for any voter that never reported (cancelled), so
-    # the diagnostic record always lists all three labels.
+    # the diagnostic record always lists every expected voter label.
     reported_labels = {v["label"] for v in completed}
-    for label in ("anatomy", "physics", "composition"):
+    expected_labels: list[str] = []
+    if anatomy_n > 1:
+        expected_labels.extend(f"anatomy_{i + 1}" for i in range(anatomy_n))
+    else:
+        expected_labels.append("anatomy")
+    expected_labels.extend(("physics", "composition"))
+    for label in expected_labels:
         if label not in reported_labels:
             completed.append({
                 "label": label, "confidence": -1.0,

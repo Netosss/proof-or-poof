@@ -407,9 +407,23 @@ class Settings(BaseSettings):
             "right when they finally vote AI on harder cases (e.g. the bibi "
             "portrait where anatomy returns 0.95 at ~4.6s, with some variance "
             "pushing it past 5s). 7s lets those late-but-correct AI votes land "
-            "while still capping REAL-image wall-clock at 7s. Early-exit on the "
-            "easy cases is unaffected — CNN typically fires in <200ms when it "
-            "fires."
+            "while still capping REAL-image wall-clock at 7s."
+        ),
+    )
+    ensemble_anatomy_parallel_calls: int = Field(
+        1,
+        description=(
+            "Number of anatomy-voter calls to run IN PARALLEL. The intuition was "
+            "that Gemini's non-determinism could be used constructively — N "
+            "parallel calls of the same prompt raise the effective catch rate "
+            "as long as the per-call rate is meaningfully non-zero. Empirically, "
+            "on the resistant gym-selfie case the per-call catch rate is ~5% "
+            "(the one 0.92 hit we celebrated was an outlier, not a 33% "
+            "distribution), so 3× parallel still gives 0/3 on subsequent runs. "
+            "Default 1 (one call per voter). Bump to 2–3 only for an image "
+            "class where you've empirically measured the variance and confirmed "
+            "the catch rate is >20%. Race-to-AI still applies, so the cost is "
+            "only paid when no voter early-exits."
         ),
     )
     detection_v2_timeout_s: float = Field(
