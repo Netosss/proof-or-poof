@@ -386,28 +386,52 @@ class Settings(BaseSettings):
             "single call). Default 'v1' until ensemble passes its eval gate."
         ),
     )
+    ensemble_high_conviction_threshold: float = Field(
+        0.85,
+        description=(
+            "Single-voter HIGH-CONVICTION threshold. Any single voter whose "
+            "confidence crosses this triggers an AI verdict immediately and "
+            "cancels the remaining voters via race-to-AI. Reserved for "
+            "unambiguous calls — e.g. a clearly demonic background face."
+        ),
+    )
+    ensemble_quorum_threshold: float = Field(
+        0.55,
+        description=(
+            "Per-voter quorum threshold. An AI verdict ALSO fires when at least "
+            "ensemble_quorum_min_voters voters independently report confidence "
+            "above this value (typical case: two of three Gemini voters each "
+            "find a soft signal). Prevents a single noisy 0.7 voter from "
+            "outvoting two voters who saw nothing."
+        ),
+    )
+    ensemble_quorum_min_voters: int = Field(
+        2,
+        description=(
+            "Minimum number of voters that must independently report confidence "
+            "≥ ensemble_quorum_threshold for a quorum-driven AI verdict."
+        ),
+    )
+    # Legacy field — retained for read-back compatibility only. Effective
+    # gating now uses ensemble_high_conviction_threshold + quorum settings.
     ensemble_ai_threshold: float = Field(
         0.7,
         description=(
-            "Confidence threshold above which a single ensemble voter (Gemini "
-            "sub-call OR CNN classifier) flips the verdict to AI. The MAX "
-            "confidence across AI voters becomes the final score. 0.7 matches "
-            "the architect's recommendation — high enough that one noisy false "
-            "alarm cannot poison the verdict, low enough that any genuinely "
-            "confident accuser wins. Also triggers race-to-AI early-exit: the "
-            "FIRST voter whose confidence crosses this threshold returns the "
-            "verdict and cancels the still-pending voters."
+            "Deprecated legacy gate (kept for any tooling that reads it). The "
+            "active vote rule uses ensemble_high_conviction_threshold (0.85) "
+            "and the 2-of-3 quorum at ensemble_quorum_threshold (0.55). Do not "
+            "key new logic off this field."
         ),
     )
     ensemble_voter_timeout_s: float = Field(
-        7.0,
+        10.0,
         description=(
-            "Per-voter hard timeout for the ensemble engine. 7s is the empirical "
-            "sweet spot — too low (5s) cuts off the anatomy/composition voters "
-            "right when they finally vote AI on harder cases (e.g. the bibi "
-            "portrait where anatomy returns 0.95 at ~4.6s, with some variance "
-            "pushing it past 5s). 7s lets those late-but-correct AI votes land "
-            "while still capping REAL-image wall-clock at 7s."
+            "Per-voter hard timeout for the ensemble engine. 10s gives "
+            "slow-but-correct voters room to finish — empirically anatomy "
+            "returns 0.95 on bibi at ~4.6s with run-to-run variance occasionally "
+            "pushing past 7s. Race-to-AI keeps wall-clock down on AI cases "
+            "(typical early-exit ~1.6s), so the 10s cap only bites on REAL "
+            "cases where every voter actually runs to completion."
         ),
     )
     ensemble_anatomy_parallel_calls: int = Field(

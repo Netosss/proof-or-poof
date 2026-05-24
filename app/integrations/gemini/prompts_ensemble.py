@@ -11,9 +11,17 @@ signal_category }. Use the same temperature/top_k/top_p as v2 (0.5/0/0 by defaul
 """
 
 
-_BASE_GUARDS = """<AntiAnchoring>
-A photorealistic, polished image is NOT evidence of authenticity. Cinematic lighting, smooth skin, dappled outdoor light, golden-hour mood, and clean composition are all AI defaults. Do not confabulate authenticity evidence. Phrases like "natural micro-textures", "authentic skin texture", "asymmetric vascularity", "natural lens flare", "consistent atmospheric perspective" are BANNED unless you can point to a SPECIFIC, NAMED region with verifiable detail (e.g. "freckle at left temple", "lens-dust speck near upper-left corner").
-</AntiAnchoring>
+_BASE_GUARDS = """<AnchoredEvidenceRule>
+Every claim in `findings` MUST be anchored to a specific, named image region — populate `region_anchor` with that region (e.g. "subject's right armpit", "upper-left corner", "background near the AC unit"). For an AI verdict (confidence >= 0.5), `region_anchor` MUST NOT be "none" — if you cannot name a region, you cannot flag AI. Use `region_anchor` = "none" ONLY when the image appears authentic.
+</AnchoredEvidenceRule>
+
+<StudioException>
+Professional corporate portraits and studio headshots heavily utilize airbrushing, teeth whitening, symmetrical ring-light catchlights, retouched skin, retouched ears, retouched collar/shirt seams, and seamless solid-color paper backdrops (gray/white/blue voids). These are ALL standard professional photography post-production. NEVER flag a studio headshot for: smooth skin, perfect teeth, symmetric catchlights, seamless backdrop, retouched ears, retouched collar lines. To flag a studio headshot as AI you MUST find a hard structural anatomy failure (extra/missing finger, jointless hand, demonic background face) — NOT a smoothing/retouching artifact.
+</StudioException>
+
+<LandmarkSignageException>
+Distant landmark signage — most importantly the HOLLYWOOD SIGN viewed from any LA hillside — naturally shows letter separation, partial occlusion by terrain, perspective distortion that makes "HOLLYWOOD" appear as "HOLLWOO D" or similar. This is photographic geometry, NOT AI gibberish. NEVER flag the Hollywood sign as melted/morphed/gibberish text under any circumstance. The same applies to any famous distant landmark with separated letters (Mount Rushmore, Welcome-to signage at distance, etc.).
+</LandmarkSignageException>
 
 <StrictLiability>
 Do NOT excuse structural failures as "depth of field", "motion blur", or "compression". Real optical blur obscures details but does NOT fuse separate objects, melt fingers into cups, create flat skin webbing at armpits, or turn background faces into demonic blobs. Flag structural failures at ANY quality level.
@@ -21,7 +29,13 @@ Do NOT excuse structural failures as "depth of field", "motion blur", or "compre
 
 
 _OUTPUT_SCHEMA = """<OutputFormat>
-Return ONLY valid JSON: {{ "findings": "<≤40 words, anchored to a region>", "confidence": <0.0–1.0>, "signal_category": "<exactly one from allowed list>" }}.
+Return ONLY valid JSON with all four fields:
+{{
+  "findings": "<≤40 words; describe the strongest signal>",
+  "region_anchor": "<specific named region OR 'none' only for authentic images>",
+  "confidence": <0.0–1.0>,
+  "signal_category": "<exactly one from the allowed list>"
+}}
 
 ALLOWED signal_category values:
   "peripheral_or_background_structural_collapse"
@@ -84,9 +98,14 @@ Ignore: hands, fingers, in-scene text content, background face shapes. Those are
 
 
 def get_composition_prompt(quality_context: str) -> str:
-    """Composition + periphery forensic prompt. Ignores anatomy and lighting."""
+    """
+    Composition forensic prompt — narrowly scoped to in-scene TEXT, REPETITION,
+    and WATERMARK detection. Background human anatomy is owned by the anatomy
+    voter; light/shadow/falloff is owned by the physics voter. Composition
+    must not duplicate either.
+    """
     return f"""<Persona>
-You are a forensic AI investigator focused EXCLUSIVELY on background coherence, distant subjects, in-scene text, and overall compositional sycophancy. You do NOT evaluate anatomy, lighting, or physics — those are out of scope for this pass.
+You are a forensic AI investigator focused EXCLUSIVELY on in-scene text, repetition/cloning patterns, and watermark detection. You do NOT evaluate human anatomy, hands, faces (background or foreground), lighting, shadows, or physics — those are out of scope for this pass.
 </Persona>
 
 <DynamicContext>{quality_context}</DynamicContext>
@@ -94,13 +113,20 @@ You are a forensic AI investigator focused EXCLUSIVELY on background coherence, 
 {_BASE_GUARDS}
 
 <FocusedRule>
-BYPASS the highly detailed foreground. Scan the DEEPEST background only:
-  • Distant faces in a crowd — are they structurally undefined / demonic / shapeless blobs? "Low resolution" does NOT explain a face that lacks the BOUNDARY between head and hair. Flag if undefined.
-  • Background objects — bags without zippers/straps, books with melted spines and gibberish titles, equipment without articulation, floating geometric artifacts
-  • Repetition / near-identical cloned elements (two identical faces in a crowd, brick patterns following a tile)
-  • IN-SCENE TEXT ONLY (menus, walls, in-scene signs, clothing) — flag melted/morphed letter shapes OR gibberish-content readable text. NEVER flag: social handles (@billy_boman), platform watermarks (Fiverr/Getty/Shutterstock/Instagram/TikTok — these are AUTHENTICITY MARKERS), distant landmark signage where perspective causes letter separation (e.g. Hollywood sign), typos, future dates
-  • "Too perfect" composition mismatch — a CASUAL context (gym selfie, backyard party, locker selfie, family snapshot) rendered with magazine-level polish (no blink, no half-occlusion, no flyaways, no nameable organic asymmetry on any visible person)
-Ignore: lighting physics, hand anatomy. Those are handled by other passes.
+1. IN-SCENE TEXT — Strict exclusions FIRST. NEVER flag:
+   • Social-media handles, usernames, hashtags (e.g. "@billy_boman", "#summer2024") — these are overlays
+   • Platform watermarks (Fiverr / Getty / Shutterstock / Instagram / TikTok / Adobe) — STRONG AUTHENTICITY MARKERS, not AI evidence
+   • Brand logos, product names, captions, banners, app-added text
+   • Distant landmark signage where perspective distorts letter spacing (e.g. the Hollywood sign viewed from any LA hillside)
+   • Typos, future dates, decorative fonts
+   AFTER exclusions, flag in-scene text (menus, walls, in-scene signs, clothing) ONLY if (a) letter SHAPES are visibly MELTED / MORPHED / FUSED in ways no real font produces, OR (b) characters are readable but content is MEANINGLESS in context (gibberish menu items, incoherent native-language phrases on a wall).
+   Note: any visible small "AI tool" / sparkle / generator glyph in a corner is a Rule-1-style watermark hit — flag, but call it a watermark, not gibberish text.
+
+2. REPETITION / CLONING — flag near-identical duplicated elements: two faces with identical features in a crowd, brick patterns following a visible tile grid, identical tree branches, mirror-symmetric crowd composition.
+
+3. WATERMARK / PROVENANCE — visible "Generated by AI", DALL·E rainbow strip, CR icon, Midjourney/Sora/Adobe Firefly badge → flag with very high confidence. Visible platform watermark (Fiverr/Getty/Shutterstock/Instagram/TikTok) → STRONG AUTHENTICITY MARKER, push confidence LOW.
+
+Ignore everything else: human anatomy, lighting, shadows, depth-of-field, fabric, skin, eyes, ears, muscle insertions, group lighting uniformity, magazine polish. Those belong to anatomy and physics voters.
 </FocusedRule>
 
 {_OUTPUT_SCHEMA}

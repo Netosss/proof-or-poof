@@ -129,18 +129,44 @@ def analyze_with_prompt(
                 "duration_ms": duration_ms, "ok": False,
             }
 
+        # Structural anti-anchoring enforcement: an AI verdict (confidence
+        # >= 0.5) MUST cite a specific named region. If the model emitted an
+        # AI confidence but left region_anchor == "none" / "" / etc., it
+        # confabulated — coerce the verdict to REAL with confidence 0.0 and
+        # log so we can track how often this happens. Real catches always
+        # have an anchor; FPs are the case where the model can't name a region.
+        anchor = (parsed.region_anchor or "").strip().lower()
+        unanchored = anchor in ("", "none", "n/a", "na")
+        if parsed.confidence >= 0.5 and unanchored:
+            logger.info("ensemble_subcall_unanchored_ai_demoted", extra={
+                "action": "ensemble_subcall_unanchored_ai_demoted",
+                "label": label,
+                "original_confidence": parsed.confidence,
+                "original_signal_category": parsed.signal_category,
+                "findings": parsed.findings,
+            })
+            confidence_out = 0.0
+            signal_out = "no_visual_anomalies_detected"
+            findings_out = f"[demoted: AI claim without region anchor] {parsed.findings}"
+        else:
+            confidence_out = float(parsed.confidence)
+            signal_out = parsed.signal_category
+            findings_out = parsed.findings
+
         logger.info("ensemble_subcall_completed", extra={
             "action": "ensemble_subcall_completed",
             "label": label,
             "duration_ms": duration_ms,
-            "confidence": parsed.confidence,
-            "signal_category": parsed.signal_category,
+            "confidence": confidence_out,
+            "signal_category": signal_out,
+            "region_anchor": parsed.region_anchor,
         })
         return {
             "label": label,
-            "confidence": float(parsed.confidence),
-            "signal_category": parsed.signal_category,
-            "findings": parsed.findings,
+            "confidence": confidence_out,
+            "signal_category": signal_out,
+            "findings": findings_out,
+            "region_anchor": parsed.region_anchor,
             "duration_ms": duration_ms,
             "ok": True,
         }

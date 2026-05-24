@@ -64,14 +64,22 @@ async def _run_gemini_subcall(
 
 def _asymmetric_vote(voters: list[dict]) -> dict:
     """
-    Combine voter results into a single verdict.
+    Combine voter results into a single verdict using two-rule AI gating:
 
-    Rule: any voter (Gemini or CNN) with confidence > settings.ensemble_ai_threshold
-    flips the verdict to AI. The winning confidence is the MAX across AI voters
-    (the most confident accuser wins). If no voter clears the threshold, return
-    REAL with the MEAN confidence across responding voters.
+      1. HIGH-CONVICTION: any single voter at >= ensemble_high_conviction_threshold
+         (default 0.85) flips AI immediately. The winning confidence is that
+         voter's confidence; the signal_category and findings come from the
+         most-confident accuser.
+      2. QUORUM: at least ensemble_quorum_min_voters (default 2) voters must
+         independently report confidence >= ensemble_quorum_threshold
+         (default 0.55) — i.e. multiple specialists agree on a soft signal.
+         The verdict's confidence is the MEAN of the quorum voters (not the
+         max, because the agreement IS the signal).
 
-    Voters with ok=False / confidence=-1.0 are excluded from both vote and mean.
+    Neither rule met → REAL with mean confidence and the most-suspicious
+    voter's signal_category preserved for downstream diagnostics.
+
+    Voters with ok=False / confidence=-1.0 are excluded from both rules.
     """
     valid = [v for v in voters if v.get("ok") and v.get("confidence", -1.0) >= 0]
     if not valid:
@@ -82,17 +90,34 @@ def _asymmetric_vote(voters: list[dict]) -> dict:
             "voters": voters,
         }
 
-    threshold = settings.ensemble_ai_threshold
-    ai_voters = [v for v in valid if v["confidence"] > threshold]
+    high_thr = settings.ensemble_high_conviction_threshold
+    quorum_thr = settings.ensemble_quorum_threshold
+    quorum_min = settings.ensemble_quorum_min_voters
 
-    if ai_voters:
-        # Most confident accuser wins; carry their signal_category and findings.
-        winner = max(ai_voters, key=lambda v: v["confidence"])
+    # Rule 1 — HIGH-CONVICTION single voter
+    high_voters = [v for v in valid if v["confidence"] >= high_thr]
+    if high_voters:
+        winner = max(high_voters, key=lambda v: v["confidence"])
         return {
             "confidence": winner["confidence"],
             "signal_category": winner["signal_category"],
             "visual_scan": (
-                f"[{winner['label']}] {_label_for_findings(winner['findings'])}"
+                f"[{winner['label']} high-conviction] {_label_for_findings(winner['findings'])}"
+            ),
+            "voters": voters,
+        }
+
+    # Rule 2 — QUORUM: 2+ voters above the soft-signal threshold
+    quorum_voters = [v for v in valid if v["confidence"] >= quorum_thr]
+    if len(quorum_voters) >= quorum_min:
+        avg = mean(v["confidence"] for v in quorum_voters)
+        winner = max(quorum_voters, key=lambda v: v["confidence"])
+        return {
+            "confidence": round(avg, 2),
+            "signal_category": winner["signal_category"],
+            "visual_scan": (
+                f"[{len(quorum_voters)}-voter quorum, top={winner['label']}] "
+                f"{_label_for_findings(winner['findings'])}"
             ),
             "voters": voters,
         }
@@ -148,7 +173,11 @@ async def analyze_image_ensemble_async(
 
     t0 = time.perf_counter()
     timeout_s = settings.ensemble_voter_timeout_s
-    threshold = settings.ensemble_ai_threshold
+    # Race-to-AI cancels remaining voters only on a HIGH-CONVICTION single hit.
+    # A merely-quorum-worthy soft signal (e.g. 0.6) must wait for a second
+    # voter to corroborate — cancelling on the first 0.6 would be a regression
+    # to the old FP-prone single-voter rule.
+    threshold = settings.ensemble_high_conviction_threshold
 
     async def _bounded(coro, label: str) -> dict:
         try:

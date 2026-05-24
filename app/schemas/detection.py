@@ -106,6 +106,15 @@ class EnsembleSubResult(BaseModel):
     findings: str = Field(
         description="Brief description of findings within the assigned focus area. Max 40 words."
     )
+    region_anchor: str = Field(
+        description=(
+            "The SPECIFIC, NAMED image region where the strongest anomaly is "
+            "observed. E.g. 'left temple', 'upper-left corner', 'subject's right "
+            "armpit', 'background near the AC unit'. Use 'none' ONLY when the "
+            "image appears authentic (confidence < 0.5) — any AI verdict MUST "
+            "be anchored to a named region."
+        ),
+    )
     confidence: float = Field(
         description="0.0 (clearly real) to 1.0 (clearly AI), based on the assigned focus area alone."
     )

@@ -227,11 +227,14 @@ class TestAsymmetricVote:
         assert verdict["confidence"] == -1.0
         assert "all voters failed" in verdict["visual_scan"]
 
-    def test_single_voter_over_threshold_wins(self, monkeypatch):
+    def test_high_conviction_single_voter_wins(self, monkeypatch):
+        """Rule 1 — a single voter at ≥ ensemble_high_conviction_threshold flips AI."""
         from app.detection.ensemble_engine import _asymmetric_vote
         import app.config as cfg
 
-        monkeypatch.setattr(cfg.settings, "ensemble_ai_threshold", 0.7)
+        monkeypatch.setattr(cfg.settings, "ensemble_high_conviction_threshold", 0.85)
+        monkeypatch.setattr(cfg.settings, "ensemble_quorum_threshold", 0.55)
+        monkeypatch.setattr(cfg.settings, "ensemble_quorum_min_voters", 2)
         verdict = _asymmetric_vote([
             self._voter("anatomy", 0.92, signal="peripheral_or_background_structural_collapse",
                        findings="hand is a blob"),
@@ -240,30 +243,56 @@ class TestAsymmetricVote:
         ])
         assert verdict["confidence"] == 0.92
         assert verdict["signal_category"] == "peripheral_or_background_structural_collapse"
-        assert "[anatomy]" in verdict["visual_scan"]
-        assert "hand is a blob" in verdict["visual_scan"]
+        assert "high-conviction" in verdict["visual_scan"]
 
-    def test_most_confident_ai_voter_wins(self, monkeypatch):
+    def test_quorum_rule_two_soft_signals_trigger_ai(self, monkeypatch):
+        """Rule 2 — 2 voters above the soft threshold trigger AI even if no single voter is high-conviction."""
         from app.detection.ensemble_engine import _asymmetric_vote
         import app.config as cfg
 
-        monkeypatch.setattr(cfg.settings, "ensemble_ai_threshold", 0.7)
+        monkeypatch.setattr(cfg.settings, "ensemble_high_conviction_threshold", 0.85)
+        monkeypatch.setattr(cfg.settings, "ensemble_quorum_threshold", 0.55)
+        monkeypatch.setattr(cfg.settings, "ensemble_quorum_min_voters", 2)
         verdict = _asymmetric_vote([
-            self._voter("anatomy", 0.75, signal="peripheral_or_background_structural_collapse",
-                       findings="anatomy concern"),
-            self._voter("physics", 0.92, signal="geometry_or_perspective_is_physically_impossible",
-                        findings="physics concern"),
-            self._voter("composition", 0.05),
+            self._voter("anatomy", 0.65, signal="peripheral_or_background_structural_collapse",
+                       findings="soft anatomy concern"),
+            self._voter("physics", 0.70, signal="geometry_or_perspective_is_physically_impossible",
+                        findings="soft physics concern"),
+            self._voter("composition", 0.20),
         ])
-        assert verdict["confidence"] == 0.92
+        # 2 voters ≥0.55, neither ≥0.85 → quorum fires.
+        # Mean of (0.65, 0.70) = 0.675
+        assert abs(verdict["confidence"] - 0.68) < 0.01
+        assert "quorum" in verdict["visual_scan"].lower()
+        # Winner (max of quorum voters) was physics at 0.70
         assert verdict["signal_category"] == "geometry_or_perspective_is_physically_impossible"
-        assert "[physics]" in verdict["visual_scan"]
+
+    def test_lone_noisy_voter_no_longer_wins(self, monkeypatch):
+        """Regression test for the FP fix — single voter at 0.7 must NOT trigger AI anymore."""
+        from app.detection.ensemble_engine import _asymmetric_vote
+        import app.config as cfg
+
+        monkeypatch.setattr(cfg.settings, "ensemble_high_conviction_threshold", 0.85)
+        monkeypatch.setattr(cfg.settings, "ensemble_quorum_threshold", 0.55)
+        monkeypatch.setattr(cfg.settings, "ensemble_quorum_min_voters", 2)
+        verdict = _asymmetric_vote([
+            self._voter("anatomy", 0.05, signal="no_visual_anomalies_detected",
+                       findings="clean"),
+            self._voter("physics", 0.75, signal="geometry_or_perspective_is_physically_impossible",
+                        findings="noisy single signal"),
+            self._voter("composition", 0.10),
+        ])
+        # physics at 0.75 < 0.85 (no high-conviction), only 1 voter ≥0.55 → REAL fallback
+        assert verdict["confidence"] < 0.5
+        # REAL fallback preserves the least-clean voter's signal_category for diagnostics
+        assert verdict["signal_category"] == "geometry_or_perspective_is_physically_impossible"
 
     def test_no_voter_over_threshold_returns_real_with_mean(self, monkeypatch):
         from app.detection.ensemble_engine import _asymmetric_vote
         import app.config as cfg
 
-        monkeypatch.setattr(cfg.settings, "ensemble_ai_threshold", 0.7)
+        monkeypatch.setattr(cfg.settings, "ensemble_high_conviction_threshold", 0.85)
+        monkeypatch.setattr(cfg.settings, "ensemble_quorum_threshold", 0.55)
         verdict = _asymmetric_vote([
             self._voter("anatomy", 0.10),
             self._voter("physics", 0.20),
@@ -273,28 +302,27 @@ class TestAsymmetricVote:
         assert verdict["confidence"] == 0.20
 
     def test_real_fallback_preserves_least_clean_signal_category(self, monkeypatch):
-        """Regression test for the fix: REAL path must NOT hardcode 'no_visual_anomalies_detected'."""
+        """REAL path must NOT hardcode 'no_visual_anomalies_detected' — preserve diagnostic."""
         from app.detection.ensemble_engine import _asymmetric_vote
         import app.config as cfg
 
-        monkeypatch.setattr(cfg.settings, "ensemble_ai_threshold", 0.7)
+        monkeypatch.setattr(cfg.settings, "ensemble_high_conviction_threshold", 0.85)
+        monkeypatch.setattr(cfg.settings, "ensemble_quorum_threshold", 0.55)
         verdict = _asymmetric_vote([
             self._voter("anatomy", 0.10, signal="no_visual_anomalies_detected", findings="clean anatomy"),
-            self._voter("physics", 0.65, signal="geometry_or_perspective_is_physically_impossible",
-                        findings="conflicting shadows"),
+            self._voter("physics", 0.40, signal="geometry_or_perspective_is_physically_impossible",
+                        findings="below quorum"),
             self._voter("composition", 0.05, signal="no_visual_anomalies_detected", findings="clean"),
         ])
-        # No voter crosses 0.7, so it's REAL — but the physics voter at 0.65
-        # had a real signal that must NOT be silently erased.
         assert verdict["signal_category"] == "geometry_or_perspective_is_physically_impossible"
         assert "physics" in verdict["visual_scan"]
-        assert "conflicting shadows" in verdict["visual_scan"]
 
     def test_failed_voters_excluded_from_vote_and_mean(self, monkeypatch):
         from app.detection.ensemble_engine import _asymmetric_vote
         import app.config as cfg
 
-        monkeypatch.setattr(cfg.settings, "ensemble_ai_threshold", 0.7)
+        monkeypatch.setattr(cfg.settings, "ensemble_high_conviction_threshold", 0.85)
+        monkeypatch.setattr(cfg.settings, "ensemble_quorum_threshold", 0.55)
         verdict = _asymmetric_vote([
             self._voter("anatomy", 0.10),
             self._voter("physics", 0.30),
