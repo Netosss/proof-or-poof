@@ -316,6 +316,32 @@ async def analyze_video_frames_async(
                 "quality_context": representative_qc,
             }
 
+        # ---------- HIGH-CONVICTION single-frame override ----------
+        # A visible AI watermark or undeniable structural collapse in even
+        # one frame is essentially proof — the majority vote would dismiss
+        # it as a 1-vs-2 minority. If any frame crosses the override
+        # threshold AND has a real region_anchor (mirrors the image path's
+        # unanchored-AI demotion to prevent a confused frame triggering
+        # this), return AI immediately with that frame's verdict.
+        high_thr = settings.video_high_conviction_threshold
+        for r in raw_results:
+            anchor = (getattr(r, "region_anchor", "") or "").strip().lower()
+            anchored = anchor not in ("", "none", "n/a", "na")
+            if r.confidence >= high_thr and anchored:
+                v2_cat = r.signal_category
+                legacy = V2_TO_LEGACY_CATEGORY.get(v2_cat, "multiple_subtle_ai_artifacts_present")
+                logger.info("combined_video_high_conviction_override", extra={
+                    "action": "combined_video_high_conviction_override",
+                    "frame_confidence": r.confidence,
+                    "frame_signal_category": v2_cat,
+                    "region_anchor": r.region_anchor,
+                })
+                return {
+                    "confidence": round(r.confidence, 2),
+                    "signal_category": legacy,
+                    "quality_context": representative_qc,
+                }
+
         # ---------- per-frame vote ----------
         ai_votes = [r for r in raw_results if r.confidence > settings.gemini_ai_vote_threshold]
         not_ai_votes = [r for r in raw_results if r.confidence <= settings.gemini_ai_vote_threshold]

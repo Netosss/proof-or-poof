@@ -354,6 +354,20 @@ class Settings(BaseSettings):
             "deliberately experimenting."
         ),
     )
+    video_high_conviction_threshold: float = Field(
+        0.90,
+        description=(
+            "Per-frame override for the video aggregator: if ANY frame returns "
+            "confidence >= this AND a named region_anchor (not 'none'), the "
+            "whole video flips to AI regardless of the per-frame majority "
+            "vote. A visible AI watermark or undeniable structural collapse "
+            "in even ONE frame is essentially proof — the majority rule "
+            "would otherwise silently dismiss it as a 1-vs-2 minority. The "
+            "anchor guard mirrors the image path's unanchored-AI demotion, "
+            "so a confused frame at 0.91 with anchor='none' cannot trigger "
+            "the override on its own."
+        ),
+    )
     gemini_ai_vote_threshold: float = Field(
         0.55,
         description=(
