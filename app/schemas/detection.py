@@ -60,22 +60,10 @@ class DetectionResponse(BaseModel):
     short_id: Optional[str] = None
 
 
-class DetectionResult(BaseModel):
-    """Gemini structured output schema — one result per image frame."""
-    visual_scan: str = Field(
-        description="Crucial visual anomaly observed, or single authenticity marker if clean. Max 25 words."
-    )
-    confidence: float = Field(
-        description="Probability the image is AI-generated, 0.0 (clearly real) to 1.0 (clearly AI)."
-    )
-    signal_category: SIGNAL_CATEGORIES = Field(
-        description="Single primary forensic signal. Must be an exact enum key from the system instructions."
-    )
-
-
 # ---------------------------------------------------------------------------
-# V2 schema — 5 macro buckets, forced 2-step CoT (edges→physics) + visual_scan.
-# Mapped back to legacy SIGNAL_CATEGORIES by image_detector for response shape.
+# Macro forensic categories returned by the combined Gemini schema. Mapped
+# back to the legacy 19-category strings (SIGNAL_CATEGORIES above) by
+# V2_TO_LEGACY_CATEGORY for the user-facing response shape.
 # ---------------------------------------------------------------------------
 SIGNAL_CATEGORIES_V2 = Literal[
     "peripheral_or_background_structural_collapse",
@@ -87,10 +75,10 @@ SIGNAL_CATEGORIES_V2 = Literal[
 ]
 
 
-# Mapping from v2/ensemble macro buckets → legacy 19-category strings used by
-# image_detector._label_for and the downstream API response shape. Lives here
-# (alongside SIGNAL_CATEGORIES_V2) so both client_v2.py and ensemble_engine.py
-# can import without crossing client-to-client module boundaries.
+# Mapping from combined-schema macro buckets → legacy 19-category strings
+# used by image_detector._label_for and the downstream API response shape.
+# Keeps the Gemini-side category space small (5 macros) without breaking
+# downstream consumers that expect the legacy taxonomy.
 V2_TO_LEGACY_CATEGORY: dict[str, str] = {
     "peripheral_or_background_structural_collapse": "facial_detail_inconsistency_detected",
     "objects_merge_or_dissolve_at_boundaries": "objects_merge_or_dissolve_at_boundaries",

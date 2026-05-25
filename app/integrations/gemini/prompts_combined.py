@@ -1,14 +1,11 @@
 """
-Combined-engine forensic prompt — single Gemini call evaluating an image
-from three perspectives (anatomy, physics, composition) in one pass.
+Combined forensic prompt — single Gemini call evaluating an image (or
+video frame) from three perspectives (anatomy / physics / composition)
+in one pass.
 
-This is the SOLE prompt for image AI-detection. The model integrates the
-three perspectives internally via cross-referencing reasoning, which
-empirically beats running three separate Gemini calls and voting between
-them (the older 'ensemble' approach). See the PR description and
-docs/DETECTION_V2_DEFERRED_FIXES.md for the comparison data.
-
-Output schema lives in app/schemas/detection.py:CombinedDetectionResult.
+This is the SOLE detection prompt for both image and video paths. The
+model integrates the three perspectives internally via cross-referencing
+reasoning. Output schema lives in app/schemas/detection.py:CombinedDetectionResult.
 """
 
 _BASE_GUARDS = """<AnchoredEvidenceRule>

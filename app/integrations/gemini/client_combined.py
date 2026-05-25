@@ -1,24 +1,24 @@
 """
-Combined-engine Gemini analyzer — sole image-detection client.
+Combined Gemini analyzer — sole detection client for both image and video.
 
-Single Gemini API call per image with all three forensic perspectives
-(anatomy / physics / composition) merged into one system instruction.
-Uses the native async client surface (`client.aio.models.generate_content`)
-so the Gemini I/O wait doesn't occupy a thread, and CPU-bound image prep
-runs in `asyncio.to_thread` so the event loop stays free.
+Two public entry points:
+  * analyze_image_combined_async(image) — one Gemini call per image
+  * analyze_video_frames_async(frames)   — one Gemini call per video,
+    N frames in the request body, list[CombinedDetectionResult] schema,
+    per-frame vote aggregation
 
-Empirical accuracy vs alternates measured on the 25-case gold set
-(scripts/eval_cost_accuracy.py): 96% combined vs 92% parallel ensemble
-vs 67% anatomy-solo. See the PR description for the full breakdown.
-
-Image preprocessing helpers (`_prepare_pil_for_gemini`, `_encode_pil_as_jpeg`,
-`_resize_if_needed`) and the shared `client` instance live in
-`app/integrations/gemini/client.py` — reused by video detection too.
+Both use the SAME combined system prompt
+(`get_combined_prompt` from prompts_combined.py), the SAME schema
+(`CombinedDetectionResult`), and the SAME native async client surface
+(`client.aio.models.generate_content`) so Gemini I/O waits never burn
+threads. CPU-bound image prep runs in `asyncio.to_thread` to keep the
+event loop free.
 """
 
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import time
 from typing import Optional, Union
@@ -149,21 +149,21 @@ async def analyze_image_combined_async(
                 "findings": parsed.findings,
             })
             confidence_out = 0.0
-            signal_v2 = "no_visual_anomalies_detected"
+            signal_macro = "no_visual_anomalies_detected"
             findings_out = f"[demoted: AI claim without region anchor] {parsed.findings}"
         else:
             confidence_out = float(parsed.confidence)
-            signal_v2 = parsed.signal_category
+            signal_macro = parsed.signal_category
             findings_out = parsed.findings
 
-        legacy_cat = V2_TO_LEGACY_CATEGORY.get(signal_v2, "multiple_subtle_ai_artifacts_present")
+        legacy_cat = V2_TO_LEGACY_CATEGORY.get(signal_macro, "multiple_subtle_ai_artifacts_present")
 
         logger.info("combined_call_completed", extra={
             "action": "combined_call_completed",
             "model": settings.gemini_model,
             "duration_ms": duration_ms,
             "confidence": confidence_out,
-            "signal_category": signal_v2,
+            "signal_category": signal_macro,
             "region_anchor": parsed.region_anchor,
             "cost_usd": settings.gemini_fixed_cost,
         })
@@ -174,7 +174,7 @@ async def analyze_image_combined_async(
             "signal_category": legacy_cat,
             "quality_score": quality_score,
             "quality_context": quality_context,
-            "v2_signal_category": signal_v2,
+            "v2_signal_category": signal_macro,
             "v2_step_1": findings_out,
             "v2_step_2": f"region_anchor: {parsed.region_anchor}",
             "region_anchor": parsed.region_anchor,
@@ -196,6 +196,169 @@ async def analyze_image_combined_async(
         return _failure_response(
             quality_context, quality_score, f"(error: {type(exc).__name__})"
         )
+
+
+async def analyze_video_frames_async(
+    image_sources: list[Union[str, Image.Image, bytes]],
+) -> dict:
+    """
+    Multi-frame video forensic inference via the SAME combined prompt used
+    for single-image detection — just batched across N frames.
+
+    The combined system instruction stays identical (three perspectives,
+    StudioException, LandmarkSignageException). The execution query
+    annotates each frame with its own quality tag so heterogeneous batches
+    don't contaminate each other. Schema is list[CombinedDetectionResult]
+    — one verdict per frame, in input order. Aggregation is a per-frame
+    vote: if more frames flag AI than don't, return avg AI confidence;
+    otherwise return min REAL confidence.
+
+    Returns the dict shape pipeline.py expects:
+        {
+          "confidence": float | -1.0,
+          "signal_category": str,
+          "quality_context": str,
+        }
+    """
+    try:
+        # ---------- per-frame quality probes + image encoding (in threads) ----------
+        def _prepare_one_frame(src) -> tuple[bytes, str]:
+            try:
+                qc, _ = get_quality_context(src)
+            except Exception:
+                qc = "**CONTEXT: QUALITY UNKNOWN.**"
+            if isinstance(src, bytes):
+                return src, qc
+            img_working, to_close = _prepare_pil_for_gemini(src)
+            try:
+                buf = io.BytesIO()
+                img_working.save(buf, format="JPEG", quality=settings.gemini_batch_jpeg_quality)
+                return buf.getvalue(), qc
+            finally:
+                for o in to_close:
+                    try:
+                        o.close()
+                    except Exception:
+                        pass
+
+        # Run all frame preps concurrently in worker threads so the event
+        # loop stays free for incoming requests.
+        prepped = await asyncio.gather(
+            *(asyncio.to_thread(_prepare_one_frame, s) for s in image_sources)
+        )
+        image_parts = [
+            types.Part.from_bytes(data=b, mime_type="image/jpeg") for b, _ in prepped
+        ]
+        per_frame_quality = [qc for _, qc in prepped]
+
+        # ---------- system instruction = same combined prompt as image path ----------
+        global_quality_context = (
+            "**CONTEXT: PER-FRAME QUALITY VARIES.** Each frame in this batch carries its "
+            "own quality tag in the execution query — apply the matching tag's guidance to "
+            "the correspondingly indexed image."
+        )
+
+        config_kwargs: dict = dict(
+            system_instruction=get_combined_prompt(global_quality_context),
+            media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
+            temperature=settings.gemini_temperature,
+            response_mime_type="application/json",
+            response_schema=list[CombinedDetectionResult],
+        )
+        if "gemini-3" in settings.gemini_model:
+            config_kwargs["thinking_config"] = types.ThinkingConfig(
+                thinking_level=settings.gemini_thinking_level
+            )
+        config = types.GenerateContentConfig(**config_kwargs)
+
+        quality_block = "\n".join(
+            f"[FRAME {i + 1} QUALITY] {qc}" for i, qc in enumerate(per_frame_quality)
+        )
+        execution_query = (
+            "Analyse EACH of the attached frames for synthetic generation artifacts, "
+            "strictly following the system instructions. Apply the matching quality tag "
+            "below to each correspondingly indexed image (image 1 → FRAME 1, etc.). "
+            "Return one CombinedDetectionResult per image in the same order.\n\n"
+            f"{quality_block}"
+        )
+        request_contents = image_parts + [execution_query]
+
+        t0 = time.perf_counter()
+        response = await client.aio.models.generate_content(
+            model=settings.gemini_model,
+            contents=request_contents,
+            config=config,
+        )
+        duration_ms = round((time.perf_counter() - t0) * 1000)
+
+        raw_results = response.parsed
+        representative_qc = per_frame_quality[0] if per_frame_quality else "**CONTEXT: QUALITY UNKNOWN.**"
+
+        if hasattr(response, "usage_metadata"):
+            logger.info("combined_video_batch_completed", extra={
+                "action": "combined_video_batch_completed",
+                "model": settings.gemini_model,
+                "frame_count": len(image_sources),
+                "duration_ms": duration_ms,
+                "input_tokens": getattr(response.usage_metadata, "prompt_token_count", 0),
+                "output_tokens": getattr(response.usage_metadata, "candidates_token_count", 0),
+                "cost_usd": settings.gemini_fixed_cost,
+            })
+
+        if not raw_results:
+            logger.error("combined_video_batch_empty_parsed", extra={
+                "action": "combined_video_batch_empty_parsed",
+                "frame_count": len(image_sources),
+            })
+            return {
+                "confidence": -1.0,
+                "signal_category": "multiple_subtle_ai_artifacts_present",
+                "quality_context": representative_qc,
+            }
+
+        # ---------- per-frame vote ----------
+        ai_votes = [r for r in raw_results if r.confidence > settings.gemini_ai_vote_threshold]
+        not_ai_votes = [r for r in raw_results if r.confidence <= settings.gemini_ai_vote_threshold]
+
+        if len(ai_votes) > len(not_ai_votes):
+            avg = sum(r.confidence for r in ai_votes) / len(ai_votes)
+            best = max(ai_votes, key=lambda x: x.confidence)
+            v2_cat = best.signal_category
+            legacy = V2_TO_LEGACY_CATEGORY.get(v2_cat, "multiple_subtle_ai_artifacts_present")
+            return {
+                "confidence": round(avg, 2),
+                "signal_category": legacy,
+                "quality_context": representative_qc,
+            }
+
+        if not_ai_votes:
+            avg = sum(r.confidence for r in not_ai_votes) / len(not_ai_votes)
+            best = min(not_ai_votes, key=lambda x: x.confidence)
+            v2_cat = best.signal_category
+        else:
+            avg = 0.0
+            v2_cat = "no_visual_anomalies_detected"
+        legacy = V2_TO_LEGACY_CATEGORY.get(v2_cat, "no_visual_anomalies_detected")
+        return {
+            "confidence": round(avg, 2),
+            "signal_category": legacy,
+            "quality_context": representative_qc,
+        }
+
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        from google.genai import errors as _genai_errors
+        is_api_error = isinstance(exc, _genai_errors.APIError)
+        log_event = "combined_video_batch_api_error" if is_api_error else "combined_video_batch_code_error"
+        log_method = logger.warning if is_api_error else logger.error
+        log_method(log_event, extra={
+            "action": log_event,
+            "frame_count": len(image_sources),
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+        })
+        return {"confidence": -1.0}
 
 
 def _failure_response(quality_context: str, quality_score: int, reason: str) -> dict:
