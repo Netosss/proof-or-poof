@@ -27,6 +27,7 @@ mapping. The only difference is the prompt.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional, Union
 
@@ -54,8 +55,16 @@ async def analyze_image_combined_async(
     if pre_calculated_quality_context:
         quality_context = pre_calculated_quality_context
     else:
+        # get_quality_context runs OpenCV cv2.Laplacian + cv2.cvtColor
+        # synchronously — must NOT execute on the event loop. The normal
+        # production path pre-computes this in image_detector via to_thread,
+        # so we only hit this branch on direct callers (eval scripts, tests,
+        # the v1 fallback re-entry). to_thread the fallback so any code path
+        # is safe.
         try:
-            quality_context, quality_score = get_quality_context(image_source)
+            quality_context, quality_score = await asyncio.to_thread(
+                get_quality_context, image_source
+            )
         except Exception as exc:
             logger.warning("combined_quality_context_failed", extra={
                 "action": "combined_quality_context_failed",

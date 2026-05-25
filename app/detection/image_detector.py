@@ -32,6 +32,21 @@ from app.detection.ensemble_engine import analyze_image_ensemble
 from app.integrations.gemini.quality import get_quality_context
 
 
+def _should_route_to_combined() -> bool:
+    """
+    Single source of truth for the canary-roll decision. Returns True when
+    this request should go through the combined engine, considering BOTH
+    settings.detection_engine ('combined' wins) AND settings.combined_rollout_pct
+    (random per-request roll). Extracted so the dispatcher and tests use
+    the same expression — drifting test logic from production code is a
+    bug factory.
+    """
+    if settings.detection_engine == "combined":
+        return True
+    rollout_pct = max(0.0, min(1.0, settings.combined_rollout_pct))
+    return rollout_pct > 0.0 and random.random() < rollout_pct
+
+
 def _select_analyzer():
     """
     Dispatch to v1 or v2 Gemini sync analyzer based on settings.detection_engine.
@@ -158,11 +173,21 @@ async def detect_ai_media_image_logic(
     else:
         exif = await asyncio.to_thread(get_exif_data, file_path)
         try:
-            with Image.open(file_path) as img:
-                width, height = img.size
-                img_format = (img.format or "unknown").lower()
+            # Wrap PIL dimension probe in to_thread — `Image.open(...).size` on
+            # a 20MB upload can block the event loop for 10–80ms, which under
+            # Railway's single-worker uvicorn serialises EVERY concurrent
+            # request. Combined with get_exif_data above, this is the per-
+            # request CPU cost moved off the event loop.
+            def _probe_dimensions(path: str) -> tuple[int, int, str, int]:
+                with Image.open(path) as _img:
+                    w, h = _img.size
+                    fmt = (_img.format or "unknown").lower()
+                return w, h, fmt, os.path.getsize(path)
+
+            width, height, img_format, file_size = await asyncio.to_thread(
+                _probe_dimensions, file_path
+            )
             source_for_hash = file_path
-            file_size = os.path.getsize(file_path)
         except Exception as open_err:
             logger.error("image_open_failed", extra={
                 "action": "image_open_failed",
@@ -482,19 +507,11 @@ async def detect_ai_media_image_logic(
             "error_type": type(e).__name__,
         })
 
-    # Canary roll: combined_rollout_pct overrides the configured engine on a
-    # per-request basis. Non-zero values route a sampled share of traffic
-    # through 'combined' so it can be A/B-tested under real production load
-    # without flipping the global default.
-    rollout_pct = max(0.0, min(1.0, settings.combined_rollout_pct))
-    use_combined = (
-        settings.detection_engine == "combined"
-        or (rollout_pct > 0.0 and random.random() < rollout_pct)
-    )
-    routed_engine = (
-        "combined" if use_combined
-        else settings.detection_engine
-    )
+    # Canary roll: see _should_route_to_combined() for the rule. Combined-
+    # engine takes precedence; otherwise a sampled share of traffic is routed
+    # through it so it can be A/B-tested under real production load.
+    use_combined = _should_route_to_combined()
+    routed_engine = "combined" if use_combined else settings.detection_engine
 
     if use_combined:
         # RECOMMENDED engine. Single Gemini call with all 3 forensic
@@ -529,11 +546,13 @@ async def detect_ai_media_image_logic(
     # sentinel, fall back to v1 instead of showing 'Analysis Failed' to the
     # user. Only kicks in when settings.combined_fallback_to_v1 is True
     # (default). Disable to surface failures during incident debugging.
+    fallback_fired = False
     if (
         settings.combined_fallback_to_v1
         and routed_engine in ("combined", "ensemble")
         and gemini_res.get("confidence", -1.0) == -1.0
     ):
+        fallback_fired = True
         logger.warning("detection_engine_fallback_to_v1", extra={
             "action": "detection_engine_fallback_to_v1",
             "from_engine": routed_engine,
@@ -542,8 +561,22 @@ async def detect_ai_media_image_logic(
             analyze_image_pro_turbo, source_for_gemini,
             pre_calculated_quality_context=pre_calc_context,
         )
+        # Preserve the pre-computed quality_score (which combined was given
+        # but the v1 analyzer cannot itself read).
+        if pre_calc_quality_score and gemini_res.get("quality_score", 0) == 0:
+            gemini_res["quality_score"] = pre_calc_quality_score
+        # Double-failure: v1 ALSO returned the sentinel. The user is about to
+        # see "Analysis Failed". Log at ERROR so alerting picks it up — this
+        # is a different outage signal from a transient combined failure.
+        if gemini_res.get("confidence", -1.0) == -1.0:
+            logger.error("detection_engine_v1_fallback_also_failed", extra={
+                "action": "detection_engine_v1_fallback_also_failed",
+                "from_engine": routed_engine,
+            })
     logger.info("gemini_response", extra={
         "action": "gemini_response",
+        "engine": routed_engine,
+        "fallback_fired": fallback_fired,
         "confidence": gemini_res.get("confidence"),
         "quality_score": gemini_res.get("quality_score"),
     })

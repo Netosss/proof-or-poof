@@ -118,7 +118,11 @@ async def analyze_with_prompt(
         # The system_prompt is the focused prompt itself; the {quality_context}
         # placeholder inside each get_*_prompt() is already substituted before
         # we receive it. Just pass through.
-        image_bytes = _encode_image_for_gemini(image_source)
+        # PIL resize + JPEG encode is CPU-bound (~25-65ms for typical uploads).
+        # Move it off the event loop so concurrent detections don't serialise
+        # on this work — critical under Railway's single-worker uvicorn where
+        # the event loop is the throughput bottleneck.
+        image_bytes = await asyncio.to_thread(_encode_image_for_gemini, image_source)
         config = _build_ensemble_config(system_prompt)
 
         t0 = time.perf_counter()

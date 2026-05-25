@@ -212,36 +212,45 @@ class TestEngineDispatch:
 
 
 class TestCanaryRollout:
-    """combined_rollout_pct lets us A/B-test combined under production traffic."""
+    """combined_rollout_pct lets us A/B-test combined under production traffic.
+
+    These tests exercise the SAME helper the dispatcher uses
+    (`_should_route_to_combined`) so a refactor of either side cannot
+    silently drift them apart.
+    """
+
+    def test_combined_engine_always_routes_to_combined(self, monkeypatch):
+        from app.detection.image_detector import _should_route_to_combined
+        from app.config import settings
+        monkeypatch.setattr(settings, "detection_engine", "combined")
+        monkeypatch.setattr(settings, "combined_rollout_pct", 0.0)
+        assert _should_route_to_combined() is True
 
     def test_zero_pct_does_not_route_to_combined(self, monkeypatch):
-        """rollout_pct = 0.0 means traffic stays on the configured engine."""
+        from app.detection.image_detector import _should_route_to_combined
         from app.config import settings
-        monkeypatch.setattr(settings, "combined_rollout_pct", 0.0)
         monkeypatch.setattr(settings, "detection_engine", "v1")
-        # Compute the same boolean image_detector uses
-        import random as _random
-        use_combined = (
-            settings.detection_engine == "combined"
-            or (settings.combined_rollout_pct > 0.0
-                and _random.random() < settings.combined_rollout_pct)
-        )
-        assert not use_combined
+        monkeypatch.setattr(settings, "combined_rollout_pct", 0.0)
+        assert _should_route_to_combined() is False
 
     def test_full_pct_always_routes_to_combined(self, monkeypatch):
-        """rollout_pct = 1.0 means EVERY request routes to combined regardless of engine."""
+        from app.detection.image_detector import _should_route_to_combined
         from app.config import settings
-        monkeypatch.setattr(settings, "combined_rollout_pct", 1.0)
         monkeypatch.setattr(settings, "detection_engine", "v1")
-        import random as _random
-        # 1000 rolls should all route to combined under pct=1.0
-        results = [
-            (settings.detection_engine == "combined"
-             or (settings.combined_rollout_pct > 0.0
-                 and _random.random() < settings.combined_rollout_pct))
-            for _ in range(1000)
-        ]
-        assert all(results)
+        monkeypatch.setattr(settings, "combined_rollout_pct", 1.0)
+        # 200 rolls should all return True under pct=1.0
+        assert all(_should_route_to_combined() for _ in range(200))
+
+    def test_pct_clamped_to_unit_interval(self, monkeypatch):
+        from app.detection.image_detector import _should_route_to_combined
+        from app.config import settings
+        monkeypatch.setattr(settings, "detection_engine", "v1")
+        # Negative is clamped to 0 → never routes
+        monkeypatch.setattr(settings, "combined_rollout_pct", -0.5)
+        assert _should_route_to_combined() is False
+        # Above-1 is clamped to 1 → always routes
+        monkeypatch.setattr(settings, "combined_rollout_pct", 1.5)
+        assert all(_should_route_to_combined() for _ in range(50))
 
 
 class TestCombinedEngineWiring:
