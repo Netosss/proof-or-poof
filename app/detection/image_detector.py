@@ -27,6 +27,7 @@ from app.detection.metadata_scorer import (
 )
 from app.integrations.gemini.client_combined import analyze_image_combined_async
 from app.integrations.gemini.quality import get_quality_context
+from app.integrations import progress as progress_module
 
 logger = logging.getLogger(__name__)
 
@@ -468,6 +469,10 @@ async def detect_ai_media_image_logic(
             "error": str(e),
             "error_type": type(e).__name__,
         })
+
+    # Forensic stage begins — calling Gemini. Image-path counterpart of the
+    # video forensic emit in pipeline.py.
+    await progress_module.emit("forensic")
 
     # Single Gemini call, all three forensic perspectives merged.
     # Native-async — Gemini I/O wait doesn't consume a thread, cancellations

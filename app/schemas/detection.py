@@ -58,6 +58,9 @@ class DetectionResponse(BaseModel):
     is_short_circuited: bool = False
     evidence_chain: List[EvidenceItem]
     short_id: Optional[str] = None
+    # 32-char hex UUID issued by the /detect route. Clients poll
+    # /detect/progress/{task_id} during the wait to drive the stage UI.
+    task_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
