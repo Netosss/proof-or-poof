@@ -45,6 +45,11 @@ VIDEO_SUFFIXES = ALLOWED_VIDEO_EXTENSIONS
 
 _UPLOAD_CHUNK = 65_536  # 64 KB — matches the HTTPS streaming path
 
+# 32-char hex UUIDs from uuid4().hex — strict shape guards against
+# arbitrary-key Redis reads via the progress endpoint and stops clients
+# from passing junk via the X-Task-Id header.
+_TASK_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+
 
 def _stream_upload_to_disk(upload_file: UploadFile, dest_path: str) -> None:
     """Copy a multipart upload to *dest_path* in chunks without loading it into RAM.
@@ -77,6 +82,7 @@ async def detect(
     request: Request,
     device_id: str = Header(..., alias="X-Device-ID"),
     turnstile_token: str | None = Header(None, alias="X-Turnstile-Token"),
+    client_task_id: str | None = Header(None, alias="X-Task-Id"),
     auth_user: dict | None = Depends(get_optional_user),
 ):
     """
@@ -93,9 +99,15 @@ async def detect(
 
     user_id_var.set(auth_user["uid"] if auth_user else device_id)
 
-    # Bind a fresh task_id to this request's async context so pipeline stages
-    # can emit progress without threading it through every function signature.
-    task_id = uuid.uuid4().hex
+    # Bind task_id to this request's async context. Clients pass their own
+    # X-Task-Id header so they can start polling /detect/progress BEFORE the
+    # main POST resolves (otherwise the wait would already be over by the time
+    # task_id arrived in the response body). Falls back to a server-generated
+    # UUID for legacy clients that don't send the header.
+    if client_task_id and _TASK_ID_RE.match(client_task_id):
+        task_id = client_task_id
+    else:
+        task_id = uuid.uuid4().hex
     progress_module.init(task_id)
     await progress_module.emit("provenance")
 
@@ -362,11 +374,6 @@ async def detect(
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
-
-
-# 32-char hex UUIDs from uuid4().hex — strict shape guards against
-# arbitrary-key Redis reads via this endpoint.
-_TASK_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 @router.get("/detect/progress/{task_id}")
