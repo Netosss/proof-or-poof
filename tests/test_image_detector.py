@@ -51,11 +51,18 @@ def _apply_base_patches(stack: ExitStack, exif=None, cached=None, gemini_resp=No
     stack.enter_context(patch("app.detection.image_detector.set_cached_result"))
     stack.enter_context(patch("app.detection.image_detector.get_quality_context", return_value=("high", 95)))
 
+    # The image-detector now calls analyze_image_combined_async (async).
+    from unittest.mock import AsyncMock
     if gemini_resp is not None:
-        return stack.enter_context(
-            patch("app.detection.image_detector.analyze_image_pro_turbo", return_value=gemini_resp)
-        )
-    return stack.enter_context(patch("app.detection.image_detector.analyze_image_pro_turbo"))
+        return stack.enter_context(patch(
+            "app.detection.image_detector.analyze_image_combined_async",
+            new_callable=AsyncMock,
+            return_value=gemini_resp,
+        ))
+    return stack.enter_context(patch(
+        "app.detection.image_detector.analyze_image_combined_async",
+        new_callable=AsyncMock,
+    ))
 
 
 # ---------------------------------------------------------------------------

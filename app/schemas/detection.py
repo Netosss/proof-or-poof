@@ -101,10 +101,18 @@ V2_TO_LEGACY_CATEGORY: dict[str, str] = {
 }
 
 
-class EnsembleSubResult(BaseModel):
-    """Per-prompt forensic verdict produced by one of the ensemble's sub-calls."""
+class CombinedDetectionResult(BaseModel):
+    """
+    Forensic verdict from the combined Gemini call.
+
+    Single response covering all three forensic perspectives (anatomy,
+    physics, composition). `region_anchor` enforces structural anti-
+    anchoring: any AI verdict (confidence >= 0.5) must point to a specific
+    named image region — combats the model's tendency to confabulate
+    authenticity claims without evidence.
+    """
     findings: str = Field(
-        description="Brief description of findings within the assigned focus area. Max 40 words."
+        description="Brief description of the strongest forensic signal observed. Max 40 words."
     )
     region_anchor: str = Field(
         description=(
@@ -116,26 +124,7 @@ class EnsembleSubResult(BaseModel):
         ),
     )
     confidence: float = Field(
-        description="0.0 (clearly real) to 1.0 (clearly AI), based on the assigned focus area alone."
-    )
-    signal_category: SIGNAL_CATEGORIES_V2 = Field(
-        description="Exactly one macro forensic bucket from the closed list."
-    )
-
-
-class DetectionResultV2(BaseModel):
-    """V2 forensic schema: weaponised attention via targeted interrogation keys."""
-    scan_hands_and_boundaries: str = Field(
-        description="Answer: do fingers lack knuckles, melt into objects/clothing, or is there flat skin webbing at armpits/lats/shoulder muscle insertions? Max 40 words."
-    )
-    scan_background_and_physics: str = Field(
-        description="Answer: are background faces shapeless/demonic? Do objects intersect impossibly? In candid group photos, is lighting suspiciously uniform across every face? Max 40 words."
-    )
-    visual_scan: str = Field(
-        description="One-line summary of the strongest signal (anomaly or authenticity marker). Max 25 words."
-    )
-    confidence: float = Field(
-        description="Probability the image is AI-generated, 0.0 (clearly real) to 1.0 (clearly AI)."
+        description="0.0 (clearly real) to 1.0 (clearly AI)."
     )
     signal_category: SIGNAL_CATEGORIES_V2 = Field(
         description="Exactly one macro forensic bucket from the closed list."

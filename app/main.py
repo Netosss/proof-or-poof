@@ -32,7 +32,6 @@ from app.api import auth, checkout, credits, detection, inpainting, reports, sys
 from app.api.enterprise import analyze as enterprise_analyze
 from app.api.enterprise import management as enterprise_management
 from app.core.enterprise_errors import build_envelope
-from app.config import settings
 from app.integrations import firebase as firebase_module
 from app.integrations import http_client as http_module
 from app.integrations import redis_client as redis_module
@@ -82,7 +81,6 @@ async def lifespan(app: FastAPI):
         extra={
             "action": "startup_complete",
             "services": ["firebase", "redis", "http_session"],
-            "detection_engine": settings.detection_engine,
         },
     )
 

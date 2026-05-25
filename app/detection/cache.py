@@ -23,13 +23,15 @@ from app.integrations import redis_client as redis_module
 
 logger = logging.getLogger(__name__)
 
-# Cache key is namespaced by the active detection engine so v1 and v2 verdicts
-# never collide. Flipping settings.detection_engine routes reads/writes to a
-# fresh keyspace, making rollout/rollback safe with no Redis flush. The legacy
-# "forensic_v2:" prefix is preserved for the v1 engine to avoid invalidating
-# the existing production cache on this commit.
+# Cache key prefix is bumped to "forensic_v3:" alongside the combined-engine
+# cut-over so prior v1/v2/ensemble verdicts don't surface stale results. Old
+# "forensic_v2:*" keys remain valid TTL-wise but will never be read; they
+# self-expire within 24h.
+CACHE_PREFIX = "forensic_v3:"
+
+
 def _cache_prefix() -> str:
-    return f"forensic_v2:{settings.detection_engine}:"
+    return CACHE_PREFIX
 
 local_cache: OrderedDict = OrderedDict()
 

@@ -1,20 +1,23 @@
 """
-Gemini API client — initialization and core inference functions.
+Gemini API client — shared client instance + image-prep helpers + the
+video batch entry point.
 
-The module-level `client` is created once on import using env vars.
-`analyze_image_pro_turbo` and `analyze_batch_images_pro_turbo` are the
-public entry points used by the detection pipeline.
+Image-detection callers use the combined engine
+(`app/integrations/gemini/client_combined.py`); this module no longer
+exposes a single-image sync analyzer. Video frame analysis still flows
+through `analyze_batch_images_pro_turbo` below because the video pipeline
+sends multiple frames in one Gemini call with its own per-frame quality
+context — that path is independent of the combined engine.
 """
 
 import os
 import io
-import json
 import time
 import logging
-from PIL import Image, ImageFilter, ImageStat, ImageMath
+from PIL import Image
 from google import genai
 from google.genai import types
-from typing import Optional, Union
+from typing import Union
 
 from app.config import settings
 from app.schemas.detection import DetectionResult
@@ -40,46 +43,6 @@ client = genai.Client(
         )
     )
 )
-
-
-def _compute_noise_cv(img: Image.Image) -> float:
-    """
-    Computes noise spatial CV (coefficient of variation across quadrants).
-
-    Uses grayscale luminance + 32-bit float signed residual (I - B) to preserve
-    the true statistical distribution of the noise. The previous implementation
-    used ImageChops.difference (absolute |I-B|) in 8-bit uint, which:
-      - Folds the signed noise distribution → artificially crushes variance
-      - Loses sub-integer noise shifts (1-5px) to rounding/clipping
-
-    Low CV = unnaturally uniform noise across all image regions = AI diffusion signal.
-    High CV = spatially-varied organic noise = real camera sensor noise.
-
-    Returns 0.0 (neutral / hint suppressed) if the image is too small to split
-    into four meaningful quadrants (< 8px in either dimension).
-    """
-    w, h = img.size
-    if w < 8 or h < 8:
-        return 0.0
-
-    img_gray  = img.convert("L")
-    blurred   = img_gray.filter(ImageFilter.GaussianBlur(radius=settings.forensic_noise_radius))
-    img_f     = img_gray.convert("F")
-    blurred_f = blurred.convert("F")
-    # Signed float32 residual — lambda_eval preserves negatives; avoids 8-bit clipping/folding
-    noise = ImageMath.lambda_eval(lambda args: args["a"] - args["b"], a=img_f, b=blurred_f)
-
-    mx, my = w // 2, h // 2
-    quadrants = [
-        noise.crop((0,  0,  mx, my)),
-        noise.crop((mx, 0,  w,  my)),
-        noise.crop((0,  my, mx, h)),
-        noise.crop((mx, my, w,  h)),
-    ]
-    q_vars = [ImageStat.Stat(q).var[0] for q in quadrants]
-    mean_var = sum(q_vars) / 4
-    std_var  = (sum((v - mean_var) ** 2 for v in q_vars) / 4) ** 0.5
-    return std_var / (mean_var + 1e-6)
 
 
 def _prepare_pil_for_gemini(
@@ -140,152 +103,6 @@ def _resize_if_needed(img: Image.Image) -> Image.Image:
         return img.resize((new_w, new_h), Image.Resampling.BICUBIC)
 
     return img
-
-
-def analyze_image_pro_turbo(
-    image_source: Union[str, Image.Image],
-    pre_calculated_quality_context: Optional[str] = None,
-) -> dict:
-    """Single-image forensic inference via the configured Gemini model."""
-    img_to_close = []
-
-    try:
-        if isinstance(image_source, str):
-            img_original = Image.open(image_source)
-            img_to_close.append(img_original)
-        else:
-            img_original = image_source
-
-        quality_score = 0
-        if pre_calculated_quality_context:
-            quality_context = pre_calculated_quality_context
-        else:
-            quality_context, quality_score = get_quality_context(img_original)
-
-        img_working = _resize_if_needed(img_original)
-        if img_working is not img_original:
-            img_to_close.append(img_working)
-
-        if img_working.mode != "RGB":
-            img_rgb = img_working.convert("RGB")
-            img_to_close.append(img_rgb)
-            img_working = img_rgb
-
-        # Compute noise_cv cheaply (~20ms). Only injects a hint when the value
-        # falls in [forensic_noise_cv_floor, forensic_noise_cv_ceil) — a range
-        # that contains only AI images and zero real images in the gold dataset.
-        # Outside that range the signal is too ambiguous to be directional.
-        # Wrapped in try-except so any PIL edge-case never fails the full inference call.
-        noise_hint = ""
-        try:
-            noise_cv = _compute_noise_cv(img_working)
-            if settings.forensic_noise_cv_floor <= noise_cv < settings.forensic_noise_cv_ceil:
-                noise_hint = (
-                    f" [Forensic note: noise spatial uniformity score {noise_cv:.3f} is in a "
-                    f"range consistent with AI diffusion output — examine micro-texture "
-                    f"consistency across flat regions and edges especially carefully.]"
-                )
-                logger.info("forensic_noise_hint_fired", extra={
-                    "action": "forensic_noise_hint_fired",
-                    "noise_cv": round(noise_cv, 4),
-                    "image_size": f"{img_working.width}x{img_working.height}",
-                })
-        except Exception as noise_err:
-            logger.warning("forensic_noise_cv_failed", extra={
-                "action": "forensic_noise_cv_failed",
-                "error": str(noise_err),
-                "image_size": f"{img_working.width}x{img_working.height}" if img_working else "unknown",
-            })
-
-        img_byte_arr = io.BytesIO()
-        img_working.save(img_byte_arr, format='JPEG', quality=settings.gemini_jpeg_quality)
-        image_bytes = img_byte_arr.getvalue()
-
-        for img_obj in img_to_close:
-            img_obj.close()
-
-        config = types.GenerateContentConfig(
-            system_instruction=get_system_instruction(quality_context),
-            media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
-            thinking_config=types.ThinkingConfig(thinking_level=settings.gemini_thinking_level),
-            temperature=settings.gemini_temperature,
-            response_mime_type="application/json",
-            response_schema=DetectionResult,
-        )
-
-        execution_query = (
-            "Carefully analyze this image for generative AI manipulation, "
-            f"strictly following the system instructions.{noise_hint}"
-        )
-
-        # NOTE: tested prompt-repetition trick (query duplicated) at LOW + temp=0.0.
-        # Empirically regressed gold-set accuracy 84% → 76%, even though it shifted which
-        # specific FP occurred. The published research ("Prompt Repetition Improves
-        # Non-Reasoning LLMs", Dec 2025) reports gains only for fully non-reasoning models;
-        # LOW thinking on Gemini 3.5 still does enough internal reasoning that duplication
-        # destabilises rather than reinforces. Send the query exactly once.
-        t0 = time.perf_counter()
-        response = client.models.generate_content(
-            model=settings.gemini_model,
-            contents=[
-                types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
-                execution_query,
-            ],
-            config=config
-        )
-        duration_ms = round((time.perf_counter() - t0) * 1000, 1)
-
-        parsed_result = response.parsed
-        if parsed_result is None:
-            # Schema mismatch or safety block — log as a parse failure, not a network failure.
-            raise ValueError("Gemini returned no parsed DetectionResult (schema mismatch or safety block)")
-
-        result = {
-            "visual_scan": parsed_result.visual_scan,
-            "confidence": parsed_result.confidence,
-            "signal_category": parsed_result.signal_category,
-            "quality_score": quality_score
-        }
-
-        if hasattr(response, "usage_metadata"):
-            input_tokens = response.usage_metadata.prompt_token_count
-            output_tokens = response.usage_metadata.candidates_token_count
-            result["usage"] = {
-                "prompt_tokens": input_tokens,
-                "completion_tokens": output_tokens,
-                "total_tokens": response.usage_metadata.total_token_count
-            }
-            logger.info("gemini_call_completed", extra={
-                "action": "gemini_call_completed",
-                "model": settings.gemini_model,
-                "call_type": "single_image",
-                "duration_ms": duration_ms,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "cost_usd": settings.gemini_fixed_cost,
-            })
-        else:
-            logger.info("gemini_call_completed", extra={
-                "action": "gemini_call_completed",
-                "model": settings.gemini_model,
-                "call_type": "single_image",
-                "duration_ms": duration_ms,
-                "cost_usd": settings.gemini_fixed_cost,
-            })
-
-        result["quality_context"] = quality_context
-        return result
-
-    except Exception as e:
-        logger.error("gemini_analyze_error", extra={
-            "action": "gemini_analyze_error",
-            "call_type": "single_image",
-            "error": str(e),
-            "error_type": type(e).__name__,
-            "image_source_type": "file_path" if isinstance(image_source, str) else "pil_image",
-        }, exc_info=True)
-        # confidence=-1.0 signals a hard failure to image_detector.py
-        return {"confidence": -1.0, "signal_category": "multiple_subtle_ai_artifacts_present"}
 
 
 def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image, bytes]]) -> dict:
@@ -477,13 +294,3 @@ def analyze_batch_images_pro_turbo(image_sources: list[Union[str, Image.Image, b
         return {"confidence": -1.0}
 
 
-if __name__ == "__main__":
-    import sys
-    if len(sys.argv) > 1:
-        path = sys.argv[1]
-        print(f"Analyzing: {path}...")
-        start = time.perf_counter()
-        result = analyze_image_pro_turbo(path)
-        end = time.perf_counter()
-        print(f"Result: {json.dumps(result, indent=2)}")
-        print(f"Latency: {end - start:.4f}s")

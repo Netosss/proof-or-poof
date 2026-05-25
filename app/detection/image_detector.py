@@ -12,7 +12,6 @@ import os
 import json
 import asyncio
 import logging
-import random
 from typing import Optional
 from PIL import Image
 
@@ -26,45 +25,8 @@ from app.detection.metadata_scorer import (
     get_forensic_metadata_score,
     get_ai_suspicion_score,
 )
-from app.integrations.gemini.client import analyze_image_pro_turbo
-from app.integrations.gemini.client_v2 import analyze_image_pro_turbo_v2
-from app.detection.ensemble_engine import analyze_image_ensemble
+from app.integrations.gemini.client_combined import analyze_image_combined_async
 from app.integrations.gemini.quality import get_quality_context
-
-
-def _should_route_to_combined() -> bool:
-    """
-    Single source of truth for the canary-roll decision. Returns True when
-    this request should go through the combined engine, considering BOTH
-    settings.detection_engine ('combined' wins) AND settings.combined_rollout_pct
-    (random per-request roll). Extracted so the dispatcher and tests use
-    the same expression — drifting test logic from production code is a
-    bug factory.
-    """
-    if settings.detection_engine == "combined":
-        return True
-    rollout_pct = max(0.0, min(1.0, settings.combined_rollout_pct))
-    return rollout_pct > 0.0 and random.random() < rollout_pct
-
-
-def _select_analyzer():
-    """
-    Dispatch to v1 or v2 Gemini sync analyzer based on settings.detection_engine.
-
-    DOES NOT handle the ensemble engine. The ensemble path is async-native and
-    is awaited directly by detect_ai_media_image_logic — calling _select_analyzer
-    while detection_engine='ensemble' is a programming error (a future refactor
-    would wrap the sync wrapper in asyncio.to_thread, creating the nested
-    event loop the ensemble docstring explicitly warns against). The assert
-    keeps that invariant honest.
-    """
-    assert settings.detection_engine not in ("ensemble", "combined"), (
-        f"engine={settings.detection_engine!r} must be awaited directly "
-        "via its async function, not routed through _select_analyzer"
-    )
-    if settings.detection_engine == "v2":
-        return analyze_image_pro_turbo_v2
-    return analyze_image_pro_turbo
 
 logger = logging.getLogger(__name__)
 
@@ -507,76 +469,18 @@ async def detect_ai_media_image_logic(
             "error_type": type(e).__name__,
         })
 
-    # Canary roll: see _should_route_to_combined() for the rule. Combined-
-    # engine takes precedence; otherwise a sampled share of traffic is routed
-    # through it so it can be A/B-tested under real production load.
-    use_combined = _should_route_to_combined()
-    routed_engine = "combined" if use_combined else settings.detection_engine
+    # Single Gemini call, all three forensic perspectives merged.
+    # Native-async — Gemini I/O wait doesn't consume a thread, cancellations
+    # propagate to the HTTP socket cleanly. Image prep (CPU-bound) runs
+    # inside the function via asyncio.to_thread.
+    gemini_res = await analyze_image_combined_async(
+        source_for_gemini,
+        pre_calculated_quality_context=pre_calc_context,
+        pre_calculated_quality_score=pre_calc_quality_score,
+    )
 
-    if use_combined:
-        # RECOMMENDED engine. Single Gemini call with all 3 forensic
-        # perspectives merged. Native-async path so cancellations / timeouts
-        # propagate to the HTTP socket directly.
-        from app.integrations.gemini.client_combined import analyze_image_combined_async
-        gemini_res = await analyze_image_combined_async(
-            source_for_gemini,
-            pre_calculated_quality_context=pre_calc_context,
-            pre_calculated_quality_score=pre_calc_quality_score,
-        )
-    elif settings.detection_engine == "ensemble":
-        # Native-async — the ensemble fan-out is asyncio-native (gather + race),
-        # so wrapping it in asyncio.to_thread would create a nested event loop
-        # whose close() blocks waiting for abandoned Gemini threads. Awaiting
-        # directly lets cancellations propagate immediately and respects the
-        # race-to-AI early-exit latency budget.
-        from app.detection.ensemble_engine import analyze_image_ensemble_async
-        gemini_res = await analyze_image_ensemble_async(
-            source_for_gemini,
-            pre_calculated_quality_context=pre_calc_context,
-            pre_calculated_quality_score=pre_calc_quality_score,
-        )
-    else:
-        analyzer = _select_analyzer()
-        gemini_res = await asyncio.to_thread(
-            analyzer, source_for_gemini,
-            pre_calculated_quality_context=pre_calc_context
-        )
-
-    # Graceful degradation: if combined or ensemble returns the failure
-    # sentinel, fall back to v1 instead of showing 'Analysis Failed' to the
-    # user. Only kicks in when settings.combined_fallback_to_v1 is True
-    # (default). Disable to surface failures during incident debugging.
-    fallback_fired = False
-    if (
-        settings.combined_fallback_to_v1
-        and routed_engine in ("combined", "ensemble")
-        and gemini_res.get("confidence", -1.0) == -1.0
-    ):
-        fallback_fired = True
-        logger.warning("detection_engine_fallback_to_v1", extra={
-            "action": "detection_engine_fallback_to_v1",
-            "from_engine": routed_engine,
-        })
-        gemini_res = await asyncio.to_thread(
-            analyze_image_pro_turbo, source_for_gemini,
-            pre_calculated_quality_context=pre_calc_context,
-        )
-        # Preserve the pre-computed quality_score (which combined was given
-        # but the v1 analyzer cannot itself read).
-        if pre_calc_quality_score and gemini_res.get("quality_score", 0) == 0:
-            gemini_res["quality_score"] = pre_calc_quality_score
-        # Double-failure: v1 ALSO returned the sentinel. The user is about to
-        # see "Analysis Failed". Log at ERROR so alerting picks it up — this
-        # is a different outage signal from a transient combined failure.
-        if gemini_res.get("confidence", -1.0) == -1.0:
-            logger.error("detection_engine_v1_fallback_also_failed", extra={
-                "action": "detection_engine_v1_fallback_also_failed",
-                "from_engine": routed_engine,
-            })
     logger.info("gemini_response", extra={
         "action": "gemini_response",
-        "engine": routed_engine,
-        "fallback_fired": fallback_fired,
         "confidence": gemini_res.get("confidence"),
         "quality_score": gemini_res.get("quality_score"),
     })
