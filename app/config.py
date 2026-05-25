@@ -373,6 +373,30 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ #
     # Detection engine routing                                            #
     # ------------------------------------------------------------------ #
+    combined_rollout_pct: float = Field(
+        0.0,
+        description=(
+            "Percentage [0.0–1.0] of detection traffic to canary-route to the "
+            "'combined' single-call engine, BYPASSING the configured "
+            "detection_engine value. 0.0 disables (all traffic uses "
+            "detection_engine); 0.05 means 5% of traffic gets combined; 1.0 "
+            "is effectively the same as detection_engine='combined'. Uses "
+            "per-request random sampling — not user-stable. For user-stable "
+            "canary, plumb device_id or user_id into the dispatch and hash. "
+            "If the combined call fails (confidence -1.0), we ALWAYS fall back "
+            "to v1 instead of returning 'Analysis Failed' — see image_detector."
+        ),
+    )
+    combined_fallback_to_v1: bool = Field(
+        True,
+        description=(
+            "If the combined or ensemble engine returns confidence=-1.0 "
+            "(failure sentinel), fall back to the v1 sync analyzer instead "
+            "of returning 'Analysis Failed' to the user. Graceful degradation "
+            "for the canary period — disable only if you want failures to "
+            "surface so they can be alerted on."
+        ),
+    )
     detection_engine: str = Field(
         "v1",
         description=(

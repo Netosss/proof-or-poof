@@ -12,6 +12,7 @@ import os
 import json
 import asyncio
 import logging
+import random
 from typing import Optional
 from PIL import Image
 
@@ -481,7 +482,21 @@ async def detect_ai_media_image_logic(
             "error_type": type(e).__name__,
         })
 
-    if settings.detection_engine == "combined":
+    # Canary roll: combined_rollout_pct overrides the configured engine on a
+    # per-request basis. Non-zero values route a sampled share of traffic
+    # through 'combined' so it can be A/B-tested under real production load
+    # without flipping the global default.
+    rollout_pct = max(0.0, min(1.0, settings.combined_rollout_pct))
+    use_combined = (
+        settings.detection_engine == "combined"
+        or (rollout_pct > 0.0 and random.random() < rollout_pct)
+    )
+    routed_engine = (
+        "combined" if use_combined
+        else settings.detection_engine
+    )
+
+    if use_combined:
         # RECOMMENDED engine. Single Gemini call with all 3 forensic
         # perspectives merged. Native-async path so cancellations / timeouts
         # propagate to the HTTP socket directly.
@@ -508,6 +523,24 @@ async def detect_ai_media_image_logic(
         gemini_res = await asyncio.to_thread(
             analyzer, source_for_gemini,
             pre_calculated_quality_context=pre_calc_context
+        )
+
+    # Graceful degradation: if combined or ensemble returns the failure
+    # sentinel, fall back to v1 instead of showing 'Analysis Failed' to the
+    # user. Only kicks in when settings.combined_fallback_to_v1 is True
+    # (default). Disable to surface failures during incident debugging.
+    if (
+        settings.combined_fallback_to_v1
+        and routed_engine in ("combined", "ensemble")
+        and gemini_res.get("confidence", -1.0) == -1.0
+    ):
+        logger.warning("detection_engine_fallback_to_v1", extra={
+            "action": "detection_engine_fallback_to_v1",
+            "from_engine": routed_engine,
+        })
+        gemini_res = await asyncio.to_thread(
+            analyze_image_pro_turbo, source_for_gemini,
+            pre_calculated_quality_context=pre_calc_context,
         )
     logger.info("gemini_response", extra={
         "action": "gemini_response",

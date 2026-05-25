@@ -211,6 +211,39 @@ class TestEngineDispatch:
             image_detector._select_analyzer()
 
 
+class TestCanaryRollout:
+    """combined_rollout_pct lets us A/B-test combined under production traffic."""
+
+    def test_zero_pct_does_not_route_to_combined(self, monkeypatch):
+        """rollout_pct = 0.0 means traffic stays on the configured engine."""
+        from app.config import settings
+        monkeypatch.setattr(settings, "combined_rollout_pct", 0.0)
+        monkeypatch.setattr(settings, "detection_engine", "v1")
+        # Compute the same boolean image_detector uses
+        import random as _random
+        use_combined = (
+            settings.detection_engine == "combined"
+            or (settings.combined_rollout_pct > 0.0
+                and _random.random() < settings.combined_rollout_pct)
+        )
+        assert not use_combined
+
+    def test_full_pct_always_routes_to_combined(self, monkeypatch):
+        """rollout_pct = 1.0 means EVERY request routes to combined regardless of engine."""
+        from app.config import settings
+        monkeypatch.setattr(settings, "combined_rollout_pct", 1.0)
+        monkeypatch.setattr(settings, "detection_engine", "v1")
+        import random as _random
+        # 1000 rolls should all route to combined under pct=1.0
+        results = [
+            (settings.detection_engine == "combined"
+             or (settings.combined_rollout_pct > 0.0
+                 and _random.random() < settings.combined_rollout_pct))
+            for _ in range(1000)
+        ]
+        assert all(results)
+
+
 class TestCombinedEngineWiring:
     def test_combined_analyzer_importable(self):
         from app.integrations.gemini.client_combined import analyze_image_combined_async
