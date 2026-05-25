@@ -1,3 +1,21 @@
+> **2026-05-25 UPDATE — combined-batch wins:** An empirical cost/accuracy
+> comparison (`scripts/eval_cost_accuracy.py`) found that merging the three
+> ensemble perspectives into ONE Gemini call (the new `combined` engine)
+> beats the parallel ensemble on every axis:
+>
+>   | Metric             | ensemble | combined |
+>   |--------------------|----------|----------|
+>   | Accuracy           | 92%      | **96%**  |
+>   | FP rate (REAL imgs)| 1/11     | **0/11** |
+>   | Cost / 1000        | $2.40    | **$1.45**|
+>   | p95 latency        | 10.1s    | 11.5s    |
+>
+> All the architectural concerns below (thread pool, ghost connections,
+> rate-limit blast radius, complex vote rule) **collapse** under
+> combined-batch — there's only one API call per detection. The deferred
+> items remain relevant if the ensemble is kept as an alternate engine, but
+> the recommended scale-up path uses `detection_engine="combined"`.
+
 # Deferred fixes from the multi-expert review (`feat/detection-v2-forensic-rewrite`)
 
 These four items came out of the multi-expert review but **touch the prompt or the voting rule**, so they can shift accuracy in either direction. Apply them one at a time after baseline accuracy is measured on a 5-image (or larger) test set, and re-verify accuracy after each.

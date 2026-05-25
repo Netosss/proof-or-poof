@@ -42,9 +42,9 @@ def _select_analyzer():
     event loop the ensemble docstring explicitly warns against). The assert
     keeps that invariant honest.
     """
-    assert settings.detection_engine != "ensemble", (
-        "ensemble must be awaited directly via analyze_image_ensemble_async, "
-        "not routed through _select_analyzer"
+    assert settings.detection_engine not in ("ensemble", "combined"), (
+        f"engine={settings.detection_engine!r} must be awaited directly "
+        "via its async function, not routed through _select_analyzer"
     )
     if settings.detection_engine == "v2":
         return analyze_image_pro_turbo_v2
@@ -481,7 +481,17 @@ async def detect_ai_media_image_logic(
             "error_type": type(e).__name__,
         })
 
-    if settings.detection_engine == "ensemble":
+    if settings.detection_engine == "combined":
+        # RECOMMENDED engine. Single Gemini call with all 3 forensic
+        # perspectives merged. Native-async path so cancellations / timeouts
+        # propagate to the HTTP socket directly.
+        from app.integrations.gemini.client_combined import analyze_image_combined_async
+        gemini_res = await analyze_image_combined_async(
+            source_for_gemini,
+            pre_calculated_quality_context=pre_calc_context,
+            pre_calculated_quality_score=pre_calc_quality_score,
+        )
+    elif settings.detection_engine == "ensemble":
         # Native-async — the ensemble fan-out is asyncio-native (gather + race),
         # so wrapping it in asyncio.to_thread would create a nested event loop
         # whose close() blocks waiting for abandoned Gemini threads. Awaiting

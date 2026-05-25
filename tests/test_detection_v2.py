@@ -199,8 +199,32 @@ class TestEngineDispatch:
         from app.detection import image_detector
 
         monkeypatch.setattr(image_detector.settings, "detection_engine", "ensemble")
-        with pytest.raises(AssertionError, match="ensemble must be awaited directly"):
+        with pytest.raises(AssertionError, match="must be awaited directly"):
             image_detector._select_analyzer()
+
+    def test_combined_engine_rejects_select_analyzer_path(self, monkeypatch):
+        """Combined engine is also native-async — _select_analyzer must reject it."""
+        from app.detection import image_detector
+
+        monkeypatch.setattr(image_detector.settings, "detection_engine", "combined")
+        with pytest.raises(AssertionError, match="must be awaited directly"):
+            image_detector._select_analyzer()
+
+
+class TestCombinedEngineWiring:
+    def test_combined_analyzer_importable(self):
+        from app.integrations.gemini.client_combined import analyze_image_combined_async
+        assert callable(analyze_image_combined_async)
+
+    def test_combined_prompt_includes_all_three_perspectives(self):
+        from app.integrations.gemini.prompts_ensemble import get_combined_prompt
+        prompt = get_combined_prompt("HIGH quality test")
+        assert "PERSPECTIVE 1 — ANATOMY" in prompt
+        assert "PERSPECTIVE 2 — PHYSICS" in prompt
+        assert "PERSPECTIVE 3 — COMPOSITION" in prompt
+        # Exception clauses must be present
+        assert "StudioException" in prompt or "studio" in prompt.lower()
+        assert "Hollywood" in prompt
 
 
 class TestAsymmetricVote:
