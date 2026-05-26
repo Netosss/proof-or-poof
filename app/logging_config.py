@@ -259,12 +259,16 @@ def configure_json_logging() -> None:
     # the same clean record shape).
 
     # --- 1. Stdout / Railway handler (always active) ---
+    # Format string lists ONLY the fields that are always present on every
+    # LogRecord. Context fields (request_id/device_id/user_id/severity) are
+    # injected by RequestContextFilter and picked up automatically by
+    # JsonFormatter when they're present on the record — putting them in the
+    # format string forces JsonFormatter to emit them as `null` even after
+    # StripEmptyFieldsFilter has deleted them from record.__dict__, which is
+    # the exact field-budget pollution this filter exists to prevent.
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(
-        jsonlogger.JsonFormatter(
-            "%(asctime)s %(levelname)s %(name)s %(message)s "
-            "%(request_id)s %(device_id)s %(user_id)s %(severity)s"
-        )
+        jsonlogger.JsonFormatter("%(asctime)s %(levelname)s %(name)s %(message)s")
     )
     stream_handler.addFilter(ctx_filter)
     stream_handler.addFilter(strip_filter)
