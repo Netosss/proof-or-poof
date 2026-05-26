@@ -58,16 +58,65 @@ class DetectionResponse(BaseModel):
     is_short_circuited: bool = False
     evidence_chain: List[EvidenceItem]
     short_id: Optional[str] = None
+    # 32-char hex UUID issued by the /detect route. Clients poll
+    # /detect/progress/{task_id} during the wait to drive the stage UI.
+    task_id: Optional[str] = None
 
 
-class DetectionResult(BaseModel):
-    """Gemini structured output schema — one result per image frame."""
-    visual_scan: str = Field(
-        description="Crucial visual anomaly observed, or single authenticity marker if clean. Max 25 words."
+# ---------------------------------------------------------------------------
+# Macro forensic categories returned by the combined Gemini schema. Mapped
+# back to the legacy 19-category strings (SIGNAL_CATEGORIES above) by
+# V2_TO_LEGACY_CATEGORY for the user-facing response shape.
+# ---------------------------------------------------------------------------
+SIGNAL_CATEGORIES_V2 = Literal[
+    "peripheral_or_background_structural_collapse",
+    "objects_merge_or_dissolve_at_boundaries",
+    "geometry_or_perspective_is_physically_impossible",
+    "in_scene_text_is_melted_or_gibberish",
+    "multiple_subtle_ai_artifacts_present",
+    "no_visual_anomalies_detected",
+]
+
+
+# Mapping from combined-schema macro buckets → legacy 19-category strings
+# used by image_detector._label_for and the downstream API response shape.
+# Keeps the Gemini-side category space small (5 macros) without breaking
+# downstream consumers that expect the legacy taxonomy.
+V2_TO_LEGACY_CATEGORY: dict[str, str] = {
+    "peripheral_or_background_structural_collapse": "facial_detail_inconsistency_detected",
+    "objects_merge_or_dissolve_at_boundaries": "objects_merge_or_dissolve_at_boundaries",
+    "geometry_or_perspective_is_physically_impossible": "geometry_or_perspective_is_physically_impossible",
+    "in_scene_text_is_melted_or_gibberish": "text_or_signage_contains_gibberish_characters",
+    "multiple_subtle_ai_artifacts_present": "multiple_subtle_ai_artifacts_present",
+    "no_visual_anomalies_detected": "no_visual_anomalies_detected",
+}
+
+
+class CombinedDetectionResult(BaseModel):
+    """
+    Forensic verdict from the combined Gemini call.
+
+    Single response covering all three forensic perspectives (anatomy,
+    physics, composition). `region_anchor` enforces structural anti-
+    anchoring: any AI verdict (confidence >= 0.5) must point to a specific
+    named image region — combats the model's tendency to confabulate
+    authenticity claims without evidence.
+    """
+    findings: str = Field(
+        description="Brief description of the strongest forensic signal observed. Max 40 words."
+    )
+    region_anchor: str = Field(
+        description=(
+            "The SPECIFIC, NAMED image region where the strongest anomaly is "
+            "observed. E.g. 'left temple', 'upper-left corner', 'subject's right "
+            "armpit', 'background near the AC unit'. Use 'none' ONLY when the "
+            "image appears authentic (confidence < 0.5) — any AI verdict MUST "
+            "be anchored to a named region."
+        ),
     )
     confidence: float = Field(
-        description="Probability the image is AI-generated, 0.0 (clearly real) to 1.0 (clearly AI)."
+        description="0.0 (clearly real) to 1.0 (clearly AI)."
     )
-    signal_category: SIGNAL_CATEGORIES = Field(
-        description="Single primary forensic signal. Must be an exact enum key from the system instructions."
+    signal_category: SIGNAL_CATEGORIES_V2 = Field(
+        description="Exactly one macro forensic bucket from the closed list."
     )

@@ -25,8 +25,9 @@ from app.detection.metadata_scorer import (
     get_forensic_metadata_score,
     get_ai_suspicion_score,
 )
-from app.integrations.gemini.client import analyze_image_pro_turbo
+from app.integrations.gemini.client_combined import analyze_image_combined_async
 from app.integrations.gemini.quality import get_quality_context
+from app.integrations import progress as progress_module
 
 logger = logging.getLogger(__name__)
 
@@ -57,15 +58,61 @@ def _label_for(signal_category: str) -> str:
 
 def boost_score(score: float, is_ai_likely: bool = True) -> float:
     """
-    Soft proportional boost for AI-likely results only.
+    Soft proportional boost for AI-likely results, capped at 0.99.
 
     Nudges uncertain AI scores (e.g. 0.55 → 0.66) without hard-flooring every
-    result at 0.85, which inflated false positives. Strong signals (e.g. 0.90)
-    are boosted only slightly (→ 0.925). Human results are never boosted.
+    result at 0.85. Strong signals (e.g. 0.90) are boosted only slightly
+    (→ 0.925). Human results are passed through unmodified. The 0.99 cap
+    lives here so callers cannot accidentally emit absolute-certainty (1.0)
+    verdicts — UX policy never shows 100% certainty either way.
     """
     if is_ai_likely:
-        return score + (1.0 - score) * 0.25
-    return score
+        boosted = score + (1.0 - score) * 0.25
+        return min(0.99, boosted)
+    return min(0.99, score)
+
+
+def _build_gemini_evidence_response(
+    *,
+    summary: str,
+    confidence: float,
+    is_ai_likely: bool,
+    visual_detail: str,
+    context_quality: str,
+    is_gemini_used: bool,
+    is_cached: bool,
+) -> dict:
+    """
+    Build the Gemini-path response envelope.
+
+    Single source of truth for the 3 sites that emit a Gemini-derived verdict
+    (cache hit with prior Gemini result, fresh Gemini success, and cached GPU
+    forensic result). Schema drift bugs from copy-paste evidence_chain edits
+    are mechanically prevented.
+    """
+    return {
+        "summary": summary,
+        "confidence_score": round(confidence, 2),
+        "is_gemini_used": is_gemini_used,
+        "is_cached": is_cached,
+        "gpu_time_ms": 0,
+        "is_short_circuited": False,
+        "evidence_chain": [
+            {
+                "layer": "Metadata Check",
+                "status": "warning",
+                "label": "Origin Check",
+                "detail": "No camera fingerprint found.",
+            },
+            {
+                "layer": "Visual Context",
+                "status": "flagged" if is_ai_likely else "passed",
+                "label": "Visual Inspection",
+                "detail": visual_detail,
+                "context_quality": context_quality,
+            },
+        ],
+    }
 
 
 async def detect_ai_media_image_logic(
@@ -89,11 +136,21 @@ async def detect_ai_media_image_logic(
     else:
         exif = await asyncio.to_thread(get_exif_data, file_path)
         try:
-            with Image.open(file_path) as img:
-                width, height = img.size
-                img_format = (img.format or "unknown").lower()
+            # Wrap PIL dimension probe in to_thread — `Image.open(...).size` on
+            # a 20MB upload can block the event loop for 10–80ms, which under
+            # Railway's single-worker uvicorn serialises EVERY concurrent
+            # request. Combined with get_exif_data above, this is the per-
+            # request CPU cost moved off the event loop.
+            def _probe_dimensions(path: str) -> tuple[int, int, str, int]:
+                with Image.open(path) as _img:
+                    w, h = _img.size
+                    fmt = (_img.format or "unknown").lower()
+                return w, h, fmt, os.path.getsize(path)
+
+            width, height, img_format, file_size = await asyncio.to_thread(
+                _probe_dimensions, file_path
+            )
             source_for_hash = file_path
-            file_size = os.path.getsize(file_path)
         except Exception as open_err:
             logger.error("image_open_failed", extra={
                 "action": "image_open_failed",
@@ -152,8 +209,14 @@ async def detect_ai_media_image_logic(
         "file_size_bytes": file_size,
     })
 
-    # Stringify values to handle non-JSON-serializable types (IFDRational, bytes, etc.)
-    clean_metadata = f" {json.dumps({k: str(v) for k, v in exif.items()})} "
+    # Stringify keys (PIL returns int EXIF tag IDs / bytes for IFD sub-blocks)
+    # AND fall back default=str for values (IFDRational, bytes, nested tuples).
+    # Belt-and-suspenders — without both, json.dumps raises TypeError on
+    # certain images with unusual EXIF structures.
+    try:
+        clean_metadata = f" {json.dumps({str(k): v for k, v in exif.items()}, default=str)} "
+    except (TypeError, ValueError):
+        clean_metadata = " {} "
     full_dump = clean_metadata
 
     if not frame and file_path and os.path.exists(file_path):
@@ -326,46 +389,30 @@ async def detect_ai_media_image_logic(
         if is_gemini_used:
             is_ai_likely = forensic_probability > settings.ai_confidence_threshold
             raw_conf = forensic_probability if is_ai_likely else (1.0 - forensic_probability)
-            final_conf = min(0.99, boost_score(raw_conf, is_ai_likely=is_ai_likely))
+            final_conf = boost_score(raw_conf, is_ai_likely=is_ai_likely)
 
             cached_signal = cached_result.get("signal_category", "multiple_subtle_ai_artifacts_present")
             cached_explanation = _label_for(cached_signal)
             cached_quality_context = cached_result.get("quality_context", "Unknown")
 
-            return {
-                "summary": "Likely AI-Generated" if is_ai_likely else "Likely Authentic",
-                "confidence_score": round(final_conf, 2),
-                "is_gemini_used": True,
-                "is_cached": True,
-                "gpu_time_ms": 0,
-                "is_short_circuited": False,
-                "evidence_chain": [
-                    {
-                        "layer": "Metadata Check",
-                        "status": "warning",
-                        "label": "Origin Check",
-                        "detail": "No camera fingerprint found."
-                    },
-                    {
-                        "layer": "Visual Context",
-                        "status": "flagged" if is_ai_likely else "passed",
-                        "label": "Visual Inspection",
-                        "detail": cached_explanation,
-                        "context_quality": cached_quality_context
-                    }
-                ]
-            }
+            return _build_gemini_evidence_response(
+                summary="Likely AI-Generated" if is_ai_likely else "Likely Authentic",
+                confidence=final_conf,
+                is_ai_likely=is_ai_likely,
+                visual_detail=cached_explanation,
+                context_quality=cached_quality_context,
+                is_gemini_used=True,
+                is_cached=True,
+            )
         else:
             logger.info("cache_hit_image", extra={"action": "cache_hit_image", "ai_score": round(forensic_probability, 4)})
             is_ai_likely = forensic_probability > settings.ai_confidence_threshold
             raw_conf = forensic_probability if is_ai_likely else (1.0 - forensic_probability)
             final_conf = boost_score(raw_conf, is_ai_likely=is_ai_likely)
 
-            if final_conf > 0.99:
-                final_conf = 0.99
-
             summary = "AI-Generated" if forensic_probability > settings.ai_confidence_threshold else "No AI Detected"
-
+            # Deep Forensics path uses a different second-row label/detail; emit
+            # it inline rather than overloading the Gemini helper with a flag.
             return {
                 "summary": summary,
                 "confidence_score": round(final_conf, 2),
@@ -377,15 +424,19 @@ async def detect_ai_media_image_logic(
                         "layer": "Metadata Check",
                         "status": "warning",
                         "label": "Origin Check",
-                        "detail": "No camera fingerprint found."
+                        "detail": "No camera fingerprint found.",
                     },
                     {
                         "layer": "Deep Forensics",
                         "status": "flagged" if is_ai_likely else "passed",
                         "label": "Structural Analysis",
-                        "detail": "Noise patterns consistent with generative AI." if is_ai_likely else "Sensor noise patterns consistent with optical lenses."
-                    }
-                ]
+                        "detail": (
+                            "Noise patterns consistent with generative AI."
+                            if is_ai_likely
+                            else "Sensor noise patterns consistent with optical lenses."
+                        ),
+                    },
+                ],
             }
 
     # --- GEMINI ---
@@ -401,17 +452,17 @@ async def detect_ai_media_image_logic(
     })
 
     pre_calc_context = None
+    pre_calc_quality_score: Optional[int] = None
     source_for_gemini = frame or file_path
 
     try:
-        def _get_context_safe():
+        def _get_context_safe() -> tuple[str, int]:
             if frame:
-                return get_quality_context(frame)[0]
-            else:
-                with Image.open(file_path) as img:
-                    return get_quality_context(img)[0]
+                return get_quality_context(frame)
+            with Image.open(file_path) as img:
+                return get_quality_context(img)
 
-        pre_calc_context = await asyncio.to_thread(_get_context_safe)
+        pre_calc_context, pre_calc_quality_score = await asyncio.to_thread(_get_context_safe)
     except Exception as e:
         logger.warning("gemini_precalc_failed", extra={
             "action": "gemini_precalc_failed",
@@ -419,10 +470,20 @@ async def detect_ai_media_image_logic(
             "error_type": type(e).__name__,
         })
 
-    gemini_res = await asyncio.to_thread(
-        analyze_image_pro_turbo, source_for_gemini,
-        pre_calculated_quality_context=pre_calc_context
+    # Forensic stage begins — calling Gemini. Image-path counterpart of the
+    # video forensic emit in pipeline.py.
+    await progress_module.emit("forensic")
+
+    # Single Gemini call, all three forensic perspectives merged.
+    # Native-async — Gemini I/O wait doesn't consume a thread, cancellations
+    # propagate to the HTTP socket cleanly. Image prep (CPU-bound) runs
+    # inside the function via asyncio.to_thread.
+    gemini_res = await analyze_image_combined_async(
+        source_for_gemini,
+        pre_calculated_quality_context=pre_calc_context,
+        pre_calculated_quality_score=pre_calc_quality_score,
     )
+
     logger.info("gemini_response", extra={
         "action": "gemini_response",
         "confidence": gemini_res.get("confidence"),
@@ -445,30 +506,17 @@ async def detect_ai_media_image_logic(
 
         is_ai_likely = gemini_score > settings.ai_confidence_threshold
         raw_conf = gemini_score if is_ai_likely else (1.0 - gemini_score)
-        final_conf = min(0.99, boost_score(raw_conf, is_ai_likely=is_ai_likely))
+        final_conf = boost_score(raw_conf, is_ai_likely=is_ai_likely)
 
-        return {
-            "summary": "Likely AI-Generated" if is_ai_likely else "Likely Authentic",
-            "confidence_score": round(final_conf, 2),
-            "is_gemini_used": True,
-            "gpu_time_ms": 0,
-            "is_short_circuited": False,
-            "evidence_chain": [
-                {
-                    "layer": "Metadata Check",
-                    "status": "warning",
-                    "label": "Origin Check",
-                    "detail": "No camera fingerprint found."
-                },
-                {
-                    "layer": "Visual Context",
-                    "status": "flagged" if is_ai_likely else "passed",
-                    "label": "Visual Inspection",
-                    "detail": gemini_explanation,
-                    "context_quality": quality_context
-                }
-            ]
-        }
+        return _build_gemini_evidence_response(
+            summary="Likely AI-Generated" if is_ai_likely else "Likely Authentic",
+            confidence=final_conf,
+            is_ai_likely=is_ai_likely,
+            visual_detail=gemini_explanation,
+            context_quality=quality_context,
+            is_gemini_used=True,
+            is_cached=False,
+        )
 
     return {
         "summary": "Analysis Failed",

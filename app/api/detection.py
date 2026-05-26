@@ -11,10 +11,12 @@ import asyncio
 import json
 import logging
 import os
+import re
 import tempfile
 import time
+import uuid
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Request, UploadFile
 from starlette.requests import ClientDisconnect
 
 from app.config import settings
@@ -23,6 +25,7 @@ from app.core.dependencies import security_manager
 from app.core.file_validator import ALLOWED_VIDEO_EXTENSIONS
 from app.core.firebase_auth import get_optional_user
 from app.detection.pipeline import detect_ai_media
+from app.integrations import progress as progress_module
 from app.integrations import redis_client as redis_module
 from app.logging_config import user_id_var
 from app.schemas.detection import DetectionResponse
@@ -41,6 +44,11 @@ VIDEO_SUFFIXES = ALLOWED_VIDEO_EXTENSIONS
 
 
 _UPLOAD_CHUNK = 65_536  # 64 KB — matches the HTTPS streaming path
+
+# 32-char hex UUIDs from uuid4().hex — strict shape guards against
+# arbitrary-key Redis reads via the progress endpoint and stops clients
+# from passing junk via the X-Task-Id header.
+_TASK_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 def _stream_upload_to_disk(upload_file: UploadFile, dest_path: str) -> None:
@@ -74,6 +82,7 @@ async def detect(
     request: Request,
     device_id: str = Header(..., alias="X-Device-ID"),
     turnstile_token: str | None = Header(None, alias="X-Turnstile-Token"),
+    client_task_id: str | None = Header(None, alias="X-Task-Id"),
     auth_user: dict | None = Depends(get_optional_user),
 ):
     """
@@ -89,6 +98,18 @@ async def detect(
     ip = get_client_ip(request)
 
     user_id_var.set(auth_user["uid"] if auth_user else device_id)
+
+    # Bind task_id to this request's async context. Clients pass their own
+    # X-Task-Id header so they can start polling /detect/progress BEFORE the
+    # main POST resolves (otherwise the wait would already be over by the time
+    # task_id arrived in the response body). Falls back to a server-generated
+    # UUID for legacy clients that don't send the header.
+    if client_task_id and _TASK_ID_RE.match(client_task_id):
+        task_id = client_task_id
+    else:
+        task_id = uuid.uuid4().hex
+    progress_module.init(task_id)
+    await progress_module.emit("provenance")
 
     if auth_user:
         # Firebase-authenticated users are already proven human via Google auth.
@@ -303,16 +324,22 @@ async def detect(
                 "CPU", -cost, {"file": filename, "device_id": device_id, "duration": duration}
             )
 
+        # Verdict stage — Gemini (if used) is done, building the evidence chain
+        # response. Always emitted, even on short-circuit paths, so the UI sees
+        # a 3-stage progression rather than a sudden jump to complete.
+        await progress_module.emit("verdict")
+
         result.pop("gpu_time_ms", None)
         result.pop("is_gemini_used", None)
         result.pop("is_cached", None)
 
         result["new_balance"] = new_balance
+        result["task_id"] = task_id
 
         short_id = _generate_short_id()
         rc = redis_module.client
         if rc:
-            shareable = {k: v for k, v in result.items() if k != "new_balance"}
+            shareable = {k: v for k, v in result.items() if k not in {"new_balance", "task_id"}}
             await rc.setex(
                 f"report:{short_id}", settings.report_cache_ttl_sec, json.dumps(shareable)
             )
@@ -339,8 +366,34 @@ async def detect(
             },
         )
 
+        # Final stage — client polling loop terminates on this signal.
+        await progress_module.emit("complete")
+
         return result
 
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
+
+
+@router.get("/detect/progress/{task_id}")
+async def detect_progress(
+    task_id: str = Path(..., description="Task identifier returned by POST /detect"),
+):
+    """
+    Lightweight progress poll for the detection wait-state UI.
+
+    Returns the current stage + elapsed_ms for a task. The client polls this
+    every ~800ms and stops on `stage: "complete"`, on the main /detect POST
+    resolving, or on a 45s watchdog (whichever fires first).
+
+    Responses:
+      {"stage": "pending"|"provenance"|"forensic"|"verdict"|"complete", "elapsed_ms": int}
+
+    `pending` means the task hasn't been seen yet (poll started before the
+    backend's first emit). The 45s watchdog covers the dead-worker case where
+    the pipeline crashed mid-Gemini and Redis still holds a stale stage.
+    """
+    if not _TASK_ID_RE.match(task_id):
+        raise HTTPException(status_code=400, detail="Invalid task_id")
+    return await progress_module.read(task_id)

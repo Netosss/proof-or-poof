@@ -14,7 +14,8 @@ import contextvars
 import logging
 
 from app.integrations.c2pa import get_c2pa_manifest
-from app.integrations.gemini.client import analyze_batch_images_pro_turbo
+from app.integrations.gemini.client_combined import analyze_video_frames_async
+from app.integrations import progress as progress_module
 from app.detection.hashing import get_smart_file_hash
 from app.detection.cache import get_cached_result, set_cached_result
 from app.detection.video_detector import (
@@ -361,10 +362,12 @@ async def detect_ai_media(file_path: str, trusted_metadata: dict = None) -> dict
             "quality_rejected": quality_rejected,
         })
 
-        ctx_gemini = contextvars.copy_context()
-        gemini_result = await loop.run_in_executor(
-            None, ctx_gemini.run, analyze_batch_images_pro_turbo, frames
-        )
+        # Forensic stage begins — frames prepared, calling Gemini.
+        await progress_module.emit("forensic")
+
+        # Native-async — Gemini I/O wait doesn't consume a thread, image
+        # prep inside analyze_video_frames_async runs via asyncio.to_thread.
+        gemini_result = await analyze_video_frames_async(frames)
 
         confidence = gemini_result.get("confidence", -1.0)
         explanation = gemini_result.get("explanation", "Analysis completed.")

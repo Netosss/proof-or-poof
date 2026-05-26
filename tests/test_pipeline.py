@@ -165,7 +165,8 @@ async def test_video_gemini_high_confidence(tmp_path):
             return_value=(fake_frames, 0),
         ),
         patch(
-            "app.detection.pipeline.analyze_batch_images_pro_turbo",
+            "app.detection.pipeline.analyze_video_frames_async",
+            new_callable=AsyncMock,
             return_value=_GEMINI_AI,
         ),
         patch("app.detection.pipeline.set_cached_result"),
