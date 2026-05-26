@@ -72,6 +72,60 @@ class RequestContextFilter(logging.Filter):
         return True
 
 
+# LogRecord attributes that the logging framework owns — never touch these.
+# Stripping any of these breaks formatters, traceback rendering, or correlation.
+_LOG_RECORD_RESERVED: frozenset[str] = frozenset({
+    "name", "msg", "args", "levelname", "levelno", "pathname", "filename",
+    "module", "exc_info", "exc_text", "stack_info", "lineno", "funcName",
+    "created", "msecs", "relativeCreated", "thread", "threadName",
+    "processName", "process", "message", "asctime", "taskName",
+})
+
+
+class StripEmptyFieldsFilter(logging.Filter):
+    """
+    Removes fields with value `None` or `""` from every LogRecord before the
+    formatter and Axiom serialiser see them. Applied universally — any log,
+    any dataset, any handler.
+
+    Rationale: Axiom (and any structured-log backend) bills by ingested bytes,
+    indexes a finite number of distinct field names per dataset (Axiom's free
+    tier hard-caps at 257 columns), and clogs query results with `partner_id=""`
+    style noise for every consumer request. Stripping at emit time keeps the
+    schema honest: a field's presence in a log entry means the field had a
+    real value at that moment, never an empty placeholder.
+
+    Preserves semantic falsy values — these carry meaning and must NOT be dropped:
+      - `False`          (boolean — "this thing was checked and was false")
+      - `0` / `0.0`      (numeric zero — "count was zero", "cost was free")
+      - `[]` / `{}`      (empty container — "we scored, found no signals")
+
+    The check `v is None or v == ""` is deliberately narrow:
+      - `None == ""`     → False  (so `None` is caught by the `is None` branch)
+      - `False == ""`    → False  (preserved)
+      - `0 == ""`        → False  (preserved)
+      - `0.0 == ""`      → False  (preserved)
+      - `"" == ""`       → True   (stripped)
+    Empty lists/dicts compare equal to `""` only via duck typing if you write
+    `not v`, which is exactly the lazy mistake to avoid — we don't use that.
+
+    Reserved LogRecord attributes (`message`, `levelname`, `exc_info`, etc.) are
+    always skipped; touching them would break the framework. Application
+    extras and ContextVar-injected fields (`request_id`, `partner_id`, …) are
+    fair game.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # `list()` snapshot — we mutate __dict__ while iterating.
+        for key in list(record.__dict__.keys()):
+            if key in _LOG_RECORD_RESERVED or key.startswith("_"):
+                continue
+            v = record.__dict__[key]
+            if v is None or v == "":
+                del record.__dict__[key]
+        return True
+
+
 class _EnterpriseRouterFilter(logging.Filter):
     """
     Routes log records between the default and enterprise Axiom datasets.
@@ -193,6 +247,16 @@ def configure_json_logging() -> None:
     """
     root = logging.getLogger()
     ctx_filter = RequestContextFilter()
+    strip_filter = StripEmptyFieldsFilter()
+
+    # Filter ORDER matters and is preserved by Python's logging (filters run in
+    # addFilter order, short-circuiting on the first that returns False):
+    #   1. ctx_filter   — populates request_id/device_id/user_id/severity
+    #   2. strip_filter — removes any field whose value is None or ""
+    #   3. router       — accepts/rejects records for default vs enterprise
+    # Strip must come AFTER context (otherwise it strips empty context that the
+    # context filter is about to set) and BEFORE router (so both datasets see
+    # the same clean record shape).
 
     # --- 1. Stdout / Railway handler (always active) ---
     stream_handler = logging.StreamHandler()
@@ -203,6 +267,7 @@ def configure_json_logging() -> None:
         )
     )
     stream_handler.addFilter(ctx_filter)
+    stream_handler.addFilter(strip_filter)
     handlers: list[logging.Handler] = [stream_handler]
 
     # --- 2. Axiom handlers (only when AXIOM_TOKEN is configured) ---
@@ -226,6 +291,7 @@ def configure_json_logging() -> None:
             default_axiom = AxiomHandler(axiom_client, axiom_dataset_default)
             default_safe = _SafeAxiomHandler(default_axiom, dataset_label=axiom_dataset_default)
             default_safe.addFilter(ctx_filter)
+            default_safe.addFilter(strip_filter)
             if axiom_dataset_enterprise:
                 default_safe.addFilter(_EnterpriseRouterFilter(target="default"))
             handlers.append(default_safe)
@@ -236,6 +302,7 @@ def configure_json_logging() -> None:
                 ent_axiom = AxiomHandler(axiom_client, axiom_dataset_enterprise)
                 ent_safe = _SafeAxiomHandler(ent_axiom, dataset_label=axiom_dataset_enterprise)
                 ent_safe.addFilter(ctx_filter)
+                ent_safe.addFilter(strip_filter)
                 ent_safe.addFilter(_EnterpriseRouterFilter(target="enterprise"))
                 handlers.append(ent_safe)
 
