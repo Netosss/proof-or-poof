@@ -73,6 +73,7 @@ class TestCombinedPromptStructure:
 class TestCombinedDetectionResult:
     def _valid_payload(self) -> dict:
         return {
+            "content_plausibility": "clause1=TRUE; clause2=TRUE; clause3=TRUE => NO_CLAIM",
             "findings": "Clean studio portrait with articulated hands.",
             "region_anchor": "none",
             "confidence": 0.1,
