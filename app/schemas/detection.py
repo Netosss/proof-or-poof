@@ -101,7 +101,36 @@ class CombinedDetectionResult(BaseModel):
     anchoring: any AI verdict (confidence >= 0.5) must point to a specific
     named image region — combats the model's tendency to confabulate
     authenticity claims without evidence.
+
+    `content_plausibility` is decoded FIRST: a semantic read of the signage
+    that catches fabricated/AI concept ads whose tell is the offer itself
+    (an impossible-to-deliver or non-existent product), not a pixel artifact.
     """
+    content_plausibility: str = Field(
+        description=(
+            "FIRST: read ALL visible text/signage/prices VERBATIM, then judge ONLY whether the "
+            "offer's OWN STATED TERMS cohere as a real purchasable thing. This tests the WORDS of "
+            "the offer — NOT the pixels, and NOT who the seller is. WHO sells WHAT is irrelevant: "
+            "any seller may stock anything, run any stunt, giveaway, novelty, pop-up, or "
+            "regional/satirical product. 'Surprising for this seller' is ALWAYS CONTENT_PLAUSIBLE.\n"
+            "Apply TWO clauses and EMIT each (with a reason) BEFORE the verdict:\n"
+            "  clause1 DELIVERABILITY — could a real seller physically hand the buyer this good "
+            "through the depicted channel? An intangible/digital-only service (compute, API "
+            "tokens, cloud storage, bandwidth, a subscription tier) presented as a boxed/shelf/"
+            "checkout retail item CANNOT be handed over => clause1=FALSE. A tangible good (even a "
+            "vehicle, aircraft, or gold bar) CAN => clause1=TRUE.\n"
+            "  clause2 REFERENT — does every named product, version, model, and spec actually "
+            "exist and use a coherent unit? A non-existent version/edition, an impossible spec, or "
+            "a spec stated in a unit that cannot measure that thing => clause2=FALSE. Real "
+            "products in coherent units => clause2=TRUE.\n"
+            "Output EXACTLY: \"clause1=<TRUE/FALSE: reason>; clause2=<TRUE/FALSE: reason> => "
+            "<verdict>\". Verdict is 'ABSURD_CONTENT' if EITHER clause is FALSE, "
+            "'CONTENT_PLAUSIBLE' if BOTH are TRUE, or 'NO_CLAIM' if there is no commercial text.\n"
+            "OCR FENCE: if any cited text is unreadable, low-resolution, in a script you cannot "
+            "fully parse, or you are INFERRING rather than reading it verbatim => NO_CLAIM. Most "
+            "candid photos, portraits, and personal snapshots are NO_CLAIM."
+        )
+    )
     findings: str = Field(
         description="Brief description of the strongest forensic signal observed. Max 40 words."
     )
@@ -115,7 +144,13 @@ class CombinedDetectionResult(BaseModel):
         ),
     )
     confidence: float = Field(
-        description="0.0 (clearly real) to 1.0 (clearly AI)."
+        description=(
+            "0.0 (clearly real) to 1.0 (clearly AI). "
+            "CONTENT OVERRIDE: if content_plausibility ends in ABSURD_CONTENT (a clause is FALSE "
+            "— judged on the offer's stated terms read verbatim, NOT on who the seller is), "
+            "confidence MUST be >= 0.70 and you MUST set region_anchor to the sign/claim location "
+            "(never 'none'). If both clauses are TRUE, content does not affect confidence."
+        )
     )
     signal_category: SIGNAL_CATEGORIES_V2 = Field(
         description="Exactly one macro forensic bucket from the closed list."

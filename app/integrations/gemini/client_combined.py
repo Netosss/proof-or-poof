@@ -178,6 +178,7 @@ async def analyze_image_combined_async(
             "v2_step_1": findings_out,
             "v2_step_2": f"region_anchor: {parsed.region_anchor}",
             "region_anchor": parsed.region_anchor,
+            "content_plausibility": parsed.content_plausibility,
             "ok": True,
         }
 
