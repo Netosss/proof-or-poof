@@ -70,6 +70,26 @@ def _encode_image_for_gemini(image_source: Union[str, Image.Image, bytes]) -> by
                 pass
 
 
+def _encode_full_and_crop(image_source: Union[str, Image.Image, bytes]):
+    """Full image + a center crop (25-75%) for high-frequency micro-texture context.
+    Returns (full_bytes, crop_bytes|None). Crop skipped for raw bytes input."""
+    if isinstance(image_source, bytes):
+        return image_source, None
+    img_working, img_to_close = _prepare_pil_for_gemini(image_source)
+    try:
+        full = _encode_pil_as_jpeg(img_working, settings.gemini_jpeg_quality)
+        w, h = img_working.size
+        box = (int(w * 0.25), int(h * 0.25), int(w * 0.75), int(h * 0.75))
+        crop_bytes = _encode_pil_as_jpeg(img_working.crop(box), settings.gemini_jpeg_quality)
+        return full, crop_bytes
+    finally:
+        for img_obj in img_to_close:
+            try:
+                img_obj.close()
+            except Exception:
+                pass
+
+
 async def analyze_image_combined_async(
     image_source: Union[str, Image.Image],
     pre_calculated_quality_context: Optional[str] = None,
@@ -112,18 +132,27 @@ async def analyze_image_combined_async(
     try:
         # PIL resize + JPEG encode is ~25-65ms of pure CPU. Must run in a
         # thread so concurrent requests don't serialise on the event loop.
-        image_bytes = await asyncio.to_thread(_encode_image_for_gemini, image_source)
+        full_bytes, crop_bytes = await asyncio.to_thread(_encode_full_and_crop, image_source)
         config = _build_combined_config(get_combined_prompt(quality_context))
+
+        contents: list = [types.Part.from_bytes(data=full_bytes, mime_type="image/jpeg")]
+        if crop_bytes is not None:
+            contents.append(
+                "The image above is the FULL view. Below is a high-resolution CENTER CROP of the "
+                "focal area — inspect it for micro-texture / material-boundary anomalies, then "
+                "judge the whole image."
+            )
+            contents.append(types.Part.from_bytes(data=crop_bytes, mime_type="image/jpeg"))
+        contents.append(
+            "Analyse this image strictly within the focus area defined by the system instructions. Return ONLY the JSON."
+        )
 
         t0 = time.perf_counter()
         # Native-async client surface — Gemini I/O wait does NOT consume a
         # thread. Cancellations propagate to the HTTP socket cleanly.
         response = await client.aio.models.generate_content(
             model=settings.gemini_model,
-            contents=[
-                types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
-                "Analyse this image strictly within the focus area defined by the system instructions. Return ONLY the JSON.",
-            ],
+            contents=contents,
             config=config,
         )
         duration_ms = round((time.perf_counter() - t0) * 1000)

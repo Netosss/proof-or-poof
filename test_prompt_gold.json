@@ -1,27 +1,101 @@
 {
-    "/Users/netanel.ossi/Downloads/first_image.png": {"is_ai": true},
-    "/Users/netanel.ossi/Downloads/second_image.png": {"is_ai": true},
-    "/Users/netanel.ossi/Downloads/third_image.png": {"is_ai": true},
-    "/Users/netanel.ossi/Downloads/129502.jpg": {"is_ai": false},
-    "/Users/netanel.ossi/Downloads/129705.jpg": {"is_ai": false},
-    "/Users/netanel.ossi/Downloads/129127.jpg": {"is_ai": false},
-    "/Users/netanel.ossi/Downloads/130207.jpg": {"is_ai": true},
-    "/Users/netanel.ossi/Downloads/130206.jpg": {"is_ai": true},
-    "/Users/netanel.ossi/Downloads/130208.jpg": {"is_ai": true},
-    "/Users/netanel.ossi/Downloads/ai.jpeg": {"is_ai": true},
-    "/Users/netanel.ossi/Downloads/AI ART ITA.jpg": {"is_ai": true},
-    "/Users/netanel.ossi/Downloads/130188.jpg": {"is_ai": true},
-    "/Users/netanel.ossi/Downloads/129177 (2).jpg": {"is_ai": true},
-    "/Users/netanel.ossi/Downloads/frame_debug_129896.jpg": {"is_ai": false},
-    "/Users/netanel.ossi/Downloads/frame_debug_129193.jpg": {"is_ai": true},
-    "/Users/netanel.ossi/Downloads/129504.jpg": {"is_ai": false},
-    "/Users/netanel.ossi/Downloads/129732.jpg": {"is_ai": false},
-    "/Users/netanel.ossi/Downloads/128782.jpg": {"is_ai": false},
-    "/Users/netanel.ossi/Downloads/129177 (1).jpg": {"is_ai": true},
-    "/Users/netanel.ossi/Downloads/129263.jpg": {"is_ai": false},
-    "/Users/netanel.ossi/Downloads/129177.jpg": {"is_ai": true},
-    "/Users/netanel.ossi/Downloads/fiverr.jpeg": {"is_ai": false},
-    "/Users/netanel.ossi/Downloads/sofa.jpeg": {"is_ai": true},
-    "/Users/netanel.ossi/Downloads/hey.jpeg": {"is_ai": true},
-    "/Users/netanel.ossi/Downloads/linkdin profile.jpeg": {"is_ai": false}
+  "/Users/netanel.ossi/Downloads/first_image.png": {
+    "is_ai": true
+  },
+  "/Users/netanel.ossi/Downloads/second_image.png": {
+    "is_ai": true
+  },
+  "/Users/netanel.ossi/Downloads/third_image.png": {
+    "is_ai": true
+  },
+  "/Users/netanel.ossi/Downloads/129502.jpg": {
+    "is_ai": false
+  },
+  "/Users/netanel.ossi/Downloads/129705.jpg": {
+    "is_ai": false
+  },
+  "/Users/netanel.ossi/Downloads/129127.jpg": {
+    "is_ai": false
+  },
+  "/Users/netanel.ossi/Downloads/130207.jpg": {
+    "is_ai": true
+  },
+  "/Users/netanel.ossi/Downloads/130206.jpg": {
+    "is_ai": true
+  },
+  "/Users/netanel.ossi/Downloads/130208.jpg": {
+    "is_ai": true
+  },
+  "/Users/netanel.ossi/Downloads/ai.jpeg": {
+    "is_ai": true
+  },
+  "/Users/netanel.ossi/Downloads/AI ART ITA.jpg": {
+    "is_ai": true
+  },
+  "/Users/netanel.ossi/Downloads/130188.jpg": {
+    "is_ai": true
+  },
+  "/Users/netanel.ossi/Downloads/129177 (2).jpg": {
+    "is_ai": true
+  },
+  "/Users/netanel.ossi/Downloads/frame_debug_129896.jpg": {
+    "is_ai": false
+  },
+  "/Users/netanel.ossi/Downloads/frame_debug_129193.jpg": {
+    "is_ai": true
+  },
+  "/Users/netanel.ossi/Downloads/129504.jpg": {
+    "is_ai": false
+  },
+  "/Users/netanel.ossi/Downloads/129732.jpg": {
+    "is_ai": false
+  },
+  "/Users/netanel.ossi/Downloads/128782.jpg": {
+    "is_ai": false
+  },
+  "/Users/netanel.ossi/Downloads/129177 (1).jpg": {
+    "is_ai": true
+  },
+  "/Users/netanel.ossi/Downloads/129263.jpg": {
+    "is_ai": false
+  },
+  "/Users/netanel.ossi/Downloads/129177.jpg": {
+    "is_ai": true
+  },
+  "/Users/netanel.ossi/Downloads/fiverr.jpeg": {
+    "is_ai": false
+  },
+  "/Users/netanel.ossi/Downloads/sofa.jpeg": {
+    "is_ai": true
+  },
+  "/Users/netanel.ossi/Downloads/hey.jpeg": {
+    "is_ai": true
+  },
+  "/Users/netanel.ossi/Downloads/linkdin profile.jpeg": {
+    "is_ai": false
+  },
+  "/Users/netanel.ossi/Downloads/174607.png": {
+    "is_ai": true,
+    "note": "osher signs (digital-goods parody)"
+  },
+  "/Users/netanel.ossi/Downloads/174709.jpg": {
+    "is_ai": true,
+    "note": "osher airplane (accepted hard-miss)"
+  },
+  "/Users/netanel.ossi/Downloads/175026.jpg": {
+    "is_ai": true,
+    "note": "osher missile (weapon-of-war parody)"
+  },
+  "/Users/netanel.ossi/Downloads/172829.jpg": {
+    "is_ai": false,
+    "note": "real baby near window"
+  },
+  "/Users/netanel.ossi/Downloads/169936.jpg": {
+    "is_ai": false,
+    "note": "real baby with cup"
+  },
+  "/Users/netanel.ossi/Downloads/169935.jpg": {
+    "is_ai": false,
+    "note": "real baby drinking (grip-hand FP risk)"
+  }
 }
