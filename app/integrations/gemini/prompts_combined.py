@@ -22,12 +22,19 @@ Distant landmark signage — most importantly the HOLLYWOOD SIGN viewed from any
 
 <StrictLiability>
 Do NOT excuse structural failures as "depth of field", "motion blur", or "compression". Real optical blur obscures details but does NOT fuse separate objects, melt fingers into cups, create flat skin webbing at armpits, or turn background faces into demonic blobs. Flag structural failures at ANY quality level.
-</StrictLiability>"""
+</StrictLiability>
+
+<GripAndChildGuard>
+A hand that is GRIPPING, wrapping, or holding an object, or is occluded, motion-blurred, small/distant, or belongs to an INFANT or TODDLER, is frequently UNRESOLVABLE from a single 2D view: fingers legitimately disappear behind the object or behind each other, and chubby pediatric fingers naturally bunch together with deep flexion creases and rounded, low-definition knuckles. Inability to resolve such a hand is NOT evidence of AI.
+
+This QUALIFIES StrictLiability and PERSPECTIVE 1: do NOT flag "fused fingers", "jointless flesh block", "missing thumb/finger", "fingers melt into the cup/object", or "no knuckle definition" for a gripping / occluded / motion-blurred / infant-or-toddler hand UNLESS you can trace EVERY finger individually from base knuckle to fingertip AND positively describe a fully-formed EXTRA or impossible digit with its own nail bed and joint. A hand wrapped around a cup whose fingers you simply cannot count is AUTHENTIC-by-default — set region_anchor elsewhere and do not raise confidence on that hand. A child drinking from or holding a cup is an ordinary real photo.
+</GripAndChildGuard>"""
 
 
 _OUTPUT_SCHEMA = """<OutputFormat>
-Return ONLY valid JSON with all four fields:
+Return ONLY valid JSON with all five fields:
 {{
+  "content_plausibility": "<resolve FIRST — read text VERBATIM; judge ONLY the offer's own stated terms, NOT who the seller is (surprising-for-seller is always PLAUSIBLE). Emit three clauses then verdict EXACTLY: 'clause1=<TRUE/FALSE: deliverability — intangible/digital-only service as a physical shelf SKU=FALSE; tangible good incl. vehicles=TRUE>; clause2=<TRUE/FALSE: referent — non-existent version or impossible/mismatched unit=FALSE>; clause3=<TRUE/FALSE: retailability — could a private consumer complete this purchase? a FUNCTIONAL weapon-of-war / military munition (missile, launcher, air-defense system, ordnance, tank, combat aircraft) or other good no retailer can lawfully sell a civilian, offered FOR SALE with a price=FALSE; firearms, toys/replicas, deactivated/surplus/collectible militaria, props, and display/museum/expo/news items with no consumer price=TRUE> => <ABSURD_CONTENT if ANY FALSE | CONTENT_PLAUSIBLE if all three TRUE | NO_CLAIM if no commercial offer text>'. OCR FENCE: unreadable/foreign/inferred => NO_CLAIM>",
   "findings": "<≤40 words; describe the strongest signal>",
   "region_anchor": "<specific named region OR 'none' only for authentic images>",
   "confidence": <0.0–1.0>,
@@ -55,11 +62,13 @@ You are an expert forensic AI image investigator evaluating this image from THRE
 {_BASE_GUARDS}
 
 <FocusedRule>
-Walk through ALL THREE perspectives and report the strongest finding across them. Confidence and signal_category reflect the MAX-severity finding from any perspective.
+PERSPECTIVE 0 — CONTENT PLAUSIBILITY (resolve FIRST; record in the content_plausibility field): read the signage/text and judge ONLY whether the offer's own stated terms cohere as a real purchasable thing — NOT who the seller is. clause1 DELIVERABILITY: a real seller can physically hand over any tangible good (even a vehicle/aircraft), but an intangible/digital-only service (compute, API tokens, cloud storage, a subscription tier) sold as a physical-shelf/checkout SKU CANNOT be delivered => clause1=FALSE. clause2 REFERENT: a named product/version/spec that does not exist or uses an impossible/mismatched unit => clause2=FALSE. clause3 RETAILABILITY: could an ordinary private consumer COMPLETE this purchase — the test is a completable consumer transaction, NOT 'unusual for this store'. A FUNCTIONAL weapon-of-war / military munition (guided missiles, rockets, launchers, air-defense / interceptor systems, ordnance, military armored vehicles, combat aircraft) — or another good no retailer can lawfully sell a civilian (restricted hazmat, human organs, protected wildlife) — offered FOR SALE to a private individual with a price is a transaction no retailer can complete => clause3=FALSE. clause3 fires ONLY on a genuine consumer retail OFFER (a price on the item itself); firearms/ammunition, toy/replica/airsoft/scale-model weapons, deactivated/surplus/collectible militaria, movie props, and consumer fireworks are lawful consumer goods => clause3=TRUE; a military item on DISPLAY with no consumer price (museum, monument, gate-guardian, airshow, defense-expo/B2B, news/war photo) is NOT a consumer offer => clause3=TRUE (and NO_CLAIM absent other commercial text). If ANY clause is FALSE, this is ABSURD_CONTENT: a fabricated/AI concept image — set confidence >= 0.70, anchor region_anchor to the sign/claim, and signal_category = "multiple_subtle_ai_artifacts_present". WHO sells WHAT is irrelevant; a surprising-but-completable real offer (out-of-category retail, stunts, novelty, regional goods) is CONTENT_PLAUSIBLE and does NOT raise confidence. Do NOT base this on inferred/unreadable text.
 
-PERSPECTIVE 1 — ANATOMY: Examine every visible hand, fist, finger, knuckle, and muscle insertion (armpits, lats meeting triceps, deltoid-to-bicep). Inspect where fingers grip cups/glasses/plates. Flag:
+Then walk through ALL THREE perspectives below and report the strongest finding across them and Perspective 0. Confidence and signal_category reflect the MAX-severity finding from any perspective.
+
+PERSPECTIVE 1 — ANATOMY: Examine every visible hand, fist, finger, knuckle, and muscle insertion (armpits, lats meeting triceps, deltoid-to-bicep). When a hand grips a cup/glass/plate or is occluded/motion-blurred/infant, apply GripAndChildGuard FIRST — such a hand you cannot finger-by-finger resolve is authentic, not AI. Flag ONLY a FULLY-RESOLVABLE hand for:
   • Fists as jointless flesh blocks / "mittens" — no knuckles, no tendon shadows
-  • Fingers melting into a held object
+  • Fingers melting into a held object (only if every finger is individually traceable and you can name the impossible junction)
   • Flat skin webbing bridging armpit to ribcage with no shadow / no organic hollow
   • Fused palms, missing nail beds, asymmetric or extra digits
   • Background subjects' hands collapsed into shapeless blobs

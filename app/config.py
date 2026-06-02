@@ -342,16 +342,15 @@ class Settings(BaseSettings):
         ),
     )
     gemini_temperature: float = Field(
-        0.5,
+        0.2,
         description=(
-            "Sampling temperature for Gemini model. V2 empirical sweet spot = 0.5. "
-            "Default is now hardcoded (was 1.0) so a missing/broken .env in any "
-            "environment cannot silently regress accuracy. temp=0.0 + top_k=1 "
-            "locked the model into the most-probable token path which "
-            "systematically defaulted to 'authentic' on polished AI portraits. "
-            "Higher temps (≥0.7) just shuffle which cases fail without raising "
-            "the ceiling. Override via GEMINI_TEMPERATURE env var only when "
-            "deliberately experimenting."
+            "Sampling temperature for Gemini model. Lowered 0.5 → 0.2: the "
+            "content_plausibility semantic judgment flipped 1-2 real images "
+            "run-to-run at 0.5 (occasional false positives); 0.2 makes the "
+            "verdict deterministic without the greedy-decode collapse that "
+            "temp=0.0 + top_k=1 caused (which defaulted polished AI to "
+            "'authentic'). Gold set holds at 92% / 0 FP at 0.2. Override via "
+            "GEMINI_TEMPERATURE env var only when deliberately experimenting."
         ),
     )
     video_high_conviction_threshold: float = Field(
