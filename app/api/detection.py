@@ -165,7 +165,14 @@ async def detect(
                     "client_disconnected_during_upload",
                     extra={"action": "client_disconnected_during_upload"},
                 )
-                return
+                # A bare `return` here returns None, which FastAPI then validates
+                # against response_model=DetectionResponse and rejects with a
+                # ResponseValidationError -> 500. Raising bypasses response_model
+                # validation; 499 (client closed request) is the correct semantic
+                # and the socket is already gone, so the body is moot anyway.
+                raise HTTPException(
+                    status_code=499, detail="Client disconnected during upload"
+                ) from None
             file_obj = form.get("file")
             url_obj = form.get("url")
             trusted_metadata_obj = form.get("trusted_metadata")

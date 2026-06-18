@@ -23,6 +23,9 @@ gold_config_report.txt
 analysis_run.log
 stress_test.log
 
+# Eval harness run outputs (generated artifacts, not source)
+eval_runs/
+
 # macOS
 .DS_Store
 

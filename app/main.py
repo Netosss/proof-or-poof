@@ -165,6 +165,30 @@ class _RequestLoggingMiddleware:
 # so browsers can read the JSON body.  Also drains the request body to
 # prevent ERR_HTTP2_PROTOCOL_ERROR on early-rejected uploads.
 # ---------------------------------------------------------------------------
+def _cors_error_headers(request: Request, base: dict | None = None) -> dict:
+    """Attach browser-readable CORS headers to an error response.
+
+    Without these, a non-2xx / 5xx response is blocked by the browser's
+    same-origin policy and surfaces to the client as a bare `TypeError: Failed
+    to fetch` — masking the real status and body. Every browser-reachable error
+    path MUST run through here, not just HTTPException.
+    """
+    headers = dict(base or {})
+    # Echo the request Origin when it matches the static allowlist OR the
+    # Firebase Hosting regex. Default to fauxlens.com so prod browsers still
+    # see CORS headers on errors when the Origin header is missing.
+    request_origin = request.headers.get("origin", "")
+    origin_allowed = request_origin in _cors_origins or (
+        bool(request_origin) and bool(re.match(_cors_origin_regex, request_origin))
+    )
+    allowed_origin = request_origin if origin_allowed else "https://fauxlens.com"
+    headers["Access-Control-Allow-Origin"] = allowed_origin
+    headers["Access-Control-Allow-Credentials"] = "true"
+    headers["Access-Control-Allow-Methods"] = "*"
+    headers["Access-Control-Allow-Headers"] = "*"
+    return headers
+
+
 @app.exception_handler(StarletteHTTPException)
 async def custom_http_exception_handler(request: Request, exc: StarletteHTTPException):
     # Enterprise /v1/* routes get a Stripe-style error envelope and no CORS
@@ -174,18 +198,7 @@ async def custom_http_exception_handler(request: Request, exc: StarletteHTTPExce
 
     headers = getattr(exc, "headers", None) or {}
     if not is_enterprise:
-        # Echo the request Origin when it matches the static allowlist OR the
-        # Firebase Hosting regex. Default to fauxlens.com so prod browsers
-        # still see CORS headers on errors when the Origin header is missing.
-        request_origin = request.headers.get("origin", "")
-        origin_allowed = request_origin in _cors_origins or (
-            bool(request_origin) and bool(re.match(_cors_origin_regex, request_origin))
-        )
-        allowed_origin = request_origin if origin_allowed else "https://fauxlens.com"
-        headers["Access-Control-Allow-Origin"] = allowed_origin
-        headers["Access-Control-Allow-Credentials"] = "true"
-        headers["Access-Control-Allow-Methods"] = "*"
-        headers["Access-Control-Allow-Headers"] = "*"
+        headers = _cors_error_headers(request, headers)
 
     # Drain the request body so HTTP/2 doesn't surface ERR_HTTP2_PROTOCOL_ERROR
     # to the browser.  Cap at 64 KB to prevent a DDoS vector where an attacker
@@ -238,6 +251,49 @@ async def custom_http_exception_handler(request: Request, exc: StarletteHTTPExce
         status_code=exc.status_code,
         content=response_data,
         headers=headers,
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """Catch-all for anything that is NOT an HTTPException.
+
+    Critically covers ResponseValidationError (e.g. a handler returning None,
+    which is what a mid-upload client disconnect on /detect produced). Without
+    this, such 500s reach the browser WITHOUT CORS headers and show up as
+    `Failed to fetch` ("could not fetch from railway"), hiding the real cause.
+    HTTPException is routed to custom_http_exception_handler instead — FastAPI
+    dispatches to the most specific handler — so this only sees true 500s.
+    """
+    is_enterprise = request.url.path.startswith("/v1/")
+
+    user_id_value = user_id_var.get("")
+    partner_id_value = user_id_value[4:] if user_id_value.startswith("ent:") else ""
+
+    logger.error(
+        "unhandled_exception_response",
+        extra={
+            "action": "unhandled_exception_response",
+            "status_code": 500,
+            "error_type": type(exc).__name__,
+            "error": str(exc)[:500],
+            "path": request.url.path,
+            "method": request.method,
+            "user_agent": request.headers.get("user-agent", "")[:200],
+            "user_id": user_id_value,
+            "partner_id": partner_id_value,
+        },
+    )
+    sentry_sdk.capture_exception(exc)
+
+    if is_enterprise:
+        return JSONResponse(status_code=500, content=build_envelope(500, "Internal server error"))
+
+    # Generic message — never leak the exception detail to the browser.
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error"},
+        headers=_cors_error_headers(request),
     )
 
 
