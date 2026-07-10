@@ -29,6 +29,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.api import (
+    account,
     auth,
     billing,
     checkout,
@@ -419,6 +420,7 @@ app.include_router(auth.router)
 app.include_router(detection.router)
 app.include_router(credits.router)
 app.include_router(billing.router)
+app.include_router(account.router)
 app.include_router(checkout.router)
 app.include_router(reports.router)
 app.include_router(inpainting.router)

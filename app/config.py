@@ -88,6 +88,22 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------ #
+    # Firebase web config — used only to render the public /delete-account #
+    # page (Google Play account-deletion requirement). These are public   #
+    # client values (safe to expose), overridable via env.                #
+    # ------------------------------------------------------------------ #
+    firebase_web_api_key: str = Field(
+        "AIzaSyAVnkOQe6oTa9Buv-8dety568lRN_1_pTQ",
+        description="Firebase web apiKey (public client value).",
+    )
+    firebase_web_auth_domain: str = Field("fauxlens.com", description="Firebase web authDomain.")
+    firebase_web_project_id: str = Field("proof-or-poof", description="Firebase web projectId.")
+    firebase_web_app_id: str = Field(
+        "1:1075122403438:web:e572b53e874c62fe084e7f",
+        description="Firebase web appId (public client value).",
+    )
+
+    # ------------------------------------------------------------------ #
     # Lemon Squeezy variant → credit mapping                             #
     # The backend is the single source of truth for credit amounts.      #
     # Never trust the webhook payload for credit amounts — look up here. #
