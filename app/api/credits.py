@@ -257,7 +257,7 @@ async def ads_ssv(request: Request):
     Android client), idempotent per `transaction_id` and capped per day.
 
     AdMob ignores the response body — it only checks for HTTP 200. We return
-    200 on accept/duplicate, 403 on an invalid signature, 400 on missing params.
+    200 on accept/duplicate/ignored, 403 only on an invalid signature.
 
     Set this endpoint's URL in AdMob → rewarded ad unit → Server-side verification.
     """
@@ -278,8 +278,17 @@ async def ads_ssv(request: Request):
     signed = verified_params(request.url.query)
     uid = signed.get("custom_data")
     transaction_id = signed.get("transaction_id")
+    # AdMob's own "verify callback URL" ping is validly signed but carries NO
+    # custom_data, and guest ad views have no Firebase uid to stamp either. In
+    # both cases the signature is legitimate, so ACK with 200 (AdMob requires a
+    # 200 to accept the URL) and simply grant nothing — only signed-in views that
+    # stamp custom_data reach the grant path below.
     if not uid or not transaction_id:
-        raise HTTPException(status_code=400, detail="Missing custom_data or transaction_id")
+        logger.info(
+            "admob_ssv_no_custom_data",
+            extra={"action": "admob_ssv_no_custom_data", "has_txn": bool(transaction_id)},
+        )
+        return {"status": "ignored"}
     user_id_var.set(uid)
 
     db = firebase_module.db
