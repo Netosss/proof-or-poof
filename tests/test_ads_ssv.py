@@ -113,14 +113,17 @@ def test_ssv_invalid_signature_403_no_grant(client):
     m_grant.assert_not_awaited()
 
 
-def test_ssv_missing_custom_data_400_no_grant(client):
+def test_ssv_missing_custom_data_200_ignored_no_grant(client):
+    """AdMob's verify ping (and guest views) are validly signed but carry no
+    custom_data — ACK with 200 so AdMob accepts the URL, but grant nothing."""
     with (
         patch("app.api.credits.verify_ssv", new_callable=AsyncMock, return_value=True),
         patch("app.api.credits._apply_ad_reward", new_callable=AsyncMock) as m_grant,
     ):
         resp = client.get("/api/ads/ssv?transaction_id=tx1&signature=S&key_id=1")
 
-    assert resp.status_code == 400
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ignored"}
     m_grant.assert_not_awaited()
 
 
