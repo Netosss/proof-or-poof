@@ -17,6 +17,7 @@ from app.core.rate_limiter import check_rate_limit
 from app.integrations import firebase as firebase_module
 from app.logging_config import user_id_var
 from app.schemas.credits import RechargeRequest
+from app.services.admob_ssv import verified_params, verify_ssv
 from app.services.credit_engine import get_user_balance, grant_credits
 from app.services.credits_service import get_guest_wallet, perform_recharge
 from app.services.finance_service import log_transaction
@@ -33,6 +34,10 @@ class AdRewardResponse(BaseModel):
     credits_granted: int
     new_balance: int
     rewards_today: int
+
+
+class AdSsvResponse(BaseModel):
+    status: str  # "ok" | "duplicate" | "capped"
 
 
 @router.get("/api/user/balance")
@@ -94,22 +99,37 @@ async def add_credits_get(
     return result
 
 
-@router.post("/api/ads/reward", response_model=AdRewardResponse)
-async def ads_reward(
-    user: dict = Depends(get_current_user),
-):
+async def _release_cap_slot(db, reward_ref) -> None:
     """
-    Grant credits to an authenticated user for watching an ad.
-
-    - Maximum 3 rewards per UTC day (server-side date, never client-provided).
-    - Each reward grants 20 credits.
-    - Idempotency enforced via Firestore ad_rewards/{uid}_{date} document.
-
-    Requires:
-      Authorization: Bearer <firebase_id_token>
+    Compensating decrement of the daily ad-reward counter, used when a grant
+    fails AFTER the cap slot was already committed — so a transient error never
+    silently burns one of the user's daily rewards.
     """
-    uid = user["uid"]
-    user_id_var.set(uid)
+
+    @async_transactional
+    async def _dec(transaction, ref):
+        snap = await ref.get(transaction=transaction)
+        count = snap.to_dict().get("count", 0) if snap.exists else 0
+        if count > 0:
+            transaction.update(ref, {"count": count - 1})
+
+    await _dec(db.transaction(), reward_ref)
+
+
+async def _apply_ad_reward(
+    uid: str, reference_id: str | None = None
+) -> tuple[int | None, int, int | None]:
+    """
+    Cap-checked ad-reward grant shared by BOTH the client endpoint and the AdMob
+    SSV callback, so the two paths share ONE daily cap and can never together
+    exceed AD_REWARD_DAILY_LIMIT grants per UTC day.
+
+    Enforces the cap via a Firestore transaction on ad_rewards/{uid}_{date},
+    then grants AD_REWARD_CREDITS through the credit engine.
+
+    Returns (credits_granted, rewards_today, new_balance). credits_granted (and
+    new_balance) are None when the daily cap is already reached.
+    """
     db = firebase_module.db
     if not db:
         raise HTTPException(status_code=503, detail="Database service unavailable.")
@@ -122,10 +142,8 @@ async def ads_reward(
     async def _check_and_grant(transaction, ref):
         snap = await ref.get(transaction=transaction)
         count = snap.to_dict().get("count", 0) if snap.exists else 0
-
         if count >= AD_REWARD_DAILY_LIMIT:
             return None, count
-
         transaction.set(
             ref,
             {
@@ -138,25 +156,77 @@ async def ads_reward(
         )
         return AD_REWARD_CREDITS, count + 1
 
+    txn = db.transaction()
+    credits_to_grant, new_count = await _check_and_grant(txn, reward_ref)
+    if credits_to_grant is None:
+        return None, new_count, None
+
+    # The cap slot is committed above. If the grant fails, hand the slot back so
+    # a transient error doesn't permanently consume a daily reward. Use a unique
+    # per-grant reference_id (never the same doc_id 3x/day) for a clean ledger.
     try:
-        txn = db.transaction()
-        credits_to_grant, new_count = await _check_and_grant(txn, reward_ref)
+        new_balance = await grant_credits(
+            uid, credits_to_grant, "ad_reward", reference_id or f"{doc_id}_{new_count}"
+        )
+    except Exception:
+        try:
+            await _release_cap_slot(db, reward_ref)
+        except Exception as release_err:
+            logger.error(
+                "ad_reward_cap_release_failed",
+                extra={
+                    "action": "ad_reward_cap_release_failed",
+                    "uid": uid,
+                    "error": str(release_err),
+                },
+            )
+        raise
+
+    log_transaction(
+        "AD_REWARD",
+        settings.ad_revenue_per_reward,
+        {"uid": uid, "credits": credits_to_grant, "rewards_today": new_count},
+    )
+    return credits_to_grant, new_count, new_balance
+
+
+@router.post("/api/ads/reward", response_model=AdRewardResponse)
+async def ads_reward(
+    user: dict = Depends(get_current_user),
+):
+    """
+    Grant credits to an authenticated user for watching an ad (client-attested).
+
+    - Maximum 3 rewards per UTC day (server-side date, never client-provided).
+    - Each reward grants 20 credits.
+    - Shares the daily cap doc with the AdMob SSV callback.
+
+    NOTE: this endpoint trusts the client's word that an ad was watched. The
+    secure path is /api/ads/ssv (Google-signed). Once SSV is enabled in the
+    AdMob console and the client stops calling this endpoint, it can be removed.
+
+    Requires:
+      Authorization: Bearer <firebase_id_token>
+    """
+    uid = user["uid"]
+    user_id_var.set(uid)
+
+    try:
+        credits_to_grant, new_count, new_balance = await _apply_ad_reward(uid)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("ads_reward_failed", extra={"action": "ads_reward_failed", "error": str(e)})
-        raise HTTPException(status_code=500, detail="Ad reward failed")
+        raise HTTPException(status_code=500, detail="Ad reward failed") from e
 
     if credits_to_grant is None:
         raise HTTPException(
             status_code=429,
             detail=f"Daily ad reward limit reached ({AD_REWARD_DAILY_LIMIT} per day)",
         )
-
-    new_balance = await grant_credits(uid, credits_to_grant, "ad_reward", doc_id)
-    log_transaction(
-        "AD_REWARD",
-        settings.ad_revenue_per_reward,
-        {"uid": uid, "credits": credits_to_grant, "rewards_today": new_count},
-    )
+    # _apply_ad_reward returns credits and balance together: a non-None grant
+    # always carries a non-None balance.
+    assert new_balance is not None
 
     logger.info(
         "ads_reward_granted",
@@ -174,3 +244,117 @@ async def ads_reward(
         new_balance=new_balance,
         rewards_today=new_count,
     )
+
+
+@router.get("/api/ads/ssv", response_model=AdSsvResponse)
+async def ads_ssv(request: Request):
+    """
+    AdMob rewarded Server-Side Verification (SSV) callback.
+
+    Google calls this GET with a signed query string after a verified ad view.
+    We verify the ECDSA signature against Google's published keys, then grant
+    credits to the user named in `custom_data` (the Firebase UID stamped by the
+    Android client), idempotent per `transaction_id` and capped per day.
+
+    AdMob ignores the response body — it only checks for HTTP 200. We return
+    200 on accept/duplicate, 403 on an invalid signature, 400 on missing params.
+
+    Set this endpoint's URL in AdMob → rewarded ad unit → Server-side verification.
+    """
+    signature = request.query_params.get("signature", "")
+    key_id = request.query_params.get("key_id", "")
+    if not await verify_ssv(request.url.query, signature, key_id):
+        logger.warning(
+            "admob_ssv_invalid_signature",
+            extra={"action": "admob_ssv_invalid_signature"},
+        )
+        raise HTTPException(status_code=403, detail="Invalid signature")
+
+    # Read acted-upon fields from the SIGNED content only. request.query_params is
+    # last-wins on duplicate keys, so reading from it would let an attacker append
+    # `&transaction_id=forged&custom_data=other` after the signature and smuggle
+    # forged values past verification. verified_params() ignores anything after
+    # `&signature=`.
+    signed = verified_params(request.url.query)
+    uid = signed.get("custom_data")
+    transaction_id = signed.get("transaction_id")
+    if not uid or not transaction_id:
+        raise HTTPException(status_code=400, detail="Missing custom_data or transaction_id")
+    user_id_var.set(uid)
+
+    db = firebase_module.db
+    if not db:
+        raise HTTPException(status_code=503, detail="Database service unavailable.")
+
+    # Idempotency: exactly one grant per AdMob transaction_id. Google may retry
+    # the callback, so we claim the transaction transactionally before granting.
+    txn_ref = db.collection("ad_ssv_rewards").document(transaction_id)
+
+    @async_transactional
+    async def _claim(transaction, ref):
+        snap = await ref.get(transaction=transaction)
+        if snap.exists:
+            return False
+        transaction.set(
+            ref,
+            {
+                "user_id": uid,
+                "transaction_id": transaction_id,
+                "created_at": SERVER_TIMESTAMP,
+            },
+        )
+        return True
+
+    try:
+        first_time = await _claim(db.transaction(), txn_ref)
+    except Exception as e:
+        logger.error(
+            "admob_ssv_claim_failed",
+            extra={"action": "admob_ssv_claim_failed", "error": str(e)},
+        )
+        raise HTTPException(status_code=500, detail="SSV processing failed") from e
+
+    if not first_time:
+        logger.info(
+            "admob_ssv_duplicate",
+            extra={"action": "admob_ssv_duplicate", "transaction_id": transaction_id},
+        )
+        return {"status": "duplicate"}
+
+    # The claim doc is already committed. If the grant fails we MUST release it,
+    # else Google's retry sees the claim, returns "duplicate", and the real ad
+    # view is credited to no one (permanent silent loss). Mirrors billing.py.
+    try:
+        credits_to_grant, new_count, _ = await _apply_ad_reward(uid, f"ssv_{transaction_id}")
+    except Exception as e:
+        try:
+            await txn_ref.delete()
+        except Exception as release_err:
+            logger.error(
+                "admob_ssv_claim_release_failed",
+                extra={
+                    "action": "admob_ssv_claim_release_failed",
+                    "transaction_id": transaction_id,
+                    "error": str(release_err),
+                },
+            )
+        logger.error(
+            "admob_ssv_grant_failed",
+            extra={
+                "action": "admob_ssv_grant_failed",
+                "transaction_id": transaction_id,
+                "error": str(e),
+            },
+        )
+        raise HTTPException(status_code=500, detail="SSV grant failed") from e
+
+    logger.info(
+        "admob_ssv_processed",
+        extra={
+            "action": "admob_ssv_processed",
+            "credits_granted": credits_to_grant,
+            "rewards_today": new_count,
+            "transaction_id": transaction_id,
+        },
+    )
+    return {"status": "ok" if credits_to_grant is not None else "capped"}

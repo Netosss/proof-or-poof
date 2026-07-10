@@ -16,7 +16,10 @@ numpy
 pandas
 plotly
 google-genai
+google-auth
 firebase-admin
+httpx
+cryptography
 redis>=4.5.0
 streamlit>=1.40.0
 protobuf>=4.25.0

@@ -504,6 +504,10 @@ LEMONSQUEEZY_WEBHOOK_SECRET=
 # RunPod (required for GPU detection)
 RUNPOD_WEBHOOK_SECRET=
 
+# Google Play Billing (required for Android in-app purchases)
+GOOGLE_PLAY_SERVICE_ACCOUNT_JSON='{"type":"service_account",...}'
+ANDROID_PACKAGE_NAME=com.fauxlens.android   # optional, this is the default
+
 # App mode
 APP_ENV=prod    # or dev
 

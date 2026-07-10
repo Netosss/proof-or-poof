@@ -28,7 +28,17 @@ from starlette.datastructures import MutableHeaders
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from app.api import auth, checkout, credits, detection, inpainting, reports, system, webhooks
+from app.api import (
+    auth,
+    billing,
+    checkout,
+    credits,
+    detection,
+    inpainting,
+    reports,
+    system,
+    webhooks,
+)
 from app.api.enterprise import analyze as enterprise_analyze
 from app.api.enterprise import management as enterprise_management
 from app.core.enterprise_errors import build_envelope
@@ -408,6 +418,7 @@ app.include_router(system.router)
 app.include_router(auth.router)
 app.include_router(detection.router)
 app.include_router(credits.router)
+app.include_router(billing.router)
 app.include_router(checkout.router)
 app.include_router(reports.router)
 app.include_router(inpainting.router)

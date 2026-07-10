@@ -66,6 +66,28 @@ class Settings(BaseSettings):
     default_recharge_amount: int = Field(20, description="Default credits per ad-reward recharge")
 
     # ------------------------------------------------------------------ #
+    # Google Play Billing — SKU → credit mapping                          #
+    # The backend is the single source of truth for credit amounts.      #
+    # Never trust the client for credit amounts — look up here.          #
+    # ------------------------------------------------------------------ #
+    android_package_name: str = Field(
+        "com.fauxlens.android",
+        description="Android application ID used for Play Developer API purchase lookups.",
+    )
+    google_play_products: dict = Field(
+        default_factory=lambda: {
+            "credits_starter": 500,
+            "credits_pro": 2000,
+            "credits_max": 5000,
+        },
+        description="Google Play product ID / SKU (str) → credits (int).",
+    )
+    google_play_order_ttl_sec: int = Field(
+        34_560_000,
+        description="400 days — Redis TTL for processed Google Play orderId idempotency keys",
+    )
+
+    # ------------------------------------------------------------------ #
     # Lemon Squeezy variant → credit mapping                             #
     # The backend is the single source of truth for credit amounts.      #
     # Never trust the webhook payload for credit amounts — look up here. #
@@ -90,7 +112,12 @@ class Settings(BaseSettings):
         description="Test variant ID (str) → credits (int). Used when app_env=dev.",
     )
 
-    @field_validator("lemon_squeezy_variants", "lemon_squeezy_test_variants", mode="before")
+    @field_validator(
+        "lemon_squeezy_variants",
+        "lemon_squeezy_test_variants",
+        "google_play_products",
+        mode="before",
+    )
     @classmethod
     def parse_variants(cls, v):
         """
