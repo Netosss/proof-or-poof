@@ -110,15 +110,12 @@ async def deduct_guest_credits(device_id: str, cost: int = 10) -> int:
         raise HTTPException(status_code=500, detail="Wallet transaction failed")
 
 
-async def perform_recharge(device_id: str, amount: int, secret_key: str) -> dict:
+async def _apply_guest_topup(device_id: str, amount: int) -> int:
     """
-    Top up a guest wallet.
-    Validates `secret_key` against RECHARGE_SECRET_KEY env var.
+    Atomically adds `amount` credits to the guest wallet, creating it
+    (with the welcome bonus included) when it does not exist yet.
+    Returns the new balance.
     """
-    if not RECHARGE_SECRET_KEY or not hmac.compare_digest(secret_key, RECHARGE_SECRET_KEY):
-        logger.warning("recharge_invalid_attempt", extra={"action": "recharge_invalid_attempt"})
-        raise HTTPException(status_code=403, detail="Invalid secret key")
-
     db = _get_db()
     doc_ref = db.collection("guest_wallets").document(device_id)
 
@@ -143,8 +140,20 @@ async def perform_recharge(device_id: str, amount: int, secret_key: str) -> dict
             return current + amount
 
     transaction = db.transaction()
+    return await recharge_transaction(transaction, doc_ref)
+
+
+async def perform_recharge(device_id: str, amount: int, secret_key: str) -> dict:
+    """
+    Top up a guest wallet.
+    Validates `secret_key` against RECHARGE_SECRET_KEY env var.
+    """
+    if not RECHARGE_SECRET_KEY or not hmac.compare_digest(secret_key, RECHARGE_SECRET_KEY):
+        logger.warning("recharge_invalid_attempt", extra={"action": "recharge_invalid_attempt"})
+        raise HTTPException(status_code=403, detail="Invalid secret key")
+
     try:
-        new_balance = await recharge_transaction(transaction, doc_ref)
+        new_balance = await _apply_guest_topup(device_id, amount)
         logger.info("guest_credits_recharged", extra={
             "action": "guest_credits_recharged",
             "amount": amount,
@@ -156,3 +165,28 @@ async def perform_recharge(device_id: str, amount: int, secret_key: str) -> dict
     except Exception as e:
         logger.error("recharge_failed", extra={"action": "recharge_failed", "error": str(e)})
         raise HTTPException(status_code=500, detail="Recharge failed")
+
+
+async def grant_guest_credits(device_id: str, amount: int) -> int:
+    """
+    Adds `amount` credits to a guest wallet after a server-verified purchase
+    (e.g. Google Play Billing). No secret key — callers MUST have verified
+    the purchase upstream before granting.
+    Returns the new balance.
+    """
+    try:
+        new_balance = await _apply_guest_topup(device_id, amount)
+        logger.info("guest_credits_granted", extra={
+            "action": "guest_credits_granted",
+            "amount": amount,
+            "new_balance": new_balance,
+        })
+        return new_balance
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("guest_credits_grant_failed", extra={
+            "action": "guest_credits_grant_failed",
+            "error": str(e),
+        })
+        raise HTTPException(status_code=500, detail="Wallet transaction failed")

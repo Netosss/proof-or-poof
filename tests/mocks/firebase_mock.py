@@ -79,6 +79,10 @@ class MockDocumentReference:
             raise Exception("409 ALREADY_EXISTS: document already exists")
         await self.set(data)
 
+    async def delete(self) -> None:
+        """Mirror AsyncDocumentReference.delete() — no-op if absent."""
+        self._store.pop(self._doc_id, None)
+
 
 class _MockQuery:
     """Tiny chainable query stub: where(...).limit(...).stream()."""
@@ -119,6 +123,7 @@ class MockSubCollection:
     def document(self, doc_id: str | None = None) -> "MockDocumentReference":
         if doc_id is None:
             import uuid as _uuid
+
             doc_id = _uuid.uuid4().hex
         return MockDocumentReference(self._docs, doc_id)
 
@@ -143,6 +148,7 @@ class MockCollection:
     def document(self, doc_id: str | None = None) -> MockDocumentReference:
         if doc_id is None:
             import uuid as _uuid
+
             doc_id = _uuid.uuid4().hex
         if doc_id not in self._subcoll_state:
             self._subcoll_state[doc_id] = {}
