@@ -286,7 +286,7 @@ async def ads_ssv(request: Request):
     if not uid or not transaction_id:
         logger.info(
             "admob_ssv_no_custom_data",
-            extra={"action": "admob_ssv_no_custom_data", "has_txn": bool(transaction_id)},
+            extra={"action": "admob_ssv_no_custom_data"},
         )
         return {"status": "ignored"}
     user_id_var.set(uid)
