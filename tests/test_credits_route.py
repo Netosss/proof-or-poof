@@ -40,7 +40,7 @@ def _override_auth_user(user: dict | None):
 
 def test_get_balance_existing_wallet(client):
     with (
-        patch("app.api.credits.check_ip_device_limit", new_callable=AsyncMock),
+        patch("app.api.credits.check_rate_limit", new_callable=AsyncMock),
         patch("app.api.credits.get_guest_wallet", new_callable=AsyncMock, return_value={"credits": 42}),
     ):
         response = client.get(
@@ -54,7 +54,7 @@ def test_get_balance_new_device_gets_welcome_credits(client):
     from app.config import settings
 
     with (
-        patch("app.api.credits.check_ip_device_limit", new_callable=AsyncMock),
+        patch("app.api.credits.check_rate_limit", new_callable=AsyncMock),
         patch(
             "app.api.credits.get_guest_wallet",
             new_callable=AsyncMock,
