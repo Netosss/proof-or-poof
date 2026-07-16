@@ -50,6 +50,29 @@ _UPLOAD_CHUNK = 65_536  # 64 KB — matches the HTTPS streaming path
 # from passing junk via the X-Task-Id header.
 _TASK_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
+# Displayed-confidence boost applied at the API layer only — NOT in the
+# detection pipeline or the Gemini prompt. Every returned confidence_score is
+# nudged up by CONFIDENCE_BOOST and capped at CONFIDENCE_CEILING:
+#   0.77 -> 0.87, 0.95 -> 0.99, 0.99 -> 0.99.
+# Failed analyses and non-numeric scores are left untouched.
+CONFIDENCE_BOOST = 0.10
+CONFIDENCE_CEILING = 0.99
+_FAILURE_SUMMARIES = ("Analysis Failed", "File too large to scan")
+
+
+def _boost_confidence(result: dict) -> None:
+    """Nudge result['confidence_score'] up by CONFIDENCE_BOOST, capped at CONFIDENCE_CEILING.
+
+    Mutates result in place to match the surrounding response-assembly style.
+    No-op for failed analyses or a missing/negative/non-numeric score.
+    """
+    if result.get("summary") in _FAILURE_SUMMARIES:
+        return
+    score = result.get("confidence_score")
+    if not isinstance(score, (int, float)) or score < 0:
+        return
+    result["confidence_score"] = round(min(CONFIDENCE_CEILING, score + CONFIDENCE_BOOST), 2)
+
 
 def _stream_upload_to_disk(upload_file: UploadFile, dest_path: str) -> None:
     """Copy a multipart upload to *dest_path* in chunks without loading it into RAM.
@@ -339,6 +362,10 @@ async def detect(
         result.pop("gpu_time_ms", None)
         result.pop("is_gemini_used", None)
         result.pop("is_cached", None)
+
+        # API-layer confidence boost. Runs before the shareable copy is cached
+        # below, so a shared report shows the same score as the live response.
+        _boost_confidence(result)
 
         result["new_balance"] = new_balance
         result["task_id"] = task_id
