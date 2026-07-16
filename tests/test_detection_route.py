@@ -107,6 +107,8 @@ def test_detect_multipart_file_upload(client):
     assert "short_id" in data
     assert "new_balance" in data
     assert data["summary"] == "No AI Detected"
+    # API-layer confidence boost is wired into the response: mock is 0.95 -> 0.99.
+    assert data["confidence_score"] == 0.99
 
 
 def test_detect_json_url_upload(client):
@@ -259,3 +261,44 @@ def test_detect_multipart_upload_too_large_rejected(client):
             files={"file": ("big.mp4", oversized, "video/mp4")},
         )
     assert response.status_code == 413
+
+
+# ---------------------------------------------------------------------------
+# API-layer confidence boost (_boost_confidence)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "score,expected",
+    [
+        (0.77, 0.87),   # normal boost
+        (0.95, 0.99),   # boost clamped at ceiling
+        (0.99, 0.99),   # already at ceiling
+        (0.5, 0.6),     # low score still boosts
+        (0.0, 0.1),     # zero is a valid non-failed score
+    ],
+)
+def test_boost_confidence_maps_score(score, expected):
+    from app.api.detection import _boost_confidence
+
+    result = {"summary": "No AI Detected", "confidence_score": score}
+    _boost_confidence(result)
+    assert result["confidence_score"] == expected
+
+
+@pytest.mark.parametrize("summary", ["Analysis Failed", "File too large to scan"])
+def test_boost_confidence_skips_failed_analyses(summary):
+    from app.api.detection import _boost_confidence
+
+    result = {"summary": summary, "confidence_score": 0.8}
+    _boost_confidence(result)
+    assert result["confidence_score"] == 0.8
+
+
+@pytest.mark.parametrize("bad", [None, "high", -1.0])
+def test_boost_confidence_skips_non_numeric_or_negative(bad):
+    from app.api.detection import _boost_confidence
+
+    result = {"summary": "No AI Detected", "confidence_score": bad}
+    _boost_confidence(result)
+    assert result["confidence_score"] == bad
