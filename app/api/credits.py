@@ -11,7 +11,7 @@ from google.cloud.firestore_v1.async_transaction import async_transactional
 from pydantic import BaseModel
 
 from app.config import settings
-from app.core.auth import check_ip_device_limit, get_client_ip, validate_device_id
+from app.core.auth import get_client_ip, validate_device_id
 from app.core.firebase_auth import get_current_user, get_optional_user
 from app.core.rate_limiter import check_rate_limit
 from app.integrations import firebase as firebase_module
@@ -62,8 +62,14 @@ async def get_balance(
     else:
         user_id_var.set(device_id or "")
         validate_device_id(device_id)
-        ip = get_client_ip(request)
-        await check_ip_device_limit(ip, device_id, turnstile_token)
+        # A balance READ is free and grants nothing, so it must NOT be gated by the
+        # per-IP new-device limit. That gate raised 403 STRICT_CAPTCHA_REQUIRED
+        # before get_guest_wallet ran, so a new guest behind a shared IP (multiple
+        # testers, or one person reinstalling — each reinstall = a fresh device id)
+        # never got their wallet created and saw 0 credits instead of the 40 welcome
+        # bonus. Abuse is gated where it actually costs: /detect and /inpaint require
+        # a Turnstile token. Keep a per-IP rate limit here to stop hammering the read.
+        await check_rate_limit(f"balance:ip:{get_client_ip(request)}")
         wallet = await get_guest_wallet(device_id)
         balance = wallet.get("credits", 0)
     logger.info("balance_queried", extra={"action": "balance_queried", "balance": balance})
