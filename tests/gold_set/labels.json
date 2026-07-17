@@ -1,0 +1,101 @@
+{
+  "images/first_image.png": {
+    "is_ai": true
+  },
+  "images/second_image.png": {
+    "is_ai": true
+  },
+  "images/third_image.png": {
+    "is_ai": true
+  },
+  "images/129502.jpg": {
+    "is_ai": false
+  },
+  "images/129705.jpg": {
+    "is_ai": false
+  },
+  "images/129127.jpg": {
+    "is_ai": false
+  },
+  "images/130207.jpg": {
+    "is_ai": true
+  },
+  "images/130206.jpg": {
+    "is_ai": true
+  },
+  "images/130208.jpg": {
+    "is_ai": true
+  },
+  "images/ai.jpeg": {
+    "is_ai": true
+  },
+  "images/AI ART ITA.jpg": {
+    "is_ai": true
+  },
+  "images/130188.jpg": {
+    "is_ai": true
+  },
+  "images/129177 (2).jpg": {
+    "is_ai": true
+  },
+  "images/frame_debug_129896.jpg": {
+    "is_ai": false
+  },
+  "images/frame_debug_129193.jpg": {
+    "is_ai": true
+  },
+  "images/129504.jpg": {
+    "is_ai": false
+  },
+  "images/129732.jpg": {
+    "is_ai": false
+  },
+  "images/128782.jpg": {
+    "is_ai": false
+  },
+  "images/129177 (1).jpg": {
+    "is_ai": true
+  },
+  "images/129263.jpg": {
+    "is_ai": false
+  },
+  "images/129177.jpg": {
+    "is_ai": true
+  },
+  "images/fiverr.jpeg": {
+    "is_ai": false
+  },
+  "images/sofa.jpeg": {
+    "is_ai": true
+  },
+  "images/hey.jpeg": {
+    "is_ai": true
+  },
+  "images/linkdin profile.jpeg": {
+    "is_ai": false
+  },
+  "images/174607.png": {
+    "is_ai": true,
+    "note": "osher signs (digital-goods parody)"
+  },
+  "images/174709.jpg": {
+    "is_ai": true,
+    "note": "osher airplane (accepted hard-miss)"
+  },
+  "images/175026.jpg": {
+    "is_ai": true,
+    "note": "osher missile (weapon-of-war parody)"
+  },
+  "images/172829.jpg": {
+    "is_ai": false,
+    "note": "real baby near window"
+  },
+  "images/169936.jpg": {
+    "is_ai": false,
+    "note": "real baby with cup"
+  },
+  "images/169935.jpg": {
+    "is_ai": false,
+    "note": "real baby drinking (grip-hand FP risk)"
+  }
+}

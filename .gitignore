@@ -16,6 +16,7 @@ scripts/*
 !scripts/sign_request.py
 !scripts/redis_clear_forensic_cache.py
 !scripts/eval_cost_accuracy.py
+!scripts/eval_gold_set.py
 results.jsonl
 dry_run_results.jsonl
 *.log
@@ -42,3 +43,6 @@ test_prompt_accuracy.py
 test_prompt_gold.json.env
 
 .env
+
+# Gold-set eval images (real photos incl. minors/PII — carried out-of-band, not committed)
+tests/gold_set/images/

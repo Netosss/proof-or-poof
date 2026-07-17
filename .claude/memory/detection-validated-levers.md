@@ -1,0 +1,27 @@
+---
+name: detection-validated-levers
+description: Which detection-prompt levers were measured to help vs hurt on the extended gold set (multi-crop helps; relaxing studio exception and extra physics perspectives hurt)
+metadata: 
+  node_type: memory
+  type: project
+  originSessionId: 7e7fde0e-6771-4547-b8e1-c5cef72c7e8b
+---
+
+Measured on the extended gold set (31 images = original 25 + 3 Osher parody ads + 3 real baby photos), gemini-3-flash @ temp 0.2. Baseline (3-clause content_plausibility + GripAndChildGuard) = 27/31 (87%), 0 FP.
+
+**KEPT — multi-crop / zoom pass (PR #36):** in `analyze_image_combined_async`, send the full image AND a high-res center crop (25-75%) in the SAME Gemini call. Gives macro context + high-frequency micro-texture in one pass. Result: 28/31 (90%), 0 FP — caught one more AI image (AI-art portrait) with zero new false positives and negligible latency (~2.5-3.2s; crop is ~25% area). `_encode_full_and_crop` helper; crop skipped for raw-bytes (video) input.
+
+**REJECTED — relaxing the StudioException** to flag hyper-perfection / hair-melt / glasses-fuse / hyper-symmetric-iris: false-positived on a REAL LinkedIn portrait and a baby (26/31, 2 FP). The "hyper-symmetric iris" tell fires on genuine sharp headshots. Do not relax the studio exception.
+
+**SKIPPED — a 4th "Material Physics & Depth" perspective and a forced 0.65 "subtle anomaly" confidence floor:** this is the same add-a-skeptical-perspective pattern that regressed the gold set 92%→64% (see [[detection-prompt-overfit-lesson]]); the multi-crop already delivers the micro-texture benefit without the recall hit, and a forced floor on uncertain signals re-introduces false positives.
+
+Method that works: extend the gold set with new failure classes, lock a baseline, test each change as an ISOLATED delta (revert between tests), keep only changes that raise AI recall with 0 new FP. Related: [[detection-content-plausibility]], [[gemini-flash-vision-ceiling]].
+
+**DARK-REGION NIGHT-PHOTO FALSE POSITIVE (2026-06-05 session) — UNFIXABLE prompt/quality-only.** A REAL night flash photo (sharp lit subject + large pitch-black areas, e.g. a WhatsApp pizza-on-a-bench shot) intermittently false-positives: the model confabulates "the foot melts into the asphalt with no contact shadow" in the dark region it cannot actually resolve. Verdict is strictly bimodal (0.85 vs 0.05); flip rate ~1/8 to 4/8 run-to-run. Same failure family: a compressed shirt graphic read as "gibberish AI text". Three isolated approaches ALL failed:
+- **Temp 0** (now off-limits — user forbade model-config changes): didn't help, made pizza WORSE (4/5). Flip lives in the thinking trace, not output sampling.
+- **Vivid prompt guard** naming the artifact ("feet blending into dark ground, no contact shadow", wrapped in "do NOT flag"): PRIMED gemini-flash → backfired, pizza FP 2/5→5/5. Negation + vivid description is unreliable on flash; describing an artifact makes it attend to it.
+- **Minimal abstract anchor-resolvability clause** appended to AnchoredEvidenceRule ("anchor region must be one you can CLEARLY RESOLVE; too dark/small/blurred cannot alone support AI"): fixed pizza (0 FP across 31x3=93 gold draws) BUT eroded `third_image` (a dark-SILHOUETTE AI true-positive, 0.85→0.05) — silhouette IS a dark region, so the clause discounts the real signal too. Net wash, 87.1%.
+- **Dark→MEDIUM quality routing** in quality.py (dark_pixel_ratio>=0.30 → MEDIUM framing instead of strict HIGH): barely helped pizza (still 1/5) and badly hurt dark AI (FN 2→5; `AI ART ITA` 2/5→4/5). Anti-correlated metric: dark AI sits at 0.37-0.79 dark-ratio, pizza at 0.301, daylight REAL at 0.290 — classes physically overlap at the boundary, so routing softens dark-AI catches more than it helps the pizza.
+- **Graduated "set confidence to exactly 0.5" clause** (3-expert design: discriminator = single uncorroborated low-resolvability anchor, NOT darkness; hard carve-out for frame-spanning/large-scale geometry-lighting violations; fixed-number target because flash confidence is bimodal and can't emit calibrated middles). In the AnchoredEvidenceRule guard: SAVED `third_image` (carve-out works, 0.6-0.75) and 0 FN on all dark-AI canaries — but PRIMED pizza to 5/5 FP (the resolvability language in the early guard makes flash scrutinize+flag the dark foot). Moved to confidence-FIELD-only (point of emission, no guard echo): pizza still 4/5 FP AND lost `third_image` (3/5, the 0.5 floor applied to its silhouette since the carve-out was gone).
+
+STRUCTURAL CONCLUSION (definitive): on gemini-flash this is unfixable prompt-only. The carve-out that SAVES the dark-silhouette TP (`third_image`) must be PRESENT in the prompt, but its presence PRIMES the pizza FP; remove it to stop priming and you lose the TP. No wording or placement (guard vs schema-field) gets both. Clean baseline (gold n=3) = 28/31 (90.3%), 0 FP — the pizza is NOT in the gold set, so any clause that fixes it only shows up as gold-set RECALL LOSS. Clean fixes all require off-limits model-config: thinking_level bump, self-consistency multi-sample (weak — flip rate too high), or pro-tier escalation for borderline single-anchor dark verdicts. Default recommendation: STAY ON BASELINE; do not retry prompt clauses for this. The repaired single-image debugger lives at scripts/diagnose_image.py (gitignored, local-only) — use it + an FP/FN focused x5 runner, never single-pass (bimodal noise).
