@@ -17,7 +17,7 @@ pandas
 plotly
 google-genai
 google-auth
-firebase-admin
+firebase-admin>=6.5.0
 httpx
 cryptography
 redis>=4.5.0

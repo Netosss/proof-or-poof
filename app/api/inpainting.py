@@ -20,6 +20,7 @@ from fastapi.responses import Response
 from PIL import Image
 
 from app.config import settings
+from app.core.app_check import passes_app_check_gate
 from app.core.auth import check_ip_device_limit, get_client_ip, validate_device_id, verify_turnstile
 from app.core.dependencies import security_manager
 from app.core.firebase_auth import get_optional_user
@@ -47,6 +48,7 @@ async def inpaint_image(
     mask: UploadFile = File(...),
     device_id: str = Header(..., alias="X-Device-ID"),
     turnstile_token: str | None = Header(None, alias="X-Turnstile-Token"),
+    app_check_token: str | None = Header(None, alias="X-Firebase-AppCheck"),
     op_ref: str | None = Header(None, alias="X-Op-Ref"),
     auth_user: dict | None = Depends(get_optional_user),
 ):
@@ -92,14 +94,19 @@ async def inpaint_image(
             },
         )
 
-        if not turnstile_token:
-            raise HTTPException(
-                status_code=403,
-                detail={"code": "CAPTCHA_REQUIRED", "message": "Verification needed"},
-            )
-        is_human = await verify_turnstile(turnstile_token)
-        if not is_human:
-            raise HTTPException(status_code=403, detail="Invalid CAPTCHA")
+        # Mobile anti-abuse: a valid Firebase App Check token (Play Integrity on
+        # Android, App Attest on iOS later) can satisfy the guest gate in enforce
+        # mode. The website never sends X-Firebase-AppCheck, so its Turnstile path
+        # below is unchanged (monitor mode also still requires Turnstile).
+        if not await passes_app_check_gate(app_check_token, endpoint="inpaint"):
+            if not turnstile_token:
+                raise HTTPException(
+                    status_code=403,
+                    detail={"code": "CAPTCHA_REQUIRED", "message": "Verification needed"},
+                )
+            is_human = await verify_turnstile(turnstile_token)
+            if not is_human:
+                raise HTTPException(status_code=403, detail="Invalid CAPTCHA")
 
         await check_ip_device_limit(ip, device_id, token_already_verified=True)
 

@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Path, Request, Up
 from starlette.requests import ClientDisconnect
 
 from app.config import settings
+from app.core.app_check import passes_app_check_gate
 from app.core.auth import check_ip_device_limit, get_client_ip, validate_device_id, verify_turnstile
 from app.core.dependencies import security_manager
 from app.core.file_validator import ALLOWED_VIDEO_EXTENSIONS
@@ -105,6 +106,7 @@ async def detect(
     request: Request,
     device_id: str = Header(..., alias="X-Device-ID"),
     turnstile_token: str | None = Header(None, alias="X-Turnstile-Token"),
+    app_check_token: str | None = Header(None, alias="X-Firebase-AppCheck"),
     client_task_id: str | None = Header(None, alias="X-Task-Id"),
     auth_user: dict | None = Depends(get_optional_user),
 ):
@@ -142,15 +144,20 @@ async def detect(
     else:
         validate_device_id(device_id)
 
-        if not turnstile_token:
-            raise HTTPException(
-                status_code=403,
-                detail={"code": "CAPTCHA_REQUIRED", "message": "Verification needed"},
-            )
+        # Mobile anti-abuse: a valid Firebase App Check token (Play Integrity on
+        # Android, App Attest on iOS later) can satisfy the guest gate in enforce
+        # mode. The website never sends X-Firebase-AppCheck, so its Turnstile path
+        # below is unchanged (monitor mode also still requires Turnstile).
+        if not await passes_app_check_gate(app_check_token, endpoint="detect"):
+            if not turnstile_token:
+                raise HTTPException(
+                    status_code=403,
+                    detail={"code": "CAPTCHA_REQUIRED", "message": "Verification needed"},
+                )
 
-        is_human = await verify_turnstile(turnstile_token)
-        if not is_human:
-            raise HTTPException(status_code=403, detail="Invalid CAPTCHA")
+            is_human = await verify_turnstile(turnstile_token)
+            if not is_human:
+                raise HTTPException(status_code=403, detail="Invalid CAPTCHA")
 
         await check_ip_device_limit(ip, device_id, token_already_verified=True)
 

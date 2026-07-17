@@ -290,6 +290,39 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------ #
+    # Firebase App Check (mobile anti-abuse)                              #
+    # Mobile clients send X-Firebase-AppCheck (Play Integrity on Android, #
+    # App Attest on iOS later). Web is unaffected — it keeps Turnstile.   #
+    # ------------------------------------------------------------------ #
+    app_check_mode: str = Field(
+        "monitor",
+        description=(
+            "monitor = verify+log App Check but still require Turnstile (measure "
+            "success rates first); enforce = a valid App Check token alone "
+            "satisfies the mobile guest gate. Web never sends the header either way."
+        ),
+    )
+    app_check_replay_max: int = Field(
+        200,
+        description=(
+            "Max times a single App Check token may be presented within its TTL "
+            "(Redis-counted by token hash). Caps the value of a leaked token; set "
+            "generously — real heavy users reuse one cached token for ~1 h."
+        ),
+    )
+    app_check_replay_ttl_sec: int = Field(
+        3_600, description="TTL of the per-token replay counter (matches App Check token ~1 h)"
+    )
+
+    @field_validator("app_check_mode")
+    @classmethod
+    def _validate_app_check_mode(cls, v: str) -> str:
+        normalized = (v or "").strip().lower()
+        if normalized not in {"monitor", "enforce"}:
+            raise ValueError("app_check_mode must be 'monitor' or 'enforce'")
+        return normalized
+
+    # ------------------------------------------------------------------ #
     # Short ID                                                            #
     # ------------------------------------------------------------------ #
     short_id_length: int = Field(
