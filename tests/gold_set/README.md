@@ -9,26 +9,21 @@ validated levers, prompt-overfit).
 - `labels.json` — the source of truth: `{ "images/<file>": { "is_ai": bool, "note"? } }`
   (31 entries — 18 AI / 13 real). Repo-relative keys, so it's portable.
 
-## What's NOT in git (and why)
-- `images/` — the 31 actual photos (~18 MB). **Intentionally gitignored**: the set
-  contains real people's photos, including a real LinkedIn profile and several
-  photos of babies/children. Publishing identifiable/minor photos to a git remote is
-  permanent (survives in history) and outward-facing, so they are carried out-of-band.
+## `images/` — committed for a one-time laptop transfer (REMOVE AFTER FETCH)
+The 31 photos (~18 MB) are committed here **only to move them to the new machine via
+this private repo**. The set contains real people's photos (a LinkedIn profile,
+photos of babies/children), so once fetched on the new laptop, remove them from git
+going forward:
+```bash
+git rm -r --cached tests/gold_set/images && git commit -m "chore: drop gold images from git after transfer"
+```
+The files stay on disk locally (the `.gitignore` rule prevents them being
+re-committed by accident). Note: they remain in the private repo's *history*
+even after that — acceptable per the owner's decision for this private repo.
 
-## Restore the images on a new machine
-Pick one:
-1. **Manual transfer (recommended):** copy the `gold_set_images.tar.gz` archive
-   (AirDrop / USB / private cloud) and extract into place:
-   ```bash
-   tar -xzf gold_set_images.tar.gz -C backend-python/tests/gold_set/
-   ```
-   (creates `tests/gold_set/images/…`)
-2. **Point at an existing folder:** if the photos already live somewhere on the new
-   machine, run with an override — no copy needed:
-   ```bash
-   GOLD_SET_DIR=/path/to/gold_set python scripts/eval_gold_set.py
-   ```
-   (that folder must contain `labels.json` + `images/`)
+Alternatively (no git): carry `gold_set_images.tar.gz` out-of-band and
+`tar -xzf gold_set_images.tar.gz -C backend-python/tests/gold_set/`, or point at an
+existing folder with `GOLD_SET_DIR=/path python scripts/eval_gold_set.py`.
 
 ## Run
 ```bash
