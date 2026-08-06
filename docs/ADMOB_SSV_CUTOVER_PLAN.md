@@ -138,18 +138,32 @@ Then branch the grant: `kind == "uid"` → existing `_apply_ad_reward(subject_id
    `device:` subjects need `ad_rewards/device_{id}_{date}` or an equivalent, or one guest's views
    will collide with a signed-in user whose uid happens to match.
 
-### Decision required from the owner
+### ✅ DECIDED 2026-08-07 — guests DO earn ad credits, with a daily cap
 
-Do guests earn ad credits at all? The client shows the ad tile **most prominently to guests**
-(`InsufficientCreditsSheet.kt:281-291`), yet `/api/ads/reward` is Bearer-only — so a guest today
-watches a full ad and then gets a 401. Either:
+Option **(a)**: implement the `device:` branch. This closes a real UX hole — the client shows
+the ad tile **most prominently to guests** (`InsufficientCreditsSheet.kt:281-291`), yet
+`/api/ads/reward` is Bearer-only, so a guest today watches a full ad and then gets a 401.
 
-- **(a) Support guests in SSV** — implement the `device:` branch. Fixes a real UX hole, and the
-  anti-farm exposure is bounded by the existing per-IP device limits.
-- **(b) Don't** — then stop showing guests the ad tile, and have the client stop stamping
-  `device:` custom_data.
+**Guest branch requirements — all mandatory:**
 
-**(a) is recommended**, since the client is already built for it. But it is a product call.
+1. **Validate before use as a document id.** Reuse `validate_device_id`
+   (`app/core/auth.py:29-36`, `[a-zA-Z0-9\-_.]{1,128}`) on the parsed subject. It exists
+   specifically to *"prevent Firestore key injection and Redis key-prefix abuse."*
+2. **Separate cap namespace.** `ad_rewards/{uid}_{date}` is keyed on uid alone. A guest subject
+   must key `ad_rewards/device_{device_id}_{date}` (or equivalent) so a `device:` subject can
+   never collide with a signed-in uid — including the case where a malicious client stamps
+   `device:<someone-elses-firebase-uid>`.
+3. **Grant through `grant_guest_credits`** (`app/services/credits_service.py:170`), not
+   `grant_credits` — guest wallets are a separate collection with a different balance field
+   (`credits` vs `credits_balance`) and no ledger.
+4. **Consider a lower cap for guests.** Signed-in users are rate-limited by account creation;
+   a guest is limited only by device-id rotation. 3/day per device is defensible, but the
+   economics are worth an explicit decision rather than inheriting the signed-in number.
+
+**The threat to keep in mind throughout:** `custom_data` is attacker-influenced. A modified
+client can stamp any string it likes and Google will faithfully sign it. **The signature proves
+Google sent the callback, not that the subject is honest.** Every guest grant must therefore be
+treated as an unauthenticated write path with a validated key, not as trusted input.
 
 ---
 
@@ -237,9 +251,12 @@ SSV has **never run against real AdMob traffic.** Everything below assumes it wo
 ### Phase 1 — Fix Blocker A + harden
 
 - Prefix parsing + validation (§2), incl. the bare-uid transition fallback
-- Guest `device:` branch, **if** the owner chooses option (a)
-- Tests: valid uid / valid device / unprefixed legacy / malformed / injection-shaped
-- **Gate:** a real ad on a real device credits a real account.
+- **Guest `device:` branch — confirmed in scope 2026-08-07.** All four requirements in §2:
+  `validate_device_id` on the parsed subject, a separate `device_` cap namespace,
+  `grant_guest_credits` rather than `grant_credits`, and an explicit guest cap value.
+- Tests: valid uid / valid device / unprefixed legacy / malformed / injection-shaped /
+  `device:<a-real-firebase-uid>` (must NOT touch that user's wallet or cap)
+- **Gate:** a real ad on a real device credits a real account, **and** a real guest install.
 
 ### Phase 2 — Atomic cutover (§4)
 
@@ -308,9 +325,11 @@ ledger, and clearing it re-opens every historical `transaction_id` for a replay 
 
 ## 9. Owner decisions needed
 
-1. **Do guests earn ad credits?** (§2) — blocks Phase 1 scope.
+1. ~~**Do guests earn ad credits?**~~ ✅ **DECIDED 2026-08-07 — yes, with a daily cap.** Phase 1
+   scope now includes the `device:` branch. See §2 for the four mandatory requirements.
 2. **Accept the cosmetic "Daily ad limit reached" regression** during Phase 2→3? (§4) — the
    alternative is holding the security fix until a client release ships.
-3. **Confirm `AD_REWARD_CREDITS = 20` and `AD_REWARD_DAILY_LIMIT = 3`** are the intended economics.
-   The client hardcodes `adRewardCredits = 20` at **four** display sites, so these can drift
+3. **Confirm `AD_REWARD_CREDITS = 20` and `AD_REWARD_DAILY_LIMIT = 3`** are the intended economics,
+   and whether guests should get a *lower* cap than signed-in users (§2, requirement 4). The
+   client hardcodes `adRewardCredits = 20` at **four** display sites, so these can drift
    silently from what the server grants.
