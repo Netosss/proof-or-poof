@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     detect_credit_cost: int = Field(10, description="Credits charged per /detect call")
     inpaint_credit_cost: int = Field(20, description="Credits charged per /inpaint call")
     default_recharge_amount: int = Field(20, description="Default credits per ad-reward recharge")
+    max_recharge_amount: int = Field(
+        1000,
+        description="Hard ceiling on a single /api/credits/add top-up. The field was "
+                    "previously unbounded, so one leaked secret minted arbitrary credits "
+                    "(and a negative amount silently DEBITED a wallet).",
+    )
 
     # ------------------------------------------------------------------ #
     # Google Play Billing — SKU → credit mapping                          #
@@ -264,6 +270,40 @@ class Settings(BaseSettings):
         description="Cost per Gemini 3 Flash Preview request (verified: ~6,380 input tokens × $0.50/1M + ~27 output tokens × $3.00/1M)",
     )
     ad_revenue_per_reward: float = Field(0.015, description="Avg eCPM for a verified ad view")
+
+    # ------------------------------------------------------------------ #
+    # AdMob rewarded ads                                                  #
+    # ------------------------------------------------------------------ #
+    admob_rewarded_ad_unit_id: str = Field(
+        "",
+        description=(
+            "Our production rewarded ad unit (ca-app-pub-XXXX/YYYY). SSV callbacks whose "
+            "signed ad_unit does not match are rejected. This is a HARD security boundary, "
+            "not cosmetic: AdMob's SSV verifier keys are a single GLOBAL key set shared by "
+            "every publisher, so a valid signature proves only that some AdMob server sent "
+            "the callback — never that OUR app did. Without this pin, anyone can point their "
+            "own AdMob ad unit's SSV callback at us and mint credits for a wallet they "
+            "choose, paid for by an impression Google pays THEM for. Empty disables the "
+            "grant path entirely (fail closed)."
+        ),
+    )
+    ad_reward_credits: int = Field(20, description="Credits granted per verified ad view")
+    ad_reward_daily_limit: int = Field(3, description="Max ad rewards per subject per UTC day")
+    ad_reward_guest_daily_limit: int = Field(
+        3,
+        description=(
+            "Max ad rewards per guest device per UTC day. Separate from the signed-in limit "
+            "because a guest is throttled only by device-id rotation, whereas a signed-in "
+            "user is throttled by account creation."
+        ),
+    )
+    admob_ssv_max_age_sec: int = Field(
+        3600,
+        description=(
+            "Reject SSV callbacks whose signed timestamp is older than this. Defence in "
+            "depth behind the per-transaction_id claim; 0 disables the check."
+        ),
+    )
 
     # ------------------------------------------------------------------ #
     # File Size Limits                                                    #

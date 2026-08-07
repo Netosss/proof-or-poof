@@ -42,3 +42,7 @@ test_prompt_accuracy.py
 test_prompt_gold.json.env
 
 .env
+
+# Local Windows dev venv + filtered requirements (uvloop is Linux-only)
+.venv/
+requirements-win-local.txt

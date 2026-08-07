@@ -192,35 +192,39 @@ def test_add_credits_post_db_unavailable(client):
     assert response.status_code == 503
 
 
+# `amount` is bounded. It used to be a bare `int`, so the recharge secret was an
+# unlimited mint and a NEGATIVE amount debited the wallet instead of crediting it.
+# Both are rejected by pydantic now, i.e. before perform_recharge is ever reached
+# — which is why these assert 422 and patch nothing.
+
+
+def test_add_credits_post_rejects_negative_amount(client):
+    response = client.post(
+        "/api/credits/add",
+        json={"device_id": DEVICE_ID, "amount": -500, "secret_key": SECRET},
+    )
+    assert response.status_code == 422
+
+
+def test_add_credits_post_rejects_absurd_amount(client):
+    response = client.post(
+        "/api/credits/add",
+        json={"device_id": DEVICE_ID, "amount": 10_000_000, "secret_key": SECRET},
+    )
+    assert response.status_code == 422
+
+
 # ---------------------------------------------------------------------------
-# GET /api/credits/webhook
+# GET /api/credits/webhook — REMOVED
+#
+# It carried the mint secret in a URL query string (so: access logs, proxy logs,
+# Referer) with an unbounded amount. Nothing called it. This test is the guard
+# against it being reintroduced by a revert.
 # ---------------------------------------------------------------------------
 
 
-def test_add_credits_webhook_valid(client):
-    with (
-        patch(
-            "app.api.credits.perform_recharge",
-            new_callable=AsyncMock,
-            return_value={"status": "success", "new_balance": 10},
-        ),
-        patch("app.api.credits.log_transaction"),
-    ):
-        response = client.get(
-            f"/api/credits/webhook?device_id={DEVICE_ID}&secret_key={SECRET}"
-        )
-    assert response.status_code == 200
-    assert response.json()["status"] == "success"
-
-
-def test_add_credits_webhook_wrong_key(client):
-    with patch(
-        "app.api.credits.perform_recharge",
-        side_effect=__import__("fastapi").HTTPException(
-            status_code=403, detail="Invalid secret key"
-        ),
-    ):
-        response = client.get(
-            f"/api/credits/webhook?device_id={DEVICE_ID}&secret_key=bad"
-        )
-    assert response.status_code == 403
+def test_credits_webhook_route_is_gone(client):
+    response = client.get(
+        f"/api/credits/webhook?device_id={DEVICE_ID}&secret_key={SECRET}"
+    )
+    assert response.status_code == 404

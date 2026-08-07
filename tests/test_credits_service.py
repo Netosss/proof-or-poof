@@ -135,6 +135,47 @@ async def test_deduct_guest_credits_insufficient_raises_402(mock_firebase, monke
     assert exc.value.status_code == 402
 
 
+@pytest.mark.asyncio
+async def test_deduct_guest_credits_banned_wallet_raises_403(mock_firebase, monkeypatch):
+    """
+    The ban lever. `is_banned` was written on every wallet and read by nothing,
+    so there was no way to stop a farmer short of a deploy.
+
+    Note the wallet is funded — 500 credits, far above the cost. The 403 must come
+    from the ban, not from running out, or the test would pass for the wrong reason.
+    """
+    from app.integrations import firebase as fb
+    monkeypatch.setattr(fb, "db", mock_firebase)
+    mock_firebase.seed("guest_wallets", DEVICE, {"credits": 500, "is_banned": True})
+
+    from app.services.credits_service import deduct_guest_credits
+    with _tx_patch():
+        with pytest.raises(HTTPException) as exc:
+            await deduct_guest_credits(DEVICE, cost=10)
+    assert exc.value.status_code == 403
+    assert exc.value.detail["code"] == "WALLET_SUSPENDED"
+
+
+@pytest.mark.asyncio
+async def test_deduct_guest_credits_missing_is_banned_field_still_spends(
+    mock_firebase, monkeypatch
+):
+    """
+    Wallets created before `is_banned` existed have no such field. Those must keep
+    working — a missing flag means not banned, never "fail closed on every legacy
+    wallet", which would have been a production outage for the oldest users.
+    """
+    from app.integrations import firebase as fb
+    monkeypatch.setattr(fb, "db", mock_firebase)
+    mock_firebase.seed("guest_wallets", DEVICE, {"credits": 20})
+
+    from app.services.credits_service import deduct_guest_credits
+    with _tx_patch():
+        new_balance = await deduct_guest_credits(DEVICE, cost=10)
+
+    assert new_balance == 10
+
+
 # ---------------------------------------------------------------------------
 # perform_recharge
 # ---------------------------------------------------------------------------

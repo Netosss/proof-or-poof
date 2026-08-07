@@ -77,6 +77,24 @@ async def deduct_guest_credits(device_id: str, cost: int = 10) -> int:
             })
             current_credits = settings.welcome_credits
         else:
+            # The ban gate. `is_banned` has been written on every wallet since
+            # wallets existed and read by nothing, so banning a farmer required a
+            # deploy. This is the lever.
+            #
+            # It lives INSIDE the transaction rather than as a check_ban_status()
+            # call at the route, for two reasons: that helper costs a second
+            # Firestore read per request, and it opens a TOCTOU window where a ban
+            # landing between the check and the deduct still gets served. Here the
+            # ban and the balance are read from one snapshot under one transaction.
+            if (snapshot.to_dict() or {}).get("is_banned", False):
+                logger.warning("guest_wallet_banned_spend_blocked", extra={
+                    "action": "guest_wallet_banned_spend_blocked",
+                })
+                raise HTTPException(
+                    status_code=403,
+                    detail={"code": "WALLET_SUSPENDED", "message": "This wallet has been suspended."},
+                )
+
             current_credits = snapshot.get("credits")
             if current_credits is None:
                 current_credits = 0
@@ -110,26 +128,38 @@ async def deduct_guest_credits(device_id: str, cost: int = 10) -> int:
         raise HTTPException(status_code=500, detail="Wallet transaction failed")
 
 
-async def _apply_guest_topup(device_id: str, amount: int) -> int:
+async def _apply_guest_topup(device_id: str, amount: int, include_welcome: bool = False) -> int:
     """
-    Atomically adds `amount` credits to the guest wallet, creating it
-    (with the welcome bonus included) when it does not exist yet.
-    Returns the new balance.
+    Atomically adds `amount` credits to the guest wallet, creating it when it
+    does not exist yet. Returns the new balance.
+
+    `include_welcome` defaults to **False**, and that default is a security
+    boundary rather than a style choice. This function previously always created
+    a missing wallet with `welcome_credits + amount`, so the first top-up to any
+    device id the server had never seen paid the welcome bonus *again* — on top
+    of the bonus `get_guest_wallet` already grants on first read. An attacker
+    rotating device ids harvested a fresh bonus per id, and the bug was live on
+    the guest Play-Billing path (`billing.py`), where it also silently inflated
+    every genuine first purchase.
+
+    Only `get_guest_wallet` should mint the welcome bonus, exactly once, at
+    wallet creation. Grant paths (billing, ad rewards) pass `amount` alone.
     """
     db = _get_db()
     doc_ref = db.collection("guest_wallets").document(device_id)
+    initial = (settings.welcome_credits if include_welcome else 0) + amount
 
     @async_transactional
     async def recharge_transaction(transaction, ref):
         snapshot = await ref.get(transaction=transaction)
         if not snapshot.exists:
             transaction.set(ref, {
-                "credits": settings.welcome_credits + amount,
+                "credits": initial,
                 "last_active": SERVER_TIMESTAMP,
                 "is_banned": False,
                 "expires_at": datetime.now(timezone.utc) + timedelta(days=settings.wallet_ttl_days),
             })
-            return settings.welcome_credits + amount
+            return initial
         else:
             current = snapshot.get("credits") or 0
             transaction.update(ref, {
