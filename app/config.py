@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     detect_credit_cost: int = Field(10, description="Credits charged per /detect call")
     inpaint_credit_cost: int = Field(20, description="Credits charged per /inpaint call")
     default_recharge_amount: int = Field(20, description="Default credits per ad-reward recharge")
+    max_recharge_amount: int = Field(
+        1000,
+        description="Hard ceiling on a single /api/credits/add top-up. The field was "
+                    "previously unbounded, so one leaked secret minted arbitrary credits "
+                    "(and a negative amount silently DEBITED a wallet).",
+    )
 
     # ------------------------------------------------------------------ #
     # Google Play Billing — SKU → credit mapping                          #

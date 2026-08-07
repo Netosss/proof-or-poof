@@ -1,12 +1,12 @@
 """
-Credit management routes: balance check, top-up (POST & GET webhook), ads reward.
+Credit management routes: balance check, top-up (POST), ads reward, AdMob SSV.
 """
 
 import logging
 import re
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from google.cloud.firestore_v1 import SERVER_TIMESTAMP
 from google.cloud.firestore_v1.async_transaction import async_transactional
 from pydantic import BaseModel
@@ -141,20 +141,21 @@ async def add_credits_post(request: Request, payload: RechargeRequest):
     return result
 
 
-@router.get("/api/credits/webhook")
-async def add_credits_get(
-    request: Request,
-    user_id: str = Query(..., alias="device_id"),
-    amount: int = settings.default_recharge_amount,
-    key: str = Query(..., alias="secret_key"),
-):
-    user_id_var.set(user_id)
-    await check_rate_limit(f"recharge:{get_client_ip(request)}")
-    result = await perform_recharge(user_id, amount, key)
-    log_transaction(
-        "AD_REWARD", settings.ad_revenue_per_reward, {"device_id": user_id, "credits": amount}
-    )
-    return result
+# GET /api/credits/webhook was removed here, deliberately and not replaced.
+#
+# It took the unlimited-credit-mint secret as a URL QUERY PARAMETER, which means
+# the secret was written verbatim into every access log, proxy log, and Referer
+# header on the path — Cloudflare and Railway included. `amount` was unbounded
+# and unvalidated on top of that. A GET cannot be fixed while keeping its shape,
+# because the secret being in the URL *is* the shape.
+#
+# POST /api/credits/add does the same job with the secret in a JSON body and
+# `amount` now bounded to [1, settings.max_recharge_amount]. Nothing called this
+# route: not the web frontend (which only calls /api/user/balance), not the
+# Android client, only its own tests.
+#
+# If an external integration turns out to have depended on it, restore from git
+# history — but restore it as a POST with the secret in a header, never as a GET.
 
 
 async def _release_cap_slot(db, reward_ref) -> None:

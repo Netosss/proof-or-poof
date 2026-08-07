@@ -77,6 +77,24 @@ async def deduct_guest_credits(device_id: str, cost: int = 10) -> int:
             })
             current_credits = settings.welcome_credits
         else:
+            # The ban gate. `is_banned` has been written on every wallet since
+            # wallets existed and read by nothing, so banning a farmer required a
+            # deploy. This is the lever.
+            #
+            # It lives INSIDE the transaction rather than as a check_ban_status()
+            # call at the route, for two reasons: that helper costs a second
+            # Firestore read per request, and it opens a TOCTOU window where a ban
+            # landing between the check and the deduct still gets served. Here the
+            # ban and the balance are read from one snapshot under one transaction.
+            if (snapshot.to_dict() or {}).get("is_banned", False):
+                logger.warning("guest_wallet_banned_spend_blocked", extra={
+                    "action": "guest_wallet_banned_spend_blocked",
+                })
+                raise HTTPException(
+                    status_code=403,
+                    detail={"code": "WALLET_SUSPENDED", "message": "This wallet has been suspended."},
+                )
+
             current_credits = snapshot.get("credits")
             if current_credits is None:
                 current_credits = 0
