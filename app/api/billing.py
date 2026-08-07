@@ -8,7 +8,9 @@ POST /api/billing/google/verify
   (X-Device-ID) — same dual-path model as /api/user/balance.
 """
 
+import hmac
 import logging
+import os
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from google.cloud.firestore_v1 import SERVER_TIMESTAMP
@@ -29,6 +31,10 @@ from app.services.google_play_billing import (
     InvalidPurchaseError,
     get_product_purchase,
     is_configured,
+)
+from app.services.refund_reconciler import (
+    DEFAULT_LOOKBACK_DAYS,
+    reconcile_voided_purchases,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,7 +57,9 @@ CONSUMPTION_STATE_CONSUMED = 1
 _ORDERS_COLLECTION = "processed_play_orders"
 
 
-async def _durable_order_claim(order_id: str, owner_id: str, credits: int) -> bool:
+async def _durable_order_claim(
+    order_id: str, owner_id: str, credits: int, is_guest: bool
+) -> bool:
     """
     Claim `order_id` permanently. True if this call won it, False if already
     granted. Fails CLOSED: if Firestore is unavailable we return False rather
@@ -73,9 +81,11 @@ async def _durable_order_claim(order_id: str, owner_id: str, credits: int) -> bo
     await ref.set({
         "owner_id": owner_id,
         "credits": credits,
+        # is_guest decides WHICH wallet a refund reversal debits — guest_wallets
+        # vs users. It cannot be re-derived later: the same string could plausibly
+        # be a uid or a device id, and guessing wrong debits a stranger.
+        "is_guest": is_guest,
         "granted_at": SERVER_TIMESTAMP,
-        # Written so a future voided-purchase reversal (M5) has the owner and the
-        # amount to reverse without re-deriving them from Play.
         "reversed": False,
     })
     return True
@@ -116,6 +126,41 @@ class GoogleVerifyResponse(BaseModel):
     credits_granted: int
     new_balance: int
     order_id: str
+
+
+@router.post("/api/billing/reconcile-refunds")
+async def reconcile_refunds(
+    secret: str | None = Header(None, alias="X-Admin-Secret"),
+    lookback_days: int = DEFAULT_LOOKBACK_DAYS,
+):
+    """
+    Operator/cron entry point: reverse credits for Google-voided purchases.
+
+    Closes buy -> spend -> refund -> keep the credits. Not user-triggerable.
+
+    Auth is the `RECHARGE_SECRET_KEY` operator secret, in a **header** — never a
+    query parameter, which is exactly what got `GET /api/credits/webhook` deleted
+    (secrets in URLs land in access logs, proxy logs and Referer).
+
+    Balances are allowed to go **negative**. That is deliberate: clamping at zero
+    would let someone buy, spend, refund and keep the spent value, which is the
+    hole this closes. The debt follows the wallet until they top up again.
+
+    Google retains voided purchases for 30 days only — run this at least daily.
+    """
+    expected = os.getenv("RECHARGE_SECRET_KEY", "")
+    if not expected or not secret or not hmac.compare_digest(secret, expected):
+        logger.warning(
+            "refund_reconcile_unauthorized",
+            extra={"action": "refund_reconcile_unauthorized"},
+        )
+        raise HTTPException(status_code=403, detail="Invalid secret")
+
+    if lookback_days < 1 or lookback_days > 30:
+        # Above 30 is pointless (Google retains 30 days) and below 1 is a typo.
+        raise HTTPException(status_code=422, detail="lookback_days must be 1..30")
+
+    return await reconcile_voided_purchases(lookback_days)
 
 
 async def _current_balance(auth_user: dict | None, owner_id: str) -> int:
@@ -250,7 +295,7 @@ async def verify_google_purchase(
     # Durable claim, taken AFTER the Redis claim so the cheap guard settles
     # concurrent retries first, and BEFORE the grant so a crash between the two
     # cannot pay out twice. Losing it means Firestore already has this order.
-    if not await _durable_order_claim(order_id, owner_id, credits):
+    if not await _durable_order_claim(order_id, owner_id, credits, auth_user is None):
         balance = await _current_balance(auth_user, owner_id)
         logger.info(
             "google_play_duplicate_order_durable",

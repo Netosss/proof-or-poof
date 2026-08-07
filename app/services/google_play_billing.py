@@ -31,6 +31,10 @@ _PURCHASE_URL = (
     "https://androidpublisher.googleapis.com/androidpublisher/v3/applications/"
     "{package_name}/purchases/products/{product_id}/tokens/{token}"
 )
+_VOIDED_PURCHASES_URL = (
+    "https://androidpublisher.googleapis.com/androidpublisher/v3/applications/"
+    "{package_name}/purchases/voidedpurchases"
+)
 
 # Cached credentials + the raw JSON they were built from, so a rotated
 # GOOGLE_PLAY_SERVICE_ACCOUNT_JSON invalidates the cache automatically.
@@ -81,6 +85,70 @@ async def _get_access_token() -> str:
             },
         )
         raise GooglePlayVerificationError("Service account token refresh failed") from e
+
+
+async def list_voided_purchases(start_time_ms: int) -> list[dict]:
+    """
+    Lists purchases voided since `start_time_ms` (refunds, chargebacks, revokes).
+
+    GET /androidpublisher/v3/applications/{pkg}/purchases/voidedpurchases
+
+    Returns the raw `voidedPurchases` entries, each carrying `orderId`,
+    `purchaseToken`, `voidedTimeMillis` and `voidedReason`. An empty list means
+    nothing was voided in the window — NOT an error.
+
+    Note Google only retains voided purchases for 30 days, so the reconciler
+    must run more often than that or refunds are lost silently.
+
+    Raises GooglePlayVerificationError on auth/network/unexpected responses.
+    Pagination is followed via `nextPageToken`, capped so a runaway response
+    cannot loop forever.
+    """
+    access_token = await _get_access_token()
+    base = _VOIDED_PURCHASES_URL.format(
+        package_name=quote(settings.android_package_name, safe="")
+    )
+
+    out: list[dict] = []
+    page_token: str | None = None
+    for _ in range(20):  # hard page cap; 20 * default page size is far past real volume
+        url = f"{base}?startTime={start_time_ms}"
+        if page_token:
+            url += f"&token={quote(page_token, safe='')}"
+        try:
+            async with http_module.request_session() as sess:
+                async with sess.get(
+                    url, headers={"Authorization": f"Bearer {access_token}"}
+                ) as response:
+                    if response.status != 200:
+                        body_preview = (await response.text())[:500]
+                        logger.error(
+                            "google_play_voided_list_failed",
+                            extra={
+                                "action": "google_play_voided_list_failed",
+                                "status_code": response.status,
+                                "body": body_preview,
+                            },
+                        )
+                        raise GooglePlayVerificationError(
+                            f"Google Play returned {response.status}"
+                        )
+                    payload = await response.json()
+        except GooglePlayVerificationError:
+            raise
+        except Exception as e:
+            logger.error(
+                "google_play_voided_request_failed",
+                extra={"action": "google_play_voided_request_failed", "error": str(e)},
+            )
+            raise GooglePlayVerificationError("Google Play voided-purchases request failed") from e
+
+        out.extend(payload.get("voidedPurchases", []) or [])
+        page_token = (payload.get("tokenPagination") or {}).get("nextPageToken")
+        if not page_token:
+            break
+
+    return out
 
 
 async def get_product_purchase(product_id: str, purchase_token: str) -> dict:
