@@ -16,12 +16,55 @@ The real situation is three things:
 
 | | Finding | Severity |
 |---|---|---|
+| **0** | `/api/ads/ssv` accepts validly-signed callbacks from **any AdMob publisher on earth** — an unauthenticated credit mint | 🔴🔴 **CRITICAL** |
 | **A** | `custom_data` contract mismatch between client and backend — **SSV would grant nothing if enabled today** | 🔴 **Blocker** |
 | **B** | `POST /api/ads/reward` grants on the client's word — **60 credits/day mintable with no ad**, and it has zero test coverage | 🔴 **Live abuse hole** |
 | **C** | Enabling SSV while the client still calls `/api/ads/reward` **double-grants every ad view** | 🟠 Sequencing trap |
+| **D** | Guest welcome bonus is re-minted on every unseen device id — **already live on the billing path** | 🔴 **Live** |
+| **E** | The per-IP new-device limit is **dead code and can never fire** | 🔴 **Live** |
 
-Do **A** first. **B** and **C** are the same cutover and must be ordered carefully, because doing
-them in the wrong order either double-grants or strands users with no credits at all.
+**Do 0 first, and do not enable SSV in the AdMob console until it is done.** A and B/C follow.
+B and C are the same cutover and must be ordered carefully — the wrong order either
+double-grants or strands users with no credits at all.
+
+---
+
+## 0. 🔴🔴 CRITICAL — SSV trusts every AdMob publisher on earth
+
+**This was originally filed below as hardening item H1, "not a blocker". That was wrong, and
+the reasoning behind it was wrong.** Recorded here in full so the mistake is not repeated.
+
+`VERIFIER_KEYS_URL` (`app/services/admob_ssv.py:32`) is
+`https://www.gstatic.com/admob/reward/verifier-keys.json` — a **single global key set shared by
+every AdMob publisher**. There is no per-account or per-app key. So a valid signature proves
+only *"some AdMob server sent this"*, never *"your app sent this"*.
+
+The one field that binds a callback to your inventory is `ad_unit`, and `ads_ssv()` never reads
+it — it reads `custom_data` and `transaction_id` only (`credits.py:285-286`).
+
+**Exploit — no modified client, no reverse engineering, ~15 minutes:**
+
+1. Attacker creates their own AdMob account and a rewarded ad unit.
+2. In *their* console, they point the SSV callback URL at `https://<your-host>/api/ads/ssv`.
+3. Their throwaway app stamps `custom_data` with any wallet they choose.
+4. They watch an ad on their own device. Google signs it with the global key and calls your
+   endpoint. `verify_ssv` returns `True`. You grant 20 credits.
+
+Their cost per grant is one ad impression **on their own account — which Google pays them for**.
+This is not merely free credits; it is an arbitrage funded by your GPU spend. Daily caps do not
+contain it, because the cap key is derived from the attacker-chosen `custom_data` (see A/H2).
+
+**Fix — must land before SSV is switched on:**
+
+```python
+if signed.get("ad_unit") != settings.admob_rewarded_ad_unit_id:
+    logger.warning("admob_ssv_foreign_ad_unit", extra={"ad_unit": signed.get("ad_unit")})
+    return {"status": "ignored"}   # 200, so AdMob's own callback-verify ping still passes
+```
+
+Add `admob_rewarded_ad_unit_id` to `Settings` (the production unit is
+`ca-app-pub-2844061727637796/6754427834`). Pair it with the `timestamp` freshness window from
+H2 — `ad_unit` pinning plus freshness is what actually binds the endpoint to your app.
 
 ---
 
@@ -279,11 +322,68 @@ Only once telemetry shows no shipped client still calls it.
 
 ---
 
+## 5b. Live abuse holes found 2026-08-07 — independent of SSV
+
+These exist **today**, on `main`, whether or not SSV is ever enabled. Two of them are larger
+than anything the guest SSV branch would introduce, so fix them before tuning guest ad caps.
+
+### D. 🔴 The guest welcome bonus is re-minted on every unseen device id
+
+`app/services/credits_service.py:126-132` — `_apply_guest_topup` creates a missing wallet with
+`settings.welcome_credits + amount`, not `amount`:
+
+```python
+transaction.set(ref, {"credits": settings.welcome_credits + amount, ...})
+```
+
+`grant_guest_credits` routes through it, so the *first* grant to any never-seen device id pays
+**60 credits, not 20**. This is **already live on the guest billing path**
+(`billing.py:166`) — a guest purchase from a fresh device id grants `credits + 40` — and the
+guest SSV branch would inherit it.
+
+**Fix:** split creation from top-up. `_apply_guest_topup` creates with `{"credits": amount}`;
+the welcome bonus is issued exactly once, by `get_guest_wallet`. If the organic path needs it,
+add an explicit `include_welcome: bool = False` and pass `True` only from there.
+
+### E. 🔴 The per-IP new-device limit is dead code
+
+`app/core/auth.py:184`, called from `detection.py:162` and `inpainting.py:111`:
+
+```python
+if current_count >= limit:
+    if not token_already_verified:     # ← both call sites pass True
+        ...raise 403 / verify turnstile...
+write_pipe.sadd(ip_key, device_id)     # always runs
+```
+
+**Both and only call sites pass `token_already_verified=True`**, so the enforcement branch is
+unreachable. The function degrades to "record this device id in a Redis set", and it fails open
+when Redis is down (`auth.py:164-165`).
+
+Combined with the fact that `GET /api/user/balance` mints a wallet, the live guest economics
+are: **a fresh `X-Device-ID` on a plain GET yields 40 credits, throttled only at 10 req/min/IP
+— roughly 400 free credits per minute per IP, or 40 free scans.** That is a strictly cheaper
+faucet than any ad-based path, which at least costs an impression.
+
+**Fix:** decide what the limit is for — either pass `token_already_verified=False` at both call
+sites so a Turnstile solve is demanded past the threshold, or delete it so nobody believes it is
+protecting them. Separately: **do not mint welcome credits from a read endpoint.** Create the
+wallet on first *spend*, or require an App Check / Turnstile token to mint one.
+
+### F. 🟠 `is_banned` is written but never read
+
+`credits_service.py:53-56` — `check_ban_status()` has **zero call sites**. Every wallet carries
+`is_banned: False` and nothing consults it. When you identify an account farming credits via any
+of the above, there is no lever to stop them short of a code deploy. Wire it into `/detect`,
+`/inpaint` and both grant paths.
+
+---
+
 ## 6. Hardening backlog (not blockers)
 
 | # | Item | Why |
 |---|---|---|
-| H1 | **No `ad_unit` / `ad_network` validation** | The signature proves *Google* sent it, not *which app*. A signed callback for another app in the same AdMob account is replayable against this endpoint. Pin `ad_unit` to a new `admob_rewarded_unit_id` setting. |
+| ~~H1~~ | ~~No `ad_unit` validation~~ | **PROMOTED TO §0 CRITICAL.** The original entry said "another app in the same AdMob account", which understated it by an order of magnitude — the verifier keys are global to *all* AdMob publishers, so it is any account anywhere. See §0. |
 | H2 | **No freshness window** | `timestamp` is signed but unchecked. The Firestore claim makes replay idempotent *forever*, so this is defence-in-depth, not a hole — but an unbounded-age callback should not grant. |
 | H3 | **No rate limit on `/api/ads/ssv`** | Signature verification is ECDSA + a possible key fetch. Unauthenticated and uncapped = a cheap CPU-burn vector. |
 | H4 | **`reward_amount` / `reward_item` never cross-checked** | Server grants its own constant, which is correct, but a mismatch is a signal worth logging. |
