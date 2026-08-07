@@ -360,22 +360,54 @@ write_pipe.sadd(ip_key, device_id)     # always runs
 unreachable. The function degrades to "record this device id in a Redis set", and it fails open
 when Redis is down (`auth.py:164-165`).
 
-Combined with the fact that `GET /api/user/balance` mints a wallet, the live guest economics
-are: **a fresh `X-Device-ID` on a plain GET yields 40 credits, throttled only at 10 req/min/IP
-— roughly 400 free credits per minute per IP, or 40 free scans.** That is a strictly cheaper
-faucet than any ad-based path, which at least costs an impression.
+Combined with the fact that `GET /api/user/balance` mints a wallet, a fresh `X-Device-ID` on a
+plain GET yields 40 credits, throttled only per-IP.
 
-**Fix:** decide what the limit is for — either pass `token_already_verified=False` at both call
-sites so a Turnstile solve is demanded past the threshold, or delete it so nobody believes it is
-protecting them. Separately: **do not mint welcome credits from a read endpoint.** Create the
-wallet on first *spend*, or require an App Check / Turnstile token to mint one.
+> **Correction, 2026-08-07.** The original text continued "*— roughly 400 free credits per
+> minute per IP, or 40 free scans*". The credits part is right; **the scans part is not.**
+> Minting is free, but *spending* is not: the guest branch of `/detect` and `/inpaint` requires
+> a valid Turnstile token on every call. `passes_app_check_gate` returns `False` when there is
+> no token **and** unconditionally in `monitor` mode (`app_check.py:131-137`), so it cannot
+> currently substitute. Each scan therefore costs one Turnstile solve.
+>
+> That makes this a *bounded* faucet priced at bulk CAPTCHA-solving rates, not a free one. Still
+> worth closing — solve services are cheap — but it is not the cheapest path in the system, and
+> planning against the wrong number leads to fixing the wrong thing.
 
-### F. 🟠 `is_banned` is written but never read
+**Why this is still open after the 2026-08-07 pass.** Both "fixes" are riskier than they look:
 
-`credits_service.py:53-56` — `check_ban_status()` has **zero call sites**. Every wallet carries
-`is_banned: False` and nothing consults it. When you identify an account farming credits via any
-of the above, there is no lever to stop them short of a code deploy. Wire it into `/detect`,
-`/inpaint` and both grant paths.
+- Flipping to `token_already_verified=False` demands a Turnstile solve once an IP crosses
+  `max_new_devices_per_ip` (**3**). That 403s real users behind shared egress — offices, campus
+  and carrier CGNAT, which is most of mobile. The gate is redundant *as written* anyway: the
+  caller has **already** passed Turnstile or App Check by the time it runs, so one solve
+  satisfies it and a farmer paying for solves is unaffected. It would cost legitimate users
+  more than attackers.
+- Not minting from a read endpoint was already tried and reverted — see the comment at
+  `credits.py:117-123`. That gate ran *before* `get_guest_wallet`, so new guests behind a shared
+  IP (and anyone reinstalling, since each reinstall is a fresh device id) got 0 credits instead
+  of 40.
+
+The real fix is a **volume** limit that one CAPTCHA solve cannot satisfy — e.g. cap distinct new
+device ids per IP per 24h and return 429 rather than a solvable challenge, with an allowlist for
+known-shared egress. That is a live-traffic behaviour change on the busiest guest path and needs
+the owner's call plus a metrics window first. **Do not switch enforcement on blind.**
+
+### ~~F. `is_banned` is written but never read~~ ✅ DONE 2026-08-07
+
+Enforced in `deduct_guest_credits`, which is the single choke point every guest spend goes
+through (`/detect` and `/inpaint` both land there). A banned wallet now gets
+`403 {"code": "WALLET_SUSPENDED"}`.
+
+**Not** wired as a `check_ban_status()` call at the routes, which is what this entry originally
+suggested. That would cost a second Firestore read on every request and would leave a TOCTOU
+window — a ban landing between the check and the deduct still gets served. Reading `is_banned`
+and `credits` from one snapshot inside the existing transaction has neither problem.
+`check_ban_status()` is left in place for callers that want a non-spending read.
+
+Behaviour change today: **none**, and that is checked rather than assumed — nothing in the
+codebase writes `is_banned=True` (only `False`, at wallet creation). This ships the lever; it
+does not pull it. Wallets predating the field keep spending, since a missing flag reads as not
+banned — covered by a test, because failing closed there would have taken out the oldest users.
 
 ---
 
