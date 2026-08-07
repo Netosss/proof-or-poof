@@ -266,6 +266,40 @@ class Settings(BaseSettings):
     ad_revenue_per_reward: float = Field(0.015, description="Avg eCPM for a verified ad view")
 
     # ------------------------------------------------------------------ #
+    # AdMob rewarded ads                                                  #
+    # ------------------------------------------------------------------ #
+    admob_rewarded_ad_unit_id: str = Field(
+        "",
+        description=(
+            "Our production rewarded ad unit (ca-app-pub-XXXX/YYYY). SSV callbacks whose "
+            "signed ad_unit does not match are rejected. This is a HARD security boundary, "
+            "not cosmetic: AdMob's SSV verifier keys are a single GLOBAL key set shared by "
+            "every publisher, so a valid signature proves only that some AdMob server sent "
+            "the callback — never that OUR app did. Without this pin, anyone can point their "
+            "own AdMob ad unit's SSV callback at us and mint credits for a wallet they "
+            "choose, paid for by an impression Google pays THEM for. Empty disables the "
+            "grant path entirely (fail closed)."
+        ),
+    )
+    ad_reward_credits: int = Field(20, description="Credits granted per verified ad view")
+    ad_reward_daily_limit: int = Field(3, description="Max ad rewards per subject per UTC day")
+    ad_reward_guest_daily_limit: int = Field(
+        3,
+        description=(
+            "Max ad rewards per guest device per UTC day. Separate from the signed-in limit "
+            "because a guest is throttled only by device-id rotation, whereas a signed-in "
+            "user is throttled by account creation."
+        ),
+    )
+    admob_ssv_max_age_sec: int = Field(
+        3600,
+        description=(
+            "Reject SSV callbacks whose signed timestamp is older than this. Defence in "
+            "depth behind the per-transaction_id claim; 0 disables the check."
+        ),
+    )
+
+    # ------------------------------------------------------------------ #
     # File Size Limits                                                    #
     # ------------------------------------------------------------------ #
     max_image_download_mb: int = Field(50, description="Max MB for URL / data-URI downloads")
