@@ -172,6 +172,116 @@ def test_grant_failure_releases_idempotency_claim(client, mock_redis, monkeypatc
 
 
 # ---------------------------------------------------------------------------
+# Durable idempotency (M4)
+#
+# Redis held the ONLY claim, under a TTL. A flush, an eviction, or just waiting
+# out google_play_order_ttl_sec made every historical order re-grantable by
+# replaying its token.
+# ---------------------------------------------------------------------------
+
+
+def test_already_consumed_purchase_grants_nothing(client, monkeypatch):
+    """
+    consumptionState == 1 means Play already handed this token over and the
+    client consumed it, which only happens after a successful grant. Replaying
+    it must pay out nothing — and this check must not depend on any cache we
+    own, so no Redis state is seeded here.
+    """
+    monkeypatch.setenv("GOOGLE_PLAY_SERVICE_ACCOUNT_JSON", SA_JSON)
+    mock_grant = AsyncMock(return_value=540)
+
+    with _override_auth_user(AUTH_USER):
+        with (
+            patch(
+                "app.api.billing.get_product_purchase",
+                new_callable=AsyncMock,
+                return_value={**VALID_PURCHASE, "consumptionState": 1},
+            ),
+            patch("app.api.billing.grant_credits", mock_grant),
+            patch(
+                "app.api.billing.get_user_balance",
+                new_callable=AsyncMock,
+                return_value=540,
+            ),
+            patch("app.api.billing.log_transaction"),
+        ):
+            response = _post(client)
+
+    assert response.status_code == 200
+    assert response.json()["credits_granted"] == 0
+    mock_grant.assert_not_awaited()
+
+
+def test_redis_flush_does_not_reopen_a_granted_order(client, mock_redis, monkeypatch):
+    """
+    The actual M4 scenario. Grant once, wipe Redis entirely (flush / eviction /
+    TTL expiry are indistinguishable here), replay the same token. Firestore is
+    the system of record now, so the second call must grant nothing.
+    """
+    monkeypatch.setenv("GOOGLE_PLAY_SERVICE_ACCOUNT_JSON", SA_JSON)
+    mock_grant = AsyncMock(return_value=540)
+
+    with _override_auth_user(AUTH_USER):
+        with (
+            patch(
+                "app.api.billing.get_product_purchase",
+                new_callable=AsyncMock,
+                return_value=dict(VALID_PURCHASE),
+            ),
+            patch("app.api.billing.grant_credits", mock_grant),
+            patch(
+                "app.api.billing.get_user_balance",
+                new_callable=AsyncMock,
+                return_value=540,
+            ),
+            patch("app.api.billing.log_transaction"),
+        ):
+            first = _post(client)
+            mock_redis._store.clear()          # <- the whole point
+            second = _post(client)
+
+    assert first.json()["credits_granted"] == 500
+    assert second.status_code == 200
+    assert second.json()["credits_granted"] == 0
+    mock_grant.assert_awaited_once()
+
+
+def test_grant_failure_releases_the_durable_claim_too(client, mock_redis, monkeypatch):
+    """
+    Releasing only the Redis claim would leave the durable one behind, so every
+    retry of a purchase the user PAID for would answer "already granted, 0
+    credits" and the credits would never arrive. That is worse than the
+    double-grant this mechanism exists to prevent, so it gets its own test:
+    fail the grant, then let the retry succeed.
+    """
+    monkeypatch.setenv("GOOGLE_PLAY_SERVICE_ACCOUNT_JSON", SA_JSON)
+    failing = AsyncMock(
+        side_effect=__import__("fastapi").HTTPException(status_code=500, detail="boom")
+    )
+    succeeding = AsyncMock(return_value=540)
+
+    with _override_auth_user(AUTH_USER):
+        with (
+            patch(
+                "app.api.billing.get_product_purchase",
+                new_callable=AsyncMock,
+                return_value=dict(VALID_PURCHASE),
+            ),
+            patch("app.api.billing.log_transaction"),
+        ):
+            with patch("app.api.billing.grant_credits", failing):
+                first = _post(client)
+            with patch("app.api.billing.grant_credits", succeeding):
+                retry = _post(client)
+
+    assert first.status_code == 500
+    # The retry must actually pay out — not report a phantom prior grant.
+    assert retry.status_code == 200
+    assert retry.json()["credits_granted"] == 500
+    succeeding.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
 # Invalid purchases
 # ---------------------------------------------------------------------------
 

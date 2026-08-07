@@ -11,12 +11,14 @@ POST /api/billing/google/verify
 import logging
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from google.cloud.firestore_v1 import SERVER_TIMESTAMP
 from pydantic import BaseModel
 
 from app.config import settings
 from app.core.auth import get_client_ip, validate_device_id
 from app.core.firebase_auth import get_optional_user
 from app.core.rate_limiter import check_rate_limit
+from app.integrations import firebase as firebase_module
 from app.integrations import redis_client as redis_module
 from app.logging_config import user_id_var
 from app.services.credit_engine import get_user_balance, grant_credits
@@ -35,6 +37,73 @@ router = APIRouter(tags=["Billing"])
 
 # ProductPurchase.purchaseState: 0 = purchased, 1 = canceled, 2 = pending.
 PURCHASE_STATE_PURCHASED = 0
+# ProductPurchase.consumptionState: 0 = yet to be consumed, 1 = consumed.
+CONSUMPTION_STATE_CONSUMED = 1
+
+# Durable idempotency. Redis alone was the only thing standing between a
+# purchase token and a second grant, and it holds the claim under a TTL — so a
+# Redis flush, an eviction, or simply waiting out google_play_order_ttl_sec made
+# every historical order re-grantable by replaying its token.
+#
+# Firestore is the system of record; Redis stays in front of it as the cheap
+# race guard (SET NX is one round-trip and settles concurrent retries), but it is
+# no longer the thing that makes double-granting impossible.
+_ORDERS_COLLECTION = "processed_play_orders"
+
+
+async def _durable_order_claim(order_id: str, owner_id: str, credits: int) -> bool:
+    """
+    Claim `order_id` permanently. True if this call won it, False if already
+    granted. Fails CLOSED: if Firestore is unavailable we return False rather
+    than grant, because an unverifiable claim is indistinguishable from a replay.
+    """
+    db = firebase_module.db
+    if not db:
+        logger.error(
+            "google_play_durable_claim_unavailable",
+            extra={"action": "google_play_durable_claim_unavailable", "order_id": order_id},
+        )
+        raise HTTPException(status_code=503, detail="Billing temporarily unavailable")
+
+    ref = db.collection(_ORDERS_COLLECTION).document(order_id)
+    snapshot = await ref.get()
+    if snapshot.exists:
+        return False
+
+    await ref.set({
+        "owner_id": owner_id,
+        "credits": credits,
+        "granted_at": SERVER_TIMESTAMP,
+        # Written so a future voided-purchase reversal (M5) has the owner and the
+        # amount to reverse without re-deriving them from Play.
+        "reversed": False,
+    })
+    return True
+
+
+async def _release_durable_claim(order_id: str) -> None:
+    """
+    Undo a claim whose grant then failed. Best-effort and never raises: it runs
+    inside an exception handler, and masking the original billing error with a
+    cleanup error would hide why the purchase failed.
+    """
+    db = firebase_module.db
+    if not db:
+        return
+    try:
+        await db.collection(_ORDERS_COLLECTION).document(order_id).delete()
+    except Exception as e:
+        # Now genuinely stuck: the grant failed AND the claim survived, so retries
+        # will report "already granted" for an ungranted purchase. Loud on purpose
+        # — this needs a human, and the order_id is the handle to fix it with.
+        logger.error(
+            "google_play_durable_claim_release_failed",
+            extra={
+                "action": "google_play_durable_claim_release_failed",
+                "order_id": order_id,
+                "error": str(e),
+            },
+        )
 
 
 class GoogleVerifyRequest(BaseModel):
@@ -137,6 +206,25 @@ async def verify_google_purchase(
         )
         raise HTTPException(status_code=400, detail="INVALID_PURCHASE")
 
+    # Google's own durable "this was already used" signal, and it outlives any
+    # cache we keep. The client consumes ONLY after we return 200 (see
+    # BillingManager), so a first grant always sees 0 here; seeing 1 means the
+    # token was already granted and consumed, and replaying it must not pay out
+    # again even if every cache we own has been wiped.
+    if purchase.get("consumptionState") == CONSUMPTION_STATE_CONSUMED:
+        balance = await _current_balance(auth_user, owner_id)
+        logger.warning(
+            "google_play_already_consumed",
+            extra={
+                "action": "google_play_already_consumed",
+                "order_id": order_id,
+                "product_id": body.product_id,
+            },
+        )
+        return GoogleVerifyResponse(
+            status="ok", credits_granted=0, new_balance=balance, order_id=order_id
+        )
+
     rc = redis_module.client
     if not rc:
         # Never grant without a working idempotency store — a Redis outage
@@ -159,14 +247,37 @@ async def verify_google_purchase(
             status="ok", credits_granted=0, new_balance=balance, order_id=order_id
         )
 
+    # Durable claim, taken AFTER the Redis claim so the cheap guard settles
+    # concurrent retries first, and BEFORE the grant so a crash between the two
+    # cannot pay out twice. Losing it means Firestore already has this order.
+    if not await _durable_order_claim(order_id, owner_id, credits):
+        balance = await _current_balance(auth_user, owner_id)
+        logger.info(
+            "google_play_duplicate_order_durable",
+            extra={
+                "action": "google_play_duplicate_order_durable",
+                "order_id": order_id,
+                "product_id": body.product_id,
+            },
+        )
+        return GoogleVerifyResponse(
+            status="ok", credits_granted=0, new_balance=balance, order_id=order_id
+        )
+
     try:
         if auth_user:
             new_balance = await grant_credits(owner_id, credits, "google_play_purchase", order_id)
         else:
             new_balance = await grant_guest_credits(owner_id, credits)
     except Exception:
-        # Release the idempotency claim so a client retry can re-grant —
+        # Release BOTH idempotency claims so a client retry can re-grant —
         # otherwise a Firestore hiccup would permanently eat the purchase.
+        #
+        # The durable one matters most here: it is checked before the grant, so
+        # leaving it behind after a failed grant would make every retry return
+        # "already granted, 0 credits" for a purchase the user paid for and never
+        # received. That is strictly worse than the double-grant this whole
+        # mechanism exists to prevent.
         try:
             await rc.delete(order_key)
         except Exception as release_err:
@@ -178,6 +289,7 @@ async def verify_google_purchase(
                     "error": str(release_err),
                 },
             )
+        await _release_durable_claim(order_id)
         raise
 
     log_transaction(

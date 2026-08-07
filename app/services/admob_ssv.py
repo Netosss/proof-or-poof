@@ -16,6 +16,7 @@ Docs: https://developers.google.com/admob/android/rewarded-video-ssv
 import asyncio
 import base64
 import logging
+import time
 from urllib.parse import parse_qsl
 
 import httpx
@@ -38,6 +39,41 @@ _keys_cache: dict[str, str] = {}
 # triggers at most one outbound fetch instead of one per request.
 _keys_fetch_lock = asyncio.Lock()
 
+# --- unknown-key_id stall defence -------------------------------------------
+# /api/ads/ssv is unauthenticated, and an unknown key_id can never be in
+# _keys_cache — so before this, every request carrying a random key_id forced a
+# fresh outbound fetch (10s timeout) while holding the global lock above. The
+# coalescing lock made it worse rather than better: the fetches serialised, so a
+# trickle of junk key_ids stalled SSV for everyone, including real callbacks.
+#
+# Two independent bounds now:
+#   1. a negative cache, so a repeat of the SAME unknown key_id costs nothing;
+#   2. a floor on how often the key set may be refetched AT ALL, so a stream of
+#      DISTINCT unknown key_ids (which defeats a negative cache) cannot drive
+#      more than one fetch per window.
+# Legitimate key rotation is unaffected: Google rotates on the order of months,
+# far slower than this window.
+_KEYS_MIN_REFETCH_SEC = 300.0
+_UNKNOWN_KEY_TTL_SEC = 600.0
+# Bounded so the negative cache is not itself a memory-growth vector.
+_UNKNOWN_KEY_MAX_ENTRIES = 1024
+
+_last_keys_fetch_at: float = 0.0          # time.monotonic() of the last attempt
+_unknown_key_ids: dict[str, float] = {}   # key_id -> monotonic expiry
+
+
+def _note_unknown_key_id(key_id: str, now: float) -> None:
+    """Remember a key_id as unknown, pruning expired entries first."""
+    if len(_unknown_key_ids) >= _UNKNOWN_KEY_MAX_ENTRIES:
+        for k in [k for k, exp in _unknown_key_ids.items() if exp <= now]:
+            del _unknown_key_ids[k]
+        # Still full => every entry is live, i.e. an active flood of distinct
+        # ids. Drop the whole thing rather than grow without bound; the refetch
+        # floor is what actually caps outbound work in that case.
+        if len(_unknown_key_ids) >= _UNKNOWN_KEY_MAX_ENTRIES:
+            _unknown_key_ids.clear()
+    _unknown_key_ids[key_id] = now + _UNKNOWN_KEY_TTL_SEC
+
 
 async def _fetch_keys() -> dict[str, str]:
     async with httpx.AsyncClient(timeout=_KEYS_FETCH_TIMEOUT_SEC, follow_redirects=True) as http:
@@ -54,14 +90,39 @@ async def _fetch_keys() -> dict[str, str]:
 
 
 async def _get_public_key(key_id: str):
+    global _last_keys_fetch_at
+
     pem = _keys_cache.get(key_id)
     if pem is None:
+        now = time.monotonic()
+
+        # Known-unknown: answered without touching the lock or the network.
+        expiry = _unknown_key_ids.get(key_id)
+        if expiry is not None and expiry > now:
+            return None
+
         # Miss -> refresh (covers first use and Google's periodic key rotation).
         # Serialize concurrent misses and re-check under the lock so only the
         # first waiter actually performs the network fetch.
         async with _keys_fetch_lock:
             pem = _keys_cache.get(key_id)
             if pem is None:
+                now = time.monotonic()
+                # Refetch floor. Skipped entirely when the cache is empty, so a
+                # cold start still fetches immediately rather than failing every
+                # callback for the first window.
+                if _keys_cache and (now - _last_keys_fetch_at) < _KEYS_MIN_REFETCH_SEC:
+                    logger.warning(
+                        "admob_ssv_key_refetch_throttled",
+                        extra={
+                            "action": "admob_ssv_key_refetch_throttled",
+                            "key_id": key_id,
+                        },
+                    )
+                    _note_unknown_key_id(key_id, now)
+                    return None
+
+                _last_keys_fetch_at = now
                 try:
                     _keys_cache.update(await _fetch_keys())
                 except Exception as e:
@@ -71,6 +132,8 @@ async def _get_public_key(key_id: str):
                     )
                     return None
                 pem = _keys_cache.get(key_id)
+                if pem is None:
+                    _note_unknown_key_id(key_id, time.monotonic())
     if pem is None:
         # Fetch succeeded but Google's key set has no such key_id (stale/rotated
         # or spoofed). Log it — otherwise it looks identical to a bad signature.
