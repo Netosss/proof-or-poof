@@ -21,18 +21,24 @@ AUTH_USER = {"uid": "user-1", "email": "u@example.com"}
 
 @contextmanager
 def _override_auth_user(user: dict | None):
-    """Temporarily override get_current_user on the FastAPI app."""
-    from app.core.firebase_auth import get_current_user
+    """
+    Temporarily override get_optional_user on the FastAPI app.
+
+    The route moved from get_current_user to get_optional_user so guests can
+    claim ad rewards; overriding the old dependency would no-op and the signed-in
+    assertions below would silently pass as guests.
+    """
+    from app.core.firebase_auth import get_optional_user
     from app.main import app
 
     async def _fake():
         return user
 
-    app.dependency_overrides[get_current_user] = _fake
+    app.dependency_overrides[get_optional_user] = _fake
     try:
         yield
     finally:
-        app.dependency_overrides.pop(get_current_user, None)
+        app.dependency_overrides.pop(get_optional_user, None)
 
 
 # ---------------------------------------------------------------------------
@@ -128,13 +134,54 @@ async def test_failed_grant_releases_the_cap_slot(mock_firebase):
 # ---------------------------------------------------------------------------
 
 
-def test_ads_reward_requires_auth(client):
-    """Bearer-only: a guest gets 401, never a grant."""
-    with patch("app.api.credits._apply_ad_reward", new_callable=AsyncMock) as m_grant:
-        resp = client.post("/api/ads/reward")
+def test_ads_reward_grants_to_a_guest_via_device_id(client):
+    """
+    Regression: guests used to get a bare 401 here, so a guest who watched a
+    full rewarded ad saw "Couldn't add credits" and never got them — while the
+    credits sheet advertised the ad as "No sign-in needed". The guest wallet is
+    keyed on X-Device-ID, exactly as it is for spending.
+    """
+    with _override_auth_user(None):
+        with patch(
+            "app.api.credits._apply_ad_reward",
+            new_callable=AsyncMock,
+            return_value=(20, 1, 20),
+        ) as m_grant:
+            resp = client.post("/api/ads/reward", headers={"X-Device-ID": "device-abc123"})
 
-    assert resp.status_code in (401, 403)
+    assert resp.status_code == 200
+    assert resp.json() == {"credits_granted": 20, "new_balance": 20, "rewards_today": 1}
+    # Must credit the GUEST wallet, not users/{id} — separate collections.
+    m_grant.assert_awaited_once_with("device-abc123", "device")
+
+
+def test_ads_reward_rejects_a_guest_with_no_device_id(client):
+    """No bearer and no device id means no wallet to credit — never a grant."""
+    with _override_auth_user(None):
+        with patch("app.api.credits._apply_ad_reward", new_callable=AsyncMock) as m_grant:
+            resp = client.post("/api/ads/reward")
+
+    assert resp.status_code in (400, 401, 403, 422)
     m_grant.assert_not_awaited()
+
+
+def test_ads_reward_signed_in_user_credits_the_uid_wallet(client):
+    """A bearer must still route to users/{uid}, not the guest collection."""
+    with _override_auth_user(AUTH_USER):
+        with patch(
+            "app.api.credits._apply_ad_reward",
+            new_callable=AsyncMock,
+            return_value=(20, 1, 60),
+        ) as m_grant:
+            resp = client.post(
+                "/api/ads/reward",
+                headers={"Authorization": "Bearer x", "X-Device-ID": "device-abc123"},
+            )
+
+    assert resp.status_code == 200
+    # Device id present too — the bearer must win, or a signed-in user's rewards
+    # would land in a guest wallet they cannot spend from.
+    m_grant.assert_awaited_once_with("user-1", "uid")
 
 
 def test_ads_reward_grants_and_reports_balance(client):

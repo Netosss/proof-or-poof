@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from app.config import settings
 from app.core.auth import get_client_ip, validate_device_id
-from app.core.firebase_auth import get_current_user, get_optional_user
+from app.core.firebase_auth import get_optional_user
 from app.core.rate_limiter import check_rate_limit
 from app.integrations import firebase as firebase_module
 from app.logging_config import user_id_var
@@ -274,27 +274,42 @@ async def _apply_ad_reward(
 
 @router.post("/api/ads/reward", response_model=AdRewardResponse)
 async def ads_reward(
-    user: dict = Depends(get_current_user),
+    device_id: str | None = Header(None, alias="X-Device-ID"),
+    auth_user: dict | None = Depends(get_optional_user),
 ):
     """
-    Grant credits to an authenticated user for watching an ad (client-attested).
+    Grant credits for watching an ad (client-attested), for signed-in users AND
+    guests.
 
-    - Maximum 3 rewards per UTC day (server-side date, never client-provided).
-    - Each reward grants 20 credits.
+    - Authenticated (Authorization: Bearer token): credits users/{uid}.
+    - Guest (no Authorization header): credits guest_wallets/{device_id}.
+    - Each reward grants 20 credits; caps are per UTC day, per subject, and are
+      namespaced by kind so the two wallets can never share a counter.
     - Shares the daily cap doc with the AdMob SSV callback.
+
+    Guests were previously rejected here with a bare 401 from get_current_user,
+    even though `_apply_ad_reward` has always supported kind="device" and the
+    client's credits sheet advertises the ad as "No sign-in needed". The result
+    was that a guest watched a full rewarded ad, AdMob reported the reward as
+    granted, and the app then showed "Couldn't add credits" with the balance
+    unchanged — attention spent for nothing, with no path to ever succeed.
 
     NOTE: this endpoint trusts the client's word that an ad was watched. The
     secure path is /api/ads/ssv (Google-signed). Once SSV is enabled in the
     AdMob console and the client stops calling this endpoint, it can be removed.
-
-    Requires:
-      Authorization: Bearer <firebase_id_token>
     """
-    uid = user["uid"]
-    user_id_var.set(uid)
+    if auth_user:
+        subject_id, kind = auth_user["uid"], "uid"
+    else:
+        # Mirrors /api/user/balance: the device id is the guest wallet's only
+        # identifier, so it must clear the same charset guard before it becomes
+        # a Firestore document id.
+        validate_device_id(device_id)
+        subject_id, kind = device_id, "device"
+    user_id_var.set(subject_id)
 
     try:
-        credits_to_grant, new_count, new_balance = await _apply_ad_reward(uid)
+        credits_to_grant, new_count, new_balance = await _apply_ad_reward(subject_id, kind)
     except HTTPException:
         raise
     except Exception as e:
